@@ -431,27 +431,24 @@ bool PlVkRenderer::initialize(PDECODER_PARAMETERS params)
         presentMode = VK_PRESENT_MODE_FIFO_KHR;
     }
     else {
-        // We want immediate mode for V-Sync disabled if possible
-        if (isPresentModeSupportedByPhysicalDevice(m_Vulkan->phys_device, VK_PRESENT_MODE_IMMEDIATE_KHR)) {
+        // Mailbox provides non-blocking behavior for VRR
+        if (isPresentModeSupportedByPhysicalDevice(m_Vulkan->phys_device, VK_PRESENT_MODE_MAILBOX_KHR)) {
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                        "Using Immediate present mode with V-Sync disabled");
-            presentMode = VK_PRESENT_MODE_IMMEDIATE_KHR;
+                        "Using Mailbox present mode with V-Sync disabled");
+            presentMode = VK_PRESENT_MODE_MAILBOX_KHR;
         }
         else {
-            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                        "Immediate present mode is not supported by the Vulkan driver. Latency may be higher than normal with V-Sync disabled.");
-
             // FIFO Relaxed can tear if the frame is running late
             if (isPresentModeSupportedByPhysicalDevice(m_Vulkan->phys_device, VK_PRESENT_MODE_FIFO_RELAXED_KHR)) {
                 SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                             "Using FIFO Relaxed present mode with V-Sync disabled");
                 presentMode = VK_PRESENT_MODE_FIFO_RELAXED_KHR;
             }
-            // Mailbox at least provides non-blocking behavior
-            else if (isPresentModeSupportedByPhysicalDevice(m_Vulkan->phys_device, VK_PRESENT_MODE_MAILBOX_KHR)) {
+            // Immediate mode for V-Sync disabled can tear
+            else if (isPresentModeSupportedByPhysicalDevice(m_Vulkan->phys_device, VK_PRESENT_MODE_IMMEDIATE_KHR)) {
                 SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                            "Using Mailbox present mode with V-Sync disabled");
-                presentMode = VK_PRESENT_MODE_MAILBOX_KHR;
+                        "Using Immediate present mode with V-Sync disabled");
+                presentMode = VK_PRESENT_MODE_IMMEDIATE_KHR;
             }
             // FIFO is always supported
             else {
