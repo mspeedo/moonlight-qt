@@ -26,13 +26,6 @@ cleanup:
   - /share/ffmpeg
 
 modules:
-  - name: libva
-    buildsystem: meson
-    sources:
-      - type: git
-        url: https://github.com/intel/libva.git
-        tag: 2.22.0
-
   - name: libdrm
     buildsystem: meson
     sources:
@@ -53,8 +46,8 @@ modules:
         url: https://github.com/haasn/libplacebo.git
         # tag: v7.351.0
         commit: 69653ceb2d029de937880662dcfa849eb85f0682
-      # - type: patch
-      #   path: 0001-Vulkan-Don-t-try-to-reuse-old-swapchain.patch
+      #- type: patch
+      #  path: 0001-Vulkan-Don-t-try-to-reuse-old-swapchain.patch
     cleanup:
       - /include
       - /lib/pkgconfig
@@ -166,11 +159,11 @@ modules:
     build-options:
       config-opts:
         - QMAKE_RPATHDIR=/app/lib64:/app/lib
+        - CONFIG+=disable-libva   # disable VAAPI support
       env:
         PKG_CONFIG_PATH: /app/lib64/pkgconfig:/app/lib/pkgconfig:${PKG_CONFIG_PATH}
     sources:
       - type: git
         url: https://github.com/mspeedo/moonlight-qt.git
         branch: stats
-        # commit: e5e296689ca628543b2cd8cf8dfd3b0f024263da
         disable-shallow-clone: true
