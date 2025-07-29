@@ -1779,7 +1779,7 @@ void FFmpegVideoDecoder::decoderThreadProc()
                     }
                     else {
                         // No output data or input data. Let's wait a little bit.
-                        SDL_Delay(2);
+                        std::this_thread::yield();
                     }
                 }
                 else {
