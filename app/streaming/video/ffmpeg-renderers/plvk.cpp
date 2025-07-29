@@ -462,7 +462,7 @@ bool PlVkRenderer::initialize(PDECODER_PARAMETERS params)
     pl_vulkan_swapchain_params vkSwapchainParams = {};
     vkSwapchainParams.surface = m_VkSurface;
     vkSwapchainParams.present_mode = presentMode;
-    vkSwapchainParams.swapchain_depth = 1; // No queued frames
+    vkSwapchainParams.swapchain_depth = params->enableVsync ? 1 : 2; // No queued frames for V-sync, but for VRR, give one image in flight—bound latency to 1 frame but allow GPU pipelining
 #if PL_API_VER >= 338
     vkSwapchainParams.disable_10bit_sdr = true; // Some drivers don't dither 10-bit SDR output correctly
 #endif
@@ -711,7 +711,8 @@ void PlVkRenderer::waitToRender()
         return;
     }
 
-#ifndef Q_OS_WIN32
+//#ifndef Q_OS_WIN32
+#if 0 // fully disable the Linux-only sync for VRR
     // With libplacebo's Vulkan backend, all swap_buffers does is wait for queued
     // presents to finish. This happens to be exactly what we want to do here, since
     // it lets us wait to select a queued frame for rendering until we know that we
