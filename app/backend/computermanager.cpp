@@ -9,8 +9,7 @@
 #include <QThread>
 #include <QThreadPool>
 #include <QCoreApplication>
-
-#include <random>
+#include <QRandomGenerator>
 
 #define SER_HOSTS "hosts"
 #define SER_HOSTS_BACKUP "hostsbackup"
@@ -30,9 +29,9 @@ public:
     }
 
 private:
-    bool tryPollComputer(NvAddress address, bool& changed)
+    bool tryPollComputer(QNetworkAccessManager* nam, NvAddress address, bool& changed)
     {
-        NvHTTP http(address, 0, m_Computer->serverCert);
+        NvHTTP http(address, 0, m_Computer->serverCert, nam);
 
         QString serverInfo;
         try {
@@ -53,9 +52,9 @@ private:
         return true;
     }
 
-    bool updateAppList(bool& changed)
+    bool updateAppList(QNetworkAccessManager* nam, bool& changed)
     {
-        NvHTTP http(m_Computer);
+        NvHTTP http(m_Computer, nam);
 
         QVector<NvApp> appList;
 
@@ -75,6 +74,21 @@ private:
 
     void run() override
     {
+        // Reduce the power and performance impact of our
+        // computer status polling while it's running.
+        setPriority(QThread::LowPriority);
+#if QT_VERSION >= QT_VERSION_CHECK(6, 9, 0)
+        setServiceLevel(QThread::QualityOfService::Eco);
+#endif
+
+        // Share the QNetworkAccessManager to conserve resources when polling.
+        // Each instance creates a worker thread, so sharing them ensures that
+        // we are not spamming a new thread for every single polling attempt.
+        //
+        // Since QThread inherit the priority of the current thread, this also
+        // ensures that the NAM's worker thread will inherit our lower priority.
+        QNetworkAccessManager nam;
+
         // Always fetch the applist the first time
         int pollsSinceLastAppListFetch = POLLS_PER_APPLIST_FETCH;
         while (!isInterruptionRequested()) {
@@ -87,7 +101,7 @@ private:
                         return;
                     }
 
-                    if (tryPollComputer(address, stateChanged)) {
+                    if (tryPollComputer(&nam, address, stateChanged)) {
                         if (!wasOnline) {
                             qInfo() << m_Computer->name << "is now online at" << m_Computer->activeAddress.toString();
                         }
@@ -118,7 +132,7 @@ private:
                     stateChanged = false;
                 }
 
-                if (updateAppList(stateChanged)) {
+                if (updateAppList(&nam, stateChanged)) {
                     pollsSinceLastAppListFetch = 0;
                 }
             }
@@ -715,6 +729,10 @@ void ComputerManager::addNewHostManually(QString address)
         // If there wasn't a port specified, use the default
         addNewHost(NvAddress(url.host(), url.port(DEFAULT_HTTP_PORT)), false);
     }
+    else if (QHostAddress(address).protocol() == QAbstractSocket::IPv6Protocol) {
+        // The user specified an IPv6 literal without URL escaping, so use the default port
+        addNewHost(NvAddress(address, DEFAULT_HTTP_PORT), false);
+    }
     else {
         emit computerAddCompleted(false, false);
     }
@@ -966,14 +984,9 @@ void ComputerManager::addNewHost(NvAddress address, bool mdns, NvAddress mdnsIpv
     QThreadPool::globalInstance()->start(addTask);
 }
 
-// TODO: Use QRandomGenerator when we drop Qt 5.9 support
 QString ComputerManager::generatePinString()
 {
-    std::uniform_int_distribution<int> dist(0, 9999);
-    std::random_device rd;
-    std::mt19937 engine(rd());
-
-    return QString::asprintf("%04u", dist(engine));
+    return QString::asprintf("%04u", QRandomGenerator::system()->bounded(10000));
 }
 
 #include "computermanager.moc"

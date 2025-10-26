@@ -122,7 +122,9 @@ unix:if(!macx|disable-prebuilts) {
                 }
             }
 
-            !disable-cuda {
+            # Disabled by default due to reliability issues. See #1314.
+            # CUDA interop is superseded by VDPAU and Vulkan Video.
+            enable-cuda {
                 packagesExist(ffnvcodec) {
                     PKGCONFIG += ffnvcodec
                     CONFIG += cuda
@@ -157,20 +159,16 @@ win32 {
     CONFIG += ffmpeg libplacebo
 }
 win32:!winrt {
-    CONFIG += soundio discord-rpc
+    CONFIG += discord-rpc
 }
 macx {
     !disable-prebuilts {
-        LIBS += -lssl.3 -lcrypto.3 -lavcodec.61 -lavutil.59 -lswscale.8 -lopus -framework SDL2 -framework SDL2_ttf
+        LIBS += -lssl.3 -lcrypto.3 -lavcodec.62 -lavutil.60 -lswscale.9 -lopus -framework SDL2 -framework SDL2_ttf
         CONFIG += discord-rpc
     }
 
     LIBS += -lobjc -framework VideoToolbox -framework AVFoundation -framework CoreVideo -framework CoreGraphics -framework CoreMedia -framework AppKit -framework Metal -framework QuartzCore
-
-    # For libsoundio
-    LIBS += -framework CoreAudio -framework AudioUnit
-
-    CONFIG += ffmpeg soundio
+    CONFIG += ffmpeg
 }
 
 SOURCES += \
@@ -331,9 +329,11 @@ libdrm {
     HEADERS += streaming/video/ffmpeg-renderers/drm.h
 
     linux {
-        message(Master hooks enabled)
-        SOURCES += masterhook.c masterhook_internal.c
-        LIBS += -ldl
+        !disable-masterhooks {
+            message(Master hooks enabled)
+            SOURCES += masterhook.c masterhook_internal.c
+            LIBS += -ldl -pthread
+        }
     }
 }
 cuda {
@@ -415,13 +415,6 @@ macx {
 
     HEADERS += \
         streaming/video/ffmpeg-renderers/vt.h
-}
-soundio {
-    message(libsoundio audio renderer selected)
-
-    DEFINES += HAVE_SOUNDIO SOUNDIO_STATIC_LIBRARY
-    SOURCES += streaming/audio/renderers/soundioaudiorenderer.cpp
-    HEADERS += streaming/audio/renderers/soundioaudiorenderer.h
 }
 discord-rpc {
     message(Discord integration enabled)
@@ -512,15 +505,6 @@ else:unix: LIBS += -L$$OUT_PWD/../qmdnsengine/ -lqmdnsengine
 
 INCLUDEPATH += $$PWD/../qmdnsengine/qmdnsengine/src/include $$PWD/../qmdnsengine
 DEPENDPATH += $$PWD/../qmdnsengine/qmdnsengine/src/include $$PWD/../qmdnsengine
-
-soundio {
-    win32:CONFIG(release, debug|release): LIBS += -L$$OUT_PWD/../soundio/release/ -lsoundio
-    else:win32:CONFIG(debug, debug|release): LIBS += -L$$OUT_PWD/../soundio/debug/ -lsoundio
-    else:unix: LIBS += -L$$OUT_PWD/../soundio/ -lsoundio
-
-    INCLUDEPATH += $$PWD/../soundio/libsoundio
-    DEPENDPATH += $$PWD/../soundio/libsoundio
-}
 
 win32:CONFIG(release, debug|release): LIBS += -L$$OUT_PWD/../h264bitstream/release/ -lh264bitstream
 else:win32:CONFIG(debug, debug|release): LIBS += -L$$OUT_PWD/../h264bitstream/debug/ -lh264bitstream
