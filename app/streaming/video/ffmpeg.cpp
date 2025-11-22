@@ -866,8 +866,6 @@ void FFmpegVideoDecoder::stringifyVideoStats(VIDEO_STATS& stats, char* output, i
             offset += ret;
         }
 
-        double avgVideoMbps = m_bwTracker.GetAverageMbps();
-        double peakVideoMbps = m_bwTracker.GetPeakMbps();
         const RTP_VIDEO_STATS* rtpVideoStats = LiGetRTPVideoStats();
         double fecOverhead = (double)rtpVideoStats->packetCountFec * 1.0 / (rtpVideoStats->packetCountVideo + rtpVideoStats->packetCountFec);
         double fecMbps = avgVideoMbps * fecOverhead;
@@ -881,7 +879,6 @@ void FFmpegVideoDecoder::stringifyVideoStats(VIDEO_STATS& stats, char* output, i
                        avgVideoMbps + fecMbps,
                        avgVideoMbps,
                        fecMbps,
-                       m_bwTracker.GetWindowSeconds(),
                        peakVideoMbps + (peakVideoMbps * fecOverhead),
                        stats.receivedFps,
                        stats.decodedFps,
@@ -1864,7 +1861,6 @@ int FFmpegVideoDecoder::submitDecodeUnit(PDECODE_UNIT du)
         // Any frame number greater than m_LastFrameNumber + 1 represents a dropped frame
         m_ActiveWndVideoStats.networkDroppedFrames += du->frameNumber - (m_LastFrameNumber + 1);
         m_ActiveWndVideoStats.totalFrames += du->frameNumber - (m_LastFrameNumber + 1);
-        m_bwTracker.AddBytes(du->fullLength);
         m_LastFrameNumber = du->frameNumber;
     }
 
