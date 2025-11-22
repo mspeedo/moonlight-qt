@@ -866,20 +866,11 @@ void FFmpegVideoDecoder::stringifyVideoStats(VIDEO_STATS& stats, char* output, i
             offset += ret;
         }
 
-        const RTP_VIDEO_STATS* rtpVideoStats = LiGetRTPVideoStats();
-        double fecOverhead = (double)rtpVideoStats->packetCountFec * 1.0 / (rtpVideoStats->packetCountVideo + rtpVideoStats->packetCountFec);
-        double fecMbps = avgVideoMbps * fecOverhead;
-
         ret = snprintf(&output[offset],
                        length - offset,
-                       "Bitrate: %.1f Mbps (%.1f/%.1f video/FEC) Peak (%us): %.1f\n"
                        "Incoming frame rate from network: %.2f FPS\n"
                        "Decoding frame rate: %.2f FPS\n"
                        "Rendering frame rate: %.2f FPS\n",
-                       avgVideoMbps + fecMbps,
-                       avgVideoMbps,
-                       fecMbps,
-                       peakVideoMbps + (peakVideoMbps * fecOverhead),
                        stats.receivedFps,
                        stats.decodedFps,
                        stats.renderedFps);
