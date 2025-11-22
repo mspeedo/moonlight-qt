@@ -202,6 +202,7 @@ SOURCES += \
     streaming/audio/renderers/sdlaud.cpp \
     gui/computermodel.cpp \
     gui/appmodel.cpp \
+    streaming/bandwidth.cpp \
     streaming/streamutils.cpp \
     backend/autoupdatechecker.cpp \
     path.cpp \
@@ -240,6 +241,7 @@ HEADERS += \
     gui/computermodel.h \
     gui/appmodel.h \
     streaming/video/decoder.h \
+    streaming/bandwidth.h \
     streaming/streamutils.h \
     backend/autoupdatechecker.h \
     path.h \

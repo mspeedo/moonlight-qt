@@ -10,6 +10,7 @@ struct CscParams
 {
     float3 matrix[3];
     float3 offsets;
+    float2 chromaOffset;
     float bitnessScaleFactor;
 };
 
@@ -25,8 +26,10 @@ fragment float4 ps_draw_biplanar(Vertex v [[ stage_in ]],
                                  texture2d<float> luminancePlane [[ texture(0) ]],
                                  texture2d<float> chrominancePlane [[ texture(1) ]])
 {
+    float2 chromaOffset = float2(cscParams.chromaOffset.x / luminancePlane.get_width(),
+                                 cscParams.chromaOffset.y / luminancePlane.get_height());
     float3 yuv = float3(luminancePlane.sample(s, v.texCoords).r,
-                        chrominancePlane.sample(s, v.texCoords).rg);
+                        chrominancePlane.sample(s, v.texCoords + chromaOffset).rg);
     yuv *= cscParams.bitnessScaleFactor;
     yuv -= cscParams.offsets;
 
@@ -43,9 +46,11 @@ fragment float4 ps_draw_triplanar(Vertex v [[ stage_in ]],
                                   texture2d<float> chrominancePlaneU [[ texture(1) ]],
                                   texture2d<float> chrominancePlaneV [[ texture(2) ]])
 {
+    float2 chromaOffset = float2(cscParams.chromaOffset.x / luminancePlane.get_width(),
+                                 cscParams.chromaOffset.y / luminancePlane.get_height());
     float3 yuv = float3(luminancePlane.sample(s, v.texCoords).r,
-                        chrominancePlaneU.sample(s, v.texCoords).r,
-                        chrominancePlaneV.sample(s, v.texCoords).r);
+                        chrominancePlaneU.sample(s, v.texCoords + chromaOffset).r,
+                        chrominancePlaneV.sample(s, v.texCoords + chromaOffset).r);
     yuv *= cscParams.bitnessScaleFactor;
     yuv -= cscParams.offsets;
 

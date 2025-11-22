@@ -28,8 +28,6 @@ private:
     unsigned compileShader(const char* vertexShaderSrc, const char* fragmentShaderSrc);
     bool compileShaders();
     bool specialize();
-    const float *getColorOffsets(const AVFrame* frame);
-    const float *getColorMatrix(const AVFrame* frame);
     static int loadAndBuildShader(int shaderType, const char *filename);
 
     AVPixelFormat m_EGLImagePixelFormat;
@@ -61,10 +59,11 @@ private:
 
 #define NV12_PARAM_YUVMAT 0
 #define NV12_PARAM_OFFSET 1
-#define NV12_PARAM_PLANE1 2
-#define NV12_PARAM_PLANE2 3
+#define NV12_PARAM_CHROMA_OFFSET 2
+#define NV12_PARAM_PLANE1 3
+#define NV12_PARAM_PLANE2 4
 #define OPAQUE_PARAM_TEXTURE 0
-    int m_ShaderProgramParams[4];
+    int m_ShaderProgramParams[5];
 
 #define OVERLAY_PARAM_TEXTURE 0
     int m_OverlayShaderProgramParams[1];
