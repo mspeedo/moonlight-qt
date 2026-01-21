@@ -135,9 +135,15 @@ bool VDPAURenderer::initialize(PDECODER_PARAMETERS params)
     m_VideoWidth = params->width;
     m_VideoHeight = params->height;
 
+    char* displayName = nullptr;
+#ifdef HAS_X11
+    SDL_assert(info.subsystem == SDL_SYSWM_X11);
+    displayName = XDisplayString(info.info.x11.display);
+#endif
+
     err = av_hwdevice_ctx_create(&m_HwContext,
                                  AV_HWDEVICE_TYPE_VDPAU,
-                                 nullptr, nullptr, 0);
+                                 displayName, nullptr, 0);
 
 #if defined(APP_IMAGE) || defined(USE_FALLBACK_DRIVER_PATHS)
     // AppImages will be running with our libvdpau.so which means they don't know about
@@ -453,13 +459,6 @@ void VDPAURenderer::notifyOverlayUpdated(Overlay::OverlayType type)
         m_OverlayRect[type] = overlayRect;
         SDL_UnlockMutex(m_OverlayMutex);
     }
-}
-
-bool VDPAURenderer::needsTestFrame()
-{
-    // We need a test frame to see if this VDPAU driver
-    // supports the profile used for streaming
-    return true;
 }
 
 int VDPAURenderer::getDecoderColorspace()

@@ -13,6 +13,11 @@
 #include <QTemporaryFile>
 #include <QRegularExpression>
 
+#ifdef Q_OS_UNIX
+#include <sys/socket.h>
+#include <signal.h>
+#endif
+
 // Don't let SDL hook our main function, since Qt is already
 // doing the same thing. This needs to be before any headers
 // that might include SDL.h themselves.
@@ -320,6 +325,75 @@ LONG WINAPI UnhandledExceptionHandler(struct _EXCEPTION_POINTERS *ExceptionInfo)
 
 #endif
 
+#ifdef Q_OS_UNIX
+
+static int signalFds[2];
+
+void handleSignal(int sig)
+{
+    send(signalFds[0], &sig, sizeof(sig), 0);
+}
+
+int SDLCALL signalHandlerThread(void* data)
+{
+    Q_UNUSED(data);
+
+    int sig;
+    while (recv(signalFds[1], &sig, sizeof(sig), MSG_WAITALL) == sizeof(sig)) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "Received signal: %d", sig);
+
+        Session* session;
+        switch (sig) {
+        case SIGINT:
+        case SIGTERM:
+            // Check if we have an active streaming session
+            session = Session::get();
+            if (session != nullptr) {
+                if (sig == SIGTERM) {
+                    // If this is a SIGTERM, set the flag to quit
+                    session->setShouldExit();
+                }
+
+                // Stop the streaming session
+                session->interrupt();
+            }
+            else {
+                // If we're not streaming, we'll close the whole app
+                QCoreApplication::instance()->quit();
+            }
+            break;
+
+        default:
+            Q_UNREACHABLE();
+        }
+    }
+
+    return 0;
+}
+
+void configureSignalHandlers()
+{
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, signalFds) == -1) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "socketpair() failed: %d",
+                     errno);
+        return;
+    }
+
+    // Create a thread to handle our signals safely outside of signal context
+    SDL_Thread* thread = SDL_CreateThread(signalHandlerThread, "Signal Handler", nullptr);
+    SDL_DetachThread(thread);
+
+    struct sigaction sa = {};
+    sa.sa_handler = handleSignal;
+    sa.sa_flags = SA_RESTART;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGINT, &sa, nullptr);
+    sigaction(SIGTERM, &sa, nullptr);
+}
+
+#endif
+
 int main(int argc, char *argv[])
 {
     SDL_SetMainReady();
@@ -418,9 +492,9 @@ int main(int argc, char *argv[])
 #endif
 
     // We keep this at function scope to ensure it stays around while we're running,
-    // becaue the Qt QPA will need to read it. Since the temporary file is only
+    // because the Qt QPA will need to read it. Since the temporary file is only
     // created when open() is called, this doesn't do any harm for other platforms.
-    QTemporaryFile eglfsConfigFile("eglfs_override_XXXXXX.conf");
+    QTemporaryFile eglfsConfigFile;
 
     // Avoid using High DPI on EGLFS. It breaks font rendering.
     // https://bugreports.qt.io/browse/QTBUG-64377
@@ -463,6 +537,7 @@ int main(int argc, char *argv[])
                         qInfo() << "Overriding default Qt EGLFS card selection to" << cardOverride;
                         QTextStream(&eglfsConfigFile) << "{ \"device\": \"" << cardOverride << "\" }";
                         qputenv("QT_QPA_EGLFS_KMS_CONFIG", eglfsConfigFile.fileName().toUtf8());
+                        eglfsConfigFile.close();
                     }
                 }
             }
@@ -475,12 +550,27 @@ int main(int argc, char *argv[])
 #endif
     }
 
-#ifndef Q_PROCESSOR_X86
+    bool forceGles;
+    if (!Utils::getEnvironmentVariableOverride("FORCE_QT_GLES", &forceGles)) {
+        forceGles = WMUtils::isRunningNvidiaProprietaryDriverX11() ||
+                    !WMUtils::supportsDesktopGLWithEGL();
+    }
+    if (forceGles) {
+        // The Nvidia proprietary driver causes Qt to render a black window when using
+        // the default Desktop GL profile with EGL. AS a workaround, we default to
+        // OpenGL ES when running on Nvidia on X11.
+        // https://qt-project.atlassian.net/browse/QTBUG-106065
+        QSurfaceFormat fmt;
+        fmt.setRenderableType(QSurfaceFormat::OpenGLES);
+        QSurfaceFormat::setDefaultFormat(fmt);
+    }
+
     // Some ARM and RISC-V embedded devices don't have working GLX which can cause
     // SDL to fail to find a working OpenGL implementation at all. Let's force EGL
-    // on non-x86 platforms, since GLX is deprecated anyway.
+    // on all platforms for both SDL and Qt. This also avoids GLX-EGL interop issues
+    // when trying to use EGL on the main thread after Qt uses GLX.
     SDL_SetHint(SDL_HINT_VIDEO_X11_FORCE_EGL, "1");
-#endif
+    qputenv("QT_XCB_GL_INTEGRATION", "xcb_egl");
 
 #ifdef Q_OS_MACOS
     // This avoids using the default keychain for SSL, which may cause
@@ -609,6 +699,14 @@ int main(int argc, char *argv[])
     if (QGuiApplication::platformName() == "eglfs" || QGuiApplication::platformName() == "linuxfb") {
         qputenv("SDL_VIDEODRIVER", "kmsdrm");
     }
+#endif
+
+#ifdef Q_OS_UNIX
+    // Register signal handlers to arbitrate between SDL and Qt.
+    // NB: This has to be done after the QGuiApplication is constructed to
+    // ensure Qt has already installed its VT signals before we override
+    // some of them with our own.
+    configureSignalHandlers();
 #endif
 
 #ifdef Q_OS_WIN32
@@ -828,6 +926,7 @@ int main(int argc, char *argv[])
 
     if (hasGUI) {
         engine.rootContext()->setContextProperty("initialView", initialView);
+        engine.rootContext()->setContextProperty("runConfigChecks", commandLineParserResult == GlobalCommandLineParser::NormalStartRequested);
 
         // Load the main.qml file
         engine.load(QUrl(QStringLiteral("qrc:/gui/main.qml")));
