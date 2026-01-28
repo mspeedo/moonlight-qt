@@ -1,0 +1,166 @@
+app-id: com.moonlight_stream.Moonlight
+runtime: org.kde.Platform
+runtime-version: '6.9'
+sdk: org.kde.Sdk
+command: moonlight
+rename-icon: moonlight
+finish-args:
+  - --share=network
+  - --socket=fallback-x11
+  - --socket=wayland
+  - --share=ipc
+  - --socket=pulseaudio
+  - --device=all
+  - --talk-name=org.freedesktop.ScreenSaver
+  - --env=IGNORE_RFI_LATENCY_BUG=1
+  - --env=QT_QUICK_CONTROLS_STYLE=Material
+  - --env=LIBVA_DRIVER_NAME=
+  - --unset-env=LIBVA_DRIVER_NAME
+  - --env=LIBVA_DRIVERS_PATH=
+  - --unset-env=LIBVA_DRIVERS_PATH
+  - --filesystem=xdg-run/gamescope-0
+  - --filesystem=host-os:ro
+cleanup:
+  - /include
+  - '*.a'
+  - /share/ffmpeg
+
+modules:
+  - name: libdrm
+    buildsystem: meson
+    sources:
+      - type: git
+        url: https://gitlab.freedesktop.org/mesa/drm.git
+        tag: libdrm-2.4.125
+
+  - name: libplacebo
+    buildsystem: meson
+    build-options:
+      config-opts:
+        - -Ddemos=false
+        - -Dvulkan=enabled
+        - -Dopengl=disabled
+        - -Dshaderc=enabled
+    sources:
+      - type: git
+        url: https://github.com/haasn/libplacebo.git
+        # tag: v7.351.0
+        commit: 69653ceb2d029de937880662dcfa849eb85f0682
+      #- type: patch
+      #  path: 0001-Vulkan-Don-t-try-to-reuse-old-swapchain.patch
+    cleanup:
+      - /include
+      - /lib/pkgconfig
+
+  - name: libdecor
+    buildsystem: meson
+    build-options:
+      config-opts:
+        - -Ddemo=false
+    sources:
+      - type: git
+        url: https://gitlab.freedesktop.org/libdecor/libdecor.git
+        tag: 0.2.2
+        commit: 7807ae3480f5c6a37c5e8505d94af1e764aaf704
+
+  - name: SDL2
+    build-options:
+      config-opts:
+        - --prefix=/app
+        - --disable-arts
+        - --disable-esd
+        - --disable-nas
+        - --disable-alsa
+        - --disable-oss
+        - --disable-sndio
+        - --disable-rpath
+        - --disable-static
+    sources:
+      - type: git
+        url: https://github.com/libsdl-org/SDL.git
+        # tag: v2.32.8
+        commit: 98d1f3a45aae568ccd6ed5fec179330f47d4d356
+
+  - name: ffnvcodec
+    no-autogen: true
+    make-install-args:
+      - PREFIX=/app
+    sources:
+      - type: git
+        url: https://git.videolan.org/git/ffmpeg/nv-codec-headers.git
+        tag: n11.0.10.3
+        commit: 625b3199e94db49e3bb0dc797fc4cffbf7115d81
+
+  - name: dav1d
+    buildsystem: meson
+    config-opts:
+      - -Denable_tools=false
+      - -Denable_tests=false
+    sources:
+      - type: git
+        url: https://code.videolan.org/videolan/dav1d.git
+        tag: 1.5.1
+        commit: 42b2b24fb8819f1ed3643aa9cf2a62f03868e3aa
+
+  - name: ffmpeg
+    build-options:
+      config-opts:
+        - --fatal-warnings
+        - --disable-stripping
+        - --enable-pic
+        - --enable-shared
+        - --disable-static
+        - --disable-all
+        - --enable-avcodec
+        - --enable-avformat
+        - --enable-swscale
+        - --enable-decoder=h264
+        - --enable-decoder=hevc
+        - --enable-decoder=av1
+        - --enable-hwaccel=h264_vaapi
+        - --enable-hwaccel=hevc_vaapi
+        - --enable-hwaccel=av1_vaapi
+        - --enable-hwaccel=h264_vdpau
+        - --enable-hwaccel=hevc_vdpau
+        - --enable-hwaccel=av1_vdpau
+        - --enable-nvdec
+        - --enable-hwaccel=h264_nvdec
+        - --enable-hwaccel=hevc_nvdec
+        - --enable-hwaccel=av1_nvdec
+        - --enable-libdrm
+        - --enable-hwaccel=h264_vulkan
+        - --enable-hwaccel=hevc_vulkan
+        - --enable-hwaccel=av1_vulkan
+        - --enable-decoder=h264_v4l2m2m
+        - --enable-decoder=hevc_v4l2m2m
+        - --enable-libdav1d
+        - --enable-decoder=libdav1d
+    sources:
+      - type: git
+        url: https://github.com/FFmpeg/FFmpeg.git
+        tag: n8.0
+        commit: 140fd653aed8cad774f991ba083e2d01e86420c7
+
+  - name: gamescope-wsi
+    buildsystem: simple
+    build-commands:
+      - install -Dm755 VkLayer_FROG_gamescope_wsi.x86_64.json /app/share/vulkan/implicit_layer.d/VkLayer_FROG_gamescope_wsi.x86_64.json
+    only-arches:
+      - x86_64
+    sources:
+      - type: file
+        path: VkLayer_FROG_gamescope_wsi.x86_64.json
+
+  - name: moonlight
+    buildsystem: qmake
+    build-options:
+      config-opts:
+        - QMAKE_RPATHDIR=/app/lib64:/app/lib
+        - CONFIG+=disable-libva   # disable VAAPI support
+      env:
+        PKG_CONFIG_PATH: /app/lib64/pkgconfig:/app/lib/pkgconfig:${PKG_CONFIG_PATH}
+    sources:
+      - type: git
+        url: https://github.com/mspeedo/moonlight-qt.git
+        branch: stats
+        disable-shallow-clone: true
