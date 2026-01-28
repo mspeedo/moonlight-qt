@@ -162,5 +162,5 @@ modules:
     sources:
       - type: git
         url: https://github.com/mspeedo/moonlight-qt.git
-        branch: stats
+        branch: vrr
         disable-shallow-clone: true
