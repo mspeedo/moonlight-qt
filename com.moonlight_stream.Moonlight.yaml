@@ -157,6 +157,7 @@ modules:
       config-opts:
         - QMAKE_RPATHDIR=/app/lib64:/app/lib
         - CONFIG+=disable-libva   # disable VAAPI support
+        - QMAKE_CXXFLAGS+=-DDISPLAY_BITRATE
       env:
         PKG_CONFIG_PATH: /app/lib64/pkgconfig:/app/lib/pkgconfig:${PKG_CONFIG_PATH}
     sources:
