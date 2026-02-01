@@ -1,6 +1,6 @@
 app-id: com.moonlight_stream.Moonlight
 runtime: org.kde.Platform
-runtime-version: '6.9'
+runtime-version: '6.10'
 sdk: org.kde.Sdk
 command: moonlight
 rename-icon: moonlight
@@ -21,19 +21,12 @@ finish-args:
   - --filesystem=xdg-run/gamescope-0
   - --filesystem=host-os:ro
 cleanup:
-  - /include
   - '*.a'
+  - /include
   - /lib/pkgconfig
   - /share/ffmpeg
 
 modules:
-  - name: libdrm
-    buildsystem: meson
-    sources:
-      - type: git
-        url: https://gitlab.freedesktop.org/mesa/drm.git
-        tag: libdrm-2.4.131
-
   - name: libplacebo
     buildsystem: meson
     build-options:
@@ -47,8 +40,6 @@ modules:
         url: https://github.com/haasn/libplacebo.git
         # tag: v7.351.0 not working
         commit: 1dcaea8b601aa969ffd5bfa70088957ce3eaa273
-      #- type: patch
-      #  path: 0001-Vulkan-Don-t-try-to-reuse-old-swapchain.patch
 
   - name: libdecor
     buildsystem: meson
@@ -60,33 +51,42 @@ modules:
         url: https://gitlab.freedesktop.org/libdecor/libdecor.git
         tag: 0.2.5
 
-  - name: SDL2
+  - name: SDL3
+    buildsystem: cmake-ninja
+    builddir: true
     build-options:
       config-opts:
-        - --prefix=/app
-        - --disable-arts
-        - --disable-esd
-        - --disable-nas
-        # - --disable-alsa
-        - --disable-oss
-        - --disable-sndio
-        - --disable-rpath
-        - --disable-static
-        - --disable-hidapi
+        - -DSDL_ALSA=OFF
+        - -DSDL_RPATH=OFF
+        - -DSDL_KMSDRM=OFF
+        - -DSDL_INSTALL_DOCS=OFF
+        - -DSDL_TEST_LIBRARY=OFF
     sources:
       - type: git
         url: https://github.com/libsdl-org/SDL.git
-        tag: release-2.32.10
+        # branch: release-3.4.x
+        commit: 3cf15dc222de5ed8d12cc79556c4c18daecb3278
 
-  # - name: ffnvcodec
-  #   no-autogen: true
-  #   make-install-args:
-  #     - PREFIX=/app
-  #   sources:
-  #     - type: git
-  #       url: https://git.videolan.org/git/ffmpeg/nv-codec-headers.git
-  #       tag: n11.0.10.3
-  #       commit: 625b3199e94db49e3bb0dc797fc4cffbf7115d81
+  - name: SDL2-compat
+    buildsystem: cmake-ninja
+    builddir: true
+    build-options:
+      config-opts:
+        - -DSDL2COMPAT_TESTS=OFF
+    sources:
+      - type: git
+        url: https://github.com/libsdl-org/sdl2-compat.git
+        commit: 1c8ece4de9db96d01f99296c26a87a4cabb72f54
+
+  - name: SDL2_ttf
+    build-options:
+      config-opts:
+        - --disable-rpath
+        - --disable-static
+    sources:
+      - type: archive
+        url: https://github.com/libsdl-org/SDL_ttf/releases/download/release-2.22.0/SDL2_ttf-2.22.0.tar.gz
+        sha256: d48cbd1ce475b9e178206bf3b72d56b66d84d44f64ac05803328396234d67723
 
   - name: dav1d
     buildsystem: meson
@@ -132,8 +132,9 @@ modules:
         - --enable-libdav1d
     sources:
       - type: git
-        url: https://github.com/FFmpeg/FFmpeg.git
-        tag: n8.0.1
+        url: https://github.com/cgutman/FFmpeg.git
+        # branch: moonlight_8.0.1_r2
+        commit: 188067dedb120241a5c473c7178fa28233566f12
 
   - name: gamescope-wsi
     buildsystem: simple
@@ -150,6 +151,8 @@ modules:
     build-options:
       config-opts:
         - QMAKE_RPATHDIR=/app/lib64:/app/lib
+        - CONFIG+=disable-cuda
+        - CONFIG+=disable-libdrm
         - CONFIG+=disable-libva   # disable VAAPI support
         - QMAKE_CXXFLAGS+=-DDISPLAY_BITRATE  # enable bitrate stats in stream OSD
       env:
