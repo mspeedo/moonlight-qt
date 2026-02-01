@@ -891,6 +891,9 @@ void FFmpegVideoDecoder::stringifyVideoStats(VIDEO_STATS& stats, char* output, i
 #ifdef DISPLAY_BITRATE
             double avgVideoMbps = m_BwTracker.GetAverageMbps();
             double peakVideoMbps = m_BwTracker.GetPeakMbps();
+            const RTP_VIDEO_STATS* rtpVideoStats = LiGetRTPVideoStats();
+            double fecOverhead = (double)rtpVideoStats->packetCountFec * 1.0 / (rtpVideoStats->packetCountVideo + rtpVideoStats->packetCountFec);
+            double fecMbps = avgVideoMbps * fecOverhead;
 #endif
 
             ret = snprintf(&output[offset],
@@ -898,6 +901,7 @@ void FFmpegVideoDecoder::stringifyVideoStats(VIDEO_STATS& stats, char* output, i
                            "Video stream: %dx%d %.2f FPS (Codec: %s)\n"
 #ifdef DISPLAY_BITRATE
                            "Bitrate: %.1f Mbps, Peak (%us): %.1f\n"
+                           "Bitrate: %.1f Mbps (%.1f/%.1f video/FEC) Peak (%us): %.1f\n"
 #endif
                            ,
                            m_VideoDecoderCtx->width,
@@ -906,9 +910,11 @@ void FFmpegVideoDecoder::stringifyVideoStats(VIDEO_STATS& stats, char* output, i
                            codecString
 #ifdef DISPLAY_BITRATE
                            ,
+                           avgVideoMbps + fecMbps,
                            avgVideoMbps,
+                           fecMbps,
                            m_BwTracker.GetWindowSeconds(),
-                           peakVideoMbps
+                           peakVideoMbps + (peakVideoMbps * fecOverhead)
 #endif
                            );
             if (ret < 0 || ret >= length - offset) {
