@@ -900,7 +900,6 @@ void FFmpegVideoDecoder::stringifyVideoStats(VIDEO_STATS& stats, char* output, i
                            length - offset,
                            "Video stream: %dx%d %.2f FPS (Codec: %s)\n"
 #ifdef DISPLAY_BITRATE
-                           "Bitrate: %.1f Mbps, Peak (%us): %.1f\n"
                            "Bitrate: %.1f Mbps (%.1f/%.1f video/FEC) Peak (%us): %.1f\n"
 #endif
                            ,
