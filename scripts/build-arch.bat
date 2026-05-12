@@ -25,6 +25,12 @@ if /I "%BUILD_CONFIG%"=="debug" (
                 echo Signed release builds must not have unstaged changes!
                 exit /b 1
             )
+
+            echo Updating dependencies
+            powershell %cd%\setup-deps.ps1
+            if !ERRORLEVEL! NEQ 0 (
+                exit /b 1
+            )
         ) else (
             echo Invalid build configuration - expected 'debug' or 'release'
             echo Usage: scripts\build-arch.bat ^(release^|debug^)
@@ -222,7 +228,7 @@ echo Deploying Qt dependencies
 %WINDEPLOYQT_CMD% --dir %DEPLOY_FOLDER% --%BUILD_CONFIG% --qmldir %SOURCE_ROOT%\app\gui --no-opengl-sw --no-compiler-runtime --no-sql %WINDEPLOYQT_ARGS% %BUILD_FOLDER%\app\%BUILD_CONFIG%\Moonlight.exe
 if !ERRORLEVEL! NEQ 0 goto Error
 
-echo Deleting unused styles
+echo Deleting unused files
 rem Qt 5.x directories
 rmdir /s /q %DEPLOY_FOLDER%\QtQuick\Controls.2\Fusion
 rmdir /s /q %DEPLOY_FOLDER%\QtQuick\Controls.2\Imagine
@@ -234,6 +240,8 @@ rmdir /s /q %DEPLOY_FOLDER%\qml\QtQuick\Controls\Universal
 rmdir /s /q %DEPLOY_FOLDER%\qml\QtQuick\Controls\Windows
 rmdir /s /q %DEPLOY_FOLDER%\qml\QtQuick\Controls\FluentWinUI3
 rmdir /s /q %DEPLOY_FOLDER%\qml\QtQuick\NativeStyle
+rem icuuc.dll ships with all supported OSes (and Qt incorrectly deploys the x64 version on ARM64)
+del %DEPLOY_FOLDER%\icuuc.dll
 
 if "%SIGN%"=="1" (
     echo Signing deployed binaries
@@ -266,9 +274,19 @@ rem This must be done after WiX harvesting and signing, since the VCRT dlls are 
 rem and should not be harvested for inclusion in the full installer
 copy "%VC_REDIST_DLL_PATH%\*.dll" %DEPLOY_FOLDER%
 if !ERRORLEVEL! NEQ 0 goto Error
-rem This file tells Moonlight that it's a portable installation
-echo. > %DEPLOY_FOLDER%\portable.dat
-if !ERRORLEVEL! NEQ 0 goto Error
+
+rem Since we don't publish Windows installers for CI builds, let's use the user profile
+rem location of the regular non-portable version by default. We'll place a file in the
+rem the package to allow the user to rename if they want portable behavior.
+if defined CI_VERSION (
+    echo. > %DEPLOY_FOLDER%\portable.dat.inactive
+    if !ERRORLEVEL! NEQ 0 goto Error
+) else (
+    rem This file tells Moonlight that it's a portable installation
+    echo. > %DEPLOY_FOLDER%\portable.dat
+    if !ERRORLEVEL! NEQ 0 goto Error
+)
+
 7z a %INSTALLER_FOLDER%\MoonlightPortable-%ARCH%-%VERSION%.zip %DEPLOY_FOLDER%\*
 if !ERRORLEVEL! NEQ 0 goto Error
 

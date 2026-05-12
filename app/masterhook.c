@@ -28,6 +28,9 @@
 #include <xf86drm.h>
 #include <xf86drmMode.h>
 
+// Used to turn off the hooks when Qt is not using EGLFS
+bool g_DisableDrmHooks = false;
+
 // We require SDL 2.0.15+ to hook because it supports sharing
 // the DRM FD with our code. This avoids having multiple DRM FDs
 // in flight at the same time which would significantly complicate
@@ -75,6 +78,9 @@ int g_QtCrtcConnectorCount;
 bool removeSdlFd(int fd);
 int takeMasterFromSdlFd(void);
 
+void lockDrmMaster();
+void unlockDrmMaster();
+
 int drmIsMaster(int fd)
 {
     // Detect master by attempting something that requires master.
@@ -89,6 +95,10 @@ int drmModeSetCrtc(int fd, uint32_t crtcId, uint32_t bufferId,
 {
     // Lookup the real libdrm function pointers if we haven't yet
     pthread_once(&s_InitDrmFunctions, lookupRealDrmFunctions);
+
+    if (g_DisableDrmHooks) {
+        return fn_drmModeSetCrtc(fd, crtcId, bufferId, x, y, connectors, count, mode);
+    }
 
     // Grab the first DRM Master FD that makes it in here. This will be the Qt
     // EGLFS backend's DRM FD, on which we will call drmDropMaster() later.
@@ -128,7 +138,10 @@ int drmModePageFlip(int fd, uint32_t crtc_id, uint32_t fb_id, uint32_t flags, vo
 
     // Call into the real thing
     int err = fn_drmModePageFlip(fd, crtc_id, fb_id, flags, user_data);
-    if (err == -EACCES && fd == g_QtDrmMasterFd) {
+    if (!g_DisableDrmHooks && err == -EACCES && fd == g_QtDrmMasterFd) {
+        // Don't allow DRM master ownership to change
+        lockDrmMaster();
+
         // If SDL took master from us, try to grab it back temporarily
         int oldMasterFd = takeMasterFromSdlFd();
         drmSetMaster(fd);
@@ -137,7 +150,10 @@ int drmModePageFlip(int fd, uint32_t crtc_id, uint32_t fb_id, uint32_t flags, vo
         if (oldMasterFd != -1) {
             drmSetMaster(oldMasterFd);
         }
+
+        unlockDrmMaster();
     }
+
     return err;
 }
 
@@ -147,6 +163,10 @@ int drmModeAtomicCommit(int fd, drmModeAtomicReqPtr req,
 {
     // Lookup the real libdrm function pointers if we haven't yet
     pthread_once(&s_InitDrmFunctions, lookupRealDrmFunctions);
+
+    if (g_DisableDrmHooks) {
+        return fn_drmModeAtomicCommit(fd, req, flags, user_data);
+    }
 
     // Grab the first DRM Master FD that makes it in here. This will be the Qt
     // EGLFS backend's DRM FD, on which we will call drmDropMaster() later.
@@ -161,6 +181,9 @@ int drmModeAtomicCommit(int fd, drmModeAtomicReqPtr req,
     // Call into the real thing
     int err = fn_drmModeAtomicCommit(fd, req, flags, user_data);
     if (err == -EACCES && fd == g_QtDrmMasterFd) {
+        // Don't allow DRM master ownership to change
+        lockDrmMaster();
+
         // If SDL took master from us, try to grab it back temporarily
         int oldMasterFd = takeMasterFromSdlFd();
         drmSetMaster(fd);
@@ -169,7 +192,10 @@ int drmModeAtomicCommit(int fd, drmModeAtomicReqPtr req,
         if (oldMasterFd != -1) {
             drmSetMaster(oldMasterFd);
         }
+
+        unlockDrmMaster();
     }
+
     return err;
 }
 
@@ -210,6 +236,10 @@ int close(int fd)
     // Lookup the real libc functions if we haven't yet
     pthread_once(&s_InitLibCFunctions, lookupRealLibCFunctions);
 
+    if (g_DisableDrmHooks) {
+        return fn_close(fd);
+    }
+
     // Remove this entry from the SDL FD table
     bool lastSdlFd = removeSdlFd(fd);
 
@@ -218,6 +248,8 @@ int close(int fd)
 
     // If we closed the last SDL FD, restore master to the Qt FD
     if (ret == 0 && lastSdlFd) {
+        lockDrmMaster();
+
         if (drmSetMaster(g_QtDrmMasterFd) < 0) {
             SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                          "Failed to restore master to Qt DRM FD: %d",
@@ -242,6 +274,8 @@ int close(int fd)
                              errno);
             }
         }
+
+        unlockDrmMaster();
     }
 
     return ret;
