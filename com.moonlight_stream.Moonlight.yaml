@@ -38,8 +38,8 @@ modules:
     sources:
       - type: git
         url: https://github.com/haasn/libplacebo.git
-        # tag: v7.351.0 not working
-        commit: 1dcaea8b601aa969ffd5bfa70088957ce3eaa273
+        tag: v7.360.1
+        # commit: cee9b076f2c63104ccfd497fa79c39a867293ec4
 
   - name: libdecor
     buildsystem: meson
@@ -64,8 +64,8 @@ modules:
     sources:
       - type: git
         url: https://github.com/libsdl-org/SDL.git
-        # branch: release-3.4.x
-        commit: 3cf15dc222de5ed8d12cc79556c4c18daecb3278
+        tag: release-3.4.8
+        # commit: d9d5536704d585616d4db3c8ba3c4ff6fc2757e1
 
   - name: SDL2-compat
     buildsystem: cmake-ninja
@@ -76,7 +76,8 @@ modules:
     sources:
       - type: git
         url: https://github.com/libsdl-org/sdl2-compat.git
-        commit: 1c8ece4de9db96d01f99296c26a87a4cabb72f54
+        tag: release-2.32.68
+        # commit: 1c8ece4de9db96d01f99296c26a87a4cabb72f54
 
   - name: SDL2_ttf
     build-options:
@@ -133,8 +134,8 @@ modules:
     sources:
       - type: git
         url: https://github.com/cgutman/FFmpeg.git
-        # branch: moonlight_8.0.1_r2
-        commit: 188067dedb120241a5c473c7178fa28233566f12
+        # branch: moonlight_8.1.1_r1
+        commit: f116128cafb244bc0f809d0285932ced0471268d
 
   - name: gamescope-wsi
     buildsystem: simple
@@ -157,6 +158,9 @@ modules:
         - QMAKE_CXXFLAGS+=-DDISPLAY_BITRATE  # enable bitrate stats in stream OSD
       env:
         PKG_CONFIG_PATH: /app/lib64/pkgconfig:/app/lib/pkgconfig:${PKG_CONFIG_PATH}
+    # sources:
+    #   - type: dir
+    #     path: .
     sources:
       - type: git
         url: https://github.com/mspeedo/moonlight-qt.git
