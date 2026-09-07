@@ -34,6 +34,7 @@ Pacer::Pacer(IFFmpegRenderer* renderer, PVIDEO_STATS videoStats) :
     m_VsyncThread(nullptr),
     m_DeferredFreeFrame(nullptr),
     m_Stopping(false),
+    m_LatestFrameWins(false),
     m_VsyncSource(nullptr),
     m_VsyncRenderer(renderer),
     m_MaxVideoFps(0),
@@ -178,7 +179,20 @@ int Pacer::renderThread(void* context)
 
 void Pacer::enqueueFrameForRenderingAndUnlock(AVFrame *frame)
 {
-    dropFrameForEnqueue(m_RenderQueue);
+    if (m_LatestFrameWins) {
+        // In the unpaced VRR path, any frame still waiting in the render queue is
+        // stale as soon as a newer decoded frame arrives. The frame currently being
+        // rendered is already dequeued, so replacing pending frames is safe.
+        while (!m_RenderQueue.isEmpty()) {
+            AVFrame* staleFrame = m_RenderQueue.dequeue();
+            m_VideoStats->pacerDroppedFrames++;
+            av_frame_free(&staleFrame);
+        }
+    }
+    else {
+        dropFrameForEnqueue(m_RenderQueue);
+    }
+
     m_RenderQueue.enqueue(frame);
 
     m_FrameQueueLock.unlock();
@@ -264,6 +278,7 @@ bool Pacer::initialize(SDL_Window* window, int maxVideoFps, bool enablePacing)
     m_MaxVideoFps = maxVideoFps;
     m_DisplayFps = StreamUtils::getDisplayRefreshRate(window);
     m_RendererAttributes = m_VsyncRenderer->getRendererAttributes();
+    m_LatestFrameWins = !enablePacing;
 
     if (enablePacing) {
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
@@ -309,7 +324,7 @@ bool Pacer::initialize(SDL_Window* window, int maxVideoFps, bool enablePacing)
     }
     else {
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                    "Frame pacing disabled: target %d Hz with %d FPS stream",
+                    "Frame pacing disabled (latest-frame-wins): target %d Hz with %d FPS stream",
                     m_DisplayFps, m_MaxVideoFps);
     }
 
