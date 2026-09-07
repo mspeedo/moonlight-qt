@@ -427,6 +427,7 @@ bool PlVkRenderer::initialize(PDECODER_PARAMETERS params)
 {
     m_Window = params->window;
     m_MaxVideoFps = params->frameRate;
+    m_EnableVsync = params->enableVsync;
 
     unsigned int instanceExtensionCount = 0;
     if (!SDL_Vulkan_GetInstanceExtensions(params->window, &instanceExtensionCount, nullptr)) {
@@ -500,39 +501,35 @@ bool PlVkRenderer::initialize(PDECODER_PARAMETERS params)
         m_VkPresentMode = VK_PRESENT_MODE_FIFO_KHR;
     }
     else {
-        // We want immediate mode for V-Sync disabled if possible
-        if (isPresentModeSupportedByPhysicalDevice(m_Vulkan->phys_device, VK_PRESENT_MODE_IMMEDIATE_KHR)) {
+        // Mailbox is non-blocking and latest-frame-wins, which maps best to VRR.
+        if (isPresentModeSupportedByPhysicalDevice(m_Vulkan->phys_device, VK_PRESENT_MODE_MAILBOX_KHR)) {
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "Using Mailbox present mode with V-Sync disabled");
+            m_VkPresentMode = VK_PRESENT_MODE_MAILBOX_KHR;
+        }
+        // FIFO Relaxed can tear if the frame is running late.
+        else if (isPresentModeSupportedByPhysicalDevice(m_Vulkan->phys_device, VK_PRESENT_MODE_FIFO_RELAXED_KHR)) {
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "Using FIFO Relaxed present mode with V-Sync disabled");
+            m_VkPresentMode = VK_PRESENT_MODE_FIFO_RELAXED_KHR;
+        }
+        // Immediate is non-blocking but can tear when VRR is unavailable.
+        else if (isPresentModeSupportedByPhysicalDevice(m_Vulkan->phys_device, VK_PRESENT_MODE_IMMEDIATE_KHR)) {
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                         "Using Immediate present mode with V-Sync disabled");
             m_VkPresentMode = VK_PRESENT_MODE_IMMEDIATE_KHR;
         }
+        // FIFO is always supported.
         else {
-            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                        "Immediate present mode is not supported by the Vulkan driver. Latency may be higher than normal with V-Sync disabled.");
-
-            // FIFO Relaxed can tear if the frame is running late
-            if (isPresentModeSupportedByPhysicalDevice(m_Vulkan->phys_device, VK_PRESENT_MODE_FIFO_RELAXED_KHR)) {
-                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                            "Using FIFO Relaxed present mode with V-Sync disabled");
-                m_VkPresentMode = VK_PRESENT_MODE_FIFO_RELAXED_KHR;
-            }
-            // Mailbox at least provides non-blocking behavior
-            else if (isPresentModeSupportedByPhysicalDevice(m_Vulkan->phys_device, VK_PRESENT_MODE_MAILBOX_KHR)) {
-                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                            "Using Mailbox present mode with V-Sync disabled");
-                m_VkPresentMode = VK_PRESENT_MODE_MAILBOX_KHR;
-            }
-            // FIFO is always supported
-            else {
-                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                            "Using FIFO present mode with V-Sync disabled");
-                m_VkPresentMode = VK_PRESENT_MODE_FIFO_KHR;
-            }
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "Using FIFO present mode with V-Sync disabled");
+            m_VkPresentMode = VK_PRESENT_MODE_FIFO_KHR;
         }
     }
 
-    // Start with a swapchain that is double-buffered for lowest display latency
-    if (!createSwapchain(1)) {
+    // Keep V-Sync at minimum depth. In VRR mode, allow one additional image in flight
+    // so rendering can overlap presentation without building a deep queue.
+    if (!createSwapchain(m_EnableVsync ? 1 : 2)) {
         return false;
     }
 
@@ -898,14 +895,12 @@ void PlVkRenderer::waitToRender()
     }
 
 #ifndef Q_OS_WIN32
-    // With libplacebo's Vulkan backend, all swap_buffers does is wait for queued
-    // presents to finish. This happens to be exactly what we want to do here, since
-    // it lets us wait to select a queued frame for rendering until we know that we
-    // can present without blocking in renderFrame().
-    //
-    // NB: This seems to cause performance problems with the Windows display stack
-    // (particularly on Nvidia) so we will only do this for non-Windows platforms.
-    pl_swapchain_swap_buffers(m_Swapchain);
+    // With libplacebo's Vulkan backend, swap_buffers waits for queued presents to finish.
+    // Keep that synchronization for conventional V-Sync pacing, but skip it for the
+    // unpaced VRR path so a completed decode is not held behind presentation completion.
+    if (m_EnableVsync) {
+        pl_swapchain_swap_buffers(m_Swapchain);
+    }
 #endif
 
     // Handle the swapchain being resized

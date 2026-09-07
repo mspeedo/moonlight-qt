@@ -3,6 +3,8 @@
 #include "utils.h"
 #include "streaming/session.h"
 
+#include <thread>
+
 #include <h264_stream.h>
 
 extern "C" {
@@ -2052,8 +2054,8 @@ void FFmpegVideoDecoder::decoderThreadProc()
                         LiCompleteVideoFrame(handle, submitDecodeUnit(du));
                     }
                     else {
-                        // No output data or input data. Let's wait a little bit.
-                        SDL_Delay(2);
+                        // Avoid a fixed 2 ms polling delay in the low-latency VRR path.
+                        std::this_thread::yield();
                     }
                 }
                 else {

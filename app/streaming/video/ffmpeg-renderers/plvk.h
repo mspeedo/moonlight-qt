@@ -93,6 +93,7 @@ private:
 
     // Stream state
     int m_MaxVideoFps;
+    bool m_EnableVsync = false;
 
     // The libplacebo rendering state
     pl_log m_Log = nullptr;
