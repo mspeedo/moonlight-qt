@@ -38,8 +38,9 @@ modules:
     sources:
       - type: git
         url: https://github.com/haasn/libplacebo.git
-        tag: v7.360.1
-        # commit: cee9b076f2c63104ccfd497fa79c39a867293ec4
+        commit: 4d82c6898551068d4ae6a6b5538efcddc2c7cf64
+      - type: patch
+        path: libplacebo-disable-internally-synchronized-queues.patch
 
   - name: libdecor
     buildsystem: meson
@@ -61,6 +62,7 @@ modules:
         - -DSDL_KMSDRM=OFF
         - -DSDL_INSTALL_DOCS=OFF
         - -DSDL_TEST_LIBRARY=OFF
+        - -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON
     sources:
       - type: git
         url: https://github.com/libsdl-org/SDL.git
@@ -73,6 +75,7 @@ modules:
     build-options:
       config-opts:
         - -DSDL2COMPAT_TESTS=OFF
+        - -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON
     sources:
       - type: git
         url: https://github.com/libsdl-org/sdl2-compat.git
@@ -104,8 +107,10 @@ modules:
   - name: ffmpeg
     build-options:
       config-opts:
+        - --fatal-warnings
         - --disable-stripping
         - --enable-pic
+        - --enable-lto
         - --enable-shared
         - --disable-static
         - --disable-all
