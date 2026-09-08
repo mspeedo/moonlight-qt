@@ -6,9 +6,6 @@ permissions:
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - vrr
 
 concurrency:
   group: moonlight-vrr-flatpak
