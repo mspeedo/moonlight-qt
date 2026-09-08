@@ -4,7 +4,10 @@ permissions:
   contents: read
 
 on:
-  workflow_dispatch:
+  push:
+  pull_request:
+    branches:
+      - master
 
 concurrency:
   group: build-${{ github.ref }}
