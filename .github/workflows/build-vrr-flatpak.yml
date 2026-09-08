@@ -1,0 +1,90 @@
+---
+name: Build - VRR Flatpak
+
+permissions:
+  contents: read
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - vrr
+
+concurrency:
+  group: moonlight-vrr-flatpak
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build x86_64 Flatpak
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout vrr branch
+        uses: actions/checkout@v5
+        with:
+          ref: vrr
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Record source revision
+        id: source
+        shell: bash
+        run: |
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "short_sha=$(git rev-parse --short=12 HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Install Flatpak build tools
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y flatpak flatpak-builder
+          flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+
+      - name: Pin Moonlight source to this vrr revision
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ steps.source.outputs.sha }}
+        run: |
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          manifest = Path("com.moonlight_stream.Moonlight.yaml")
+          text = manifest.read_text()
+          old = "        branch: vrr\n        disable-shallow-clone: true\n"
+          new = f"        commit: {os.environ['SOURCE_SHA']}\n        disable-shallow-clone: true\n"
+          if old not in text:
+              raise SystemExit("Unable to locate the Moonlight vrr git source in the Flatpak manifest")
+          manifest.write_text(text.replace(old, new, 1))
+          PY
+
+      - name: Build Flatpak
+        shell: bash
+        run: |
+          flatpak-builder \
+            --repo=repo \
+            build-dir \
+            com.moonlight_stream.Moonlight.yaml \
+            --force-clean \
+            --ccache \
+            --install-deps-from=flathub \
+            --disable-rofiles-fuse \
+            --user
+
+      - name: Create installable Flatpak bundle
+        shell: bash
+        run: |
+          flatpak build-bundle \
+            repo \
+            "Moonlight-VRR-${{ steps.source.outputs.short_sha }}.flatpak" \
+            com.moonlight_stream.Moonlight
+
+      - name: Upload Flatpak artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: Moonlight-VRR-${{ steps.source.outputs.short_sha }}
+          path: Moonlight-VRR-${{ steps.source.outputs.short_sha }}.flatpak
+          compression-level: 0
+          if-no-files-found: error
