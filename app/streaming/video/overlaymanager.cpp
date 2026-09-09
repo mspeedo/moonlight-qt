@@ -1,6 +1,11 @@
 #include "overlaymanager.h"
 #include "path.h"
 
+#if defined(HAVE_LIBPLACEBO_VULKAN) && defined(Q_OS_LINUX)
+#include "streaming/latencyprobe.h"
+#define HAVE_LATENCY_PROBE 1
+#endif
+
 using namespace Overlay;
 
 OverlayManager::OverlayManager() :
@@ -61,6 +66,23 @@ char* OverlayManager::getOverlayText(OverlayType type)
 void OverlayManager::updateOverlayText(OverlayType type, const char* text)
 {
     SDL_utf8strlcpy(m_Overlays[type].text, text, sizeof(m_Overlays[0].text));
+
+#ifdef HAVE_LATENCY_PROBE
+    // Keep the latency result as the final line of the existing debug OSD so it
+    // uses exactly the same font, color, and black outline rendering. Do not
+    // touch the probe at all when the OSD is disabled.
+    if (type == OverlayType::OverlayDebug && m_Overlays[type].enabled) {
+        char latencyLine[96];
+        LatencyProbe::instance().formatOverlayLine(latencyLine, sizeof(latencyLine));
+
+        size_t currentLength = SDL_strlen(m_Overlays[type].text);
+        if (currentLength > 0 && m_Overlays[type].text[currentLength - 1] != '\n') {
+            SDL_utf8strlcat(m_Overlays[type].text, "\n", sizeof(m_Overlays[0].text));
+        }
+        SDL_utf8strlcat(m_Overlays[type].text, latencyLine, sizeof(m_Overlays[0].text));
+    }
+#endif
+
     setOverlayTextUpdated(type);
 }
 
@@ -95,6 +117,12 @@ void OverlayManager::setOverlayState(OverlayType type, bool enabled)
     bool stateChanged = m_Overlays[type].enabled != enabled;
 
     m_Overlays[type].enabled = enabled;
+
+#ifdef HAVE_LATENCY_PROBE
+    if (type == OverlayType::OverlayDebug && stateChanged) {
+        LatencyProbe::instance().setEnabled(enabled);
+    }
+#endif
 
     if (stateChanged) {
         if (!enabled) {
@@ -207,5 +235,4 @@ SDL_Surface* OverlayManager::RenderTextOutlinedWrapped(TTF_Font* font, const cha
     SDL_FreeSurface(textSurface);
     return outlineSurface;
 }
-
 
