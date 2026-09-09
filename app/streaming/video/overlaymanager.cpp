@@ -66,23 +66,6 @@ char* OverlayManager::getOverlayText(OverlayType type)
 void OverlayManager::updateOverlayText(OverlayType type, const char* text)
 {
     SDL_utf8strlcpy(m_Overlays[type].text, text, sizeof(m_Overlays[0].text));
-
-#ifdef HAVE_LATENCY_PROBE
-    // Keep the latency result as the final line of the existing debug OSD so it
-    // uses exactly the same font, color, and black outline rendering. Do not
-    // touch the probe at all when the OSD is disabled.
-    if (type == OverlayType::OverlayDebug && m_Overlays[type].enabled) {
-        char latencyLine[96];
-        LatencyProbe::instance().formatOverlayLine(latencyLine, sizeof(latencyLine));
-
-        size_t currentLength = SDL_strlen(m_Overlays[type].text);
-        if (currentLength > 0 && m_Overlays[type].text[currentLength - 1] != '\n') {
-            SDL_strlcat(m_Overlays[type].text, "\n", sizeof(m_Overlays[0].text));
-        }
-        SDL_strlcat(m_Overlays[type].text, latencyLine, sizeof(m_Overlays[0].text));
-    }
-#endif
-
     setOverlayTextUpdated(type);
 }
 
@@ -105,6 +88,22 @@ SDL_Surface* OverlayManager::getUpdatedOverlaySurface(OverlayType type)
 
 void OverlayManager::setOverlayTextUpdated(OverlayType type)
 {
+#ifdef HAVE_LATENCY_PROBE
+    // The performance OSD writes its stats directly into the debug overlay text
+    // buffer, then calls setOverlayTextUpdated(). Append the latency probe here so
+    // it becomes the normal final OSD row and uses the existing outline renderer.
+    if (type == OverlayType::OverlayDebug && m_Overlays[type].enabled) {
+        char latencyLine[96];
+        LatencyProbe::instance().formatOverlayLine(latencyLine, sizeof(latencyLine));
+
+        size_t currentLength = SDL_strlen(m_Overlays[type].text);
+        if (currentLength > 0 && m_Overlays[type].text[currentLength - 1] != '\n') {
+            SDL_strlcat(m_Overlays[type].text, "\n", sizeof(m_Overlays[0].text));
+        }
+        SDL_strlcat(m_Overlays[type].text, latencyLine, sizeof(m_Overlays[0].text));
+    }
+#endif
+
     // Only update the overlay state if it's enabled. If it's not enabled,
     // the renderer has already been notified by setOverlayState().
     if (m_Overlays[type].enabled) {
@@ -202,24 +201,22 @@ SDL_Surface* OverlayManager::RenderTextOutlinedWrapped(TTF_Font* font, const cha
     int oldOutline = TTF_GetFontOutline(font);
     TTF_SetFontOutline(font, outlineWidth);
 
-    // Verify that the string won't require wrapping (which could cause the outline and the text
-    // to diverge due to different wrapping positions).
-    //
-    // FIXME: We do this rather than just disabling wrapping entirely (wrapWidth = 0) because we
-    // need further testing to ensure that all renderers can handle non-NPOT overlay textures.
+    // Keep every explicit OSD line unwrapped so the outlined and foreground text
+    // always use identical line breaks. If a line is wider than the normal wrap
+    // width, expand the render width instead of falling back to unoutlined text.
+    int effectiveWrapWidth = wrapWidth;
     for (const QString& line : QString(text).split('\n')) {
-        int extent, count;
-        if (TTF_MeasureUTF8(font, line.toUtf8(), wrapWidth, &extent, &count) == 0 && count < line.size()) {
-            // If it requires wrapping, render it without the outline
-            TTF_SetFontOutline(font, oldOutline);
-            return TTF_RenderUTF8_Blended_Wrapped(font, text, textColor, wrapWidth);
+        int lineWidth = 0;
+        int lineHeight = 0;
+        if (TTF_SizeUTF8(font, line.toUtf8().constData(), &lineWidth, &lineHeight) == 0) {
+            effectiveWrapWidth = qMax(effectiveWrapWidth, lineWidth + (outlineWidth * 2));
         }
     }
 
     // Draw text twice, but outline is a bit bigger
-    auto outlineSurface = TTF_RenderUTF8_Blended_Wrapped(font, text, outlineColor, wrapWidth);
+    auto outlineSurface = TTF_RenderUTF8_Blended_Wrapped(font, text, outlineColor, effectiveWrapWidth);
     TTF_SetFontOutline(font, 0);
-    auto textSurface = TTF_RenderUTF8_Blended_Wrapped(font, text, textColor, wrapWidth);
+    auto textSurface = TTF_RenderUTF8_Blended_Wrapped(font, text, textColor, effectiveWrapWidth);
     TTF_SetFontOutline(font, oldOutline);
 
     if (outlineSurface == nullptr || textSurface == nullptr) {
