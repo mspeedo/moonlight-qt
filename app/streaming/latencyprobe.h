@@ -45,10 +45,12 @@ public:
             m_Enabled = enabled;
             m_EnabledFast.store(enabled, std::memory_order_release);
             m_WaitingForTransition = false;
+            m_HasResult = false;
             m_Baseline = VisualState::Unknown;
             m_Expected = VisualState::Unknown;
             m_DetectedSerial = 0;
             m_InputTimestamp = 0;
+            m_LastLatencyMs = 0.0;
             m_PresentWriteIndex = 0;
             for (auto& frame : m_PresentFrames) {
                 frame = {};
