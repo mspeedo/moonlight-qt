@@ -28,6 +28,7 @@ struct SampleSlot {
     pl_tex texture = nullptr;
     uint8_t rgba[4] = {};
     uint64_t serial = 0;
+    uint64_t submitTimestamp = 0;
     std::atomic<bool> pending { false };
 };
 
@@ -71,6 +72,7 @@ inline void sampleComplete(void* opaque)
 {
     auto* slot = static_cast<SampleSlot*>(opaque);
     const uint64_t serial = slot->serial;
+    const uint64_t submitTimestamp = slot->submitTimestamp;
 
     const float r = slot->rgba[0] / 255.0f;
     const float g = slot->rgba[1] / 255.0f;
@@ -78,7 +80,7 @@ inline void sampleComplete(void* opaque)
     const float luma = 0.2126f * r + 0.7152f * g + 0.0722f * b;
 
     slot->pending.store(false, std::memory_order_release);
-    LatencyProbe::instance().onVideoSample(serial, luma);
+    LatencyProbe::instance().onVideoSample(serial, submitTimestamp, luma);
 }
 
 inline bool ensureDetectorResources(RendererContext* ctx, SampleSlot* slot)
@@ -140,7 +142,10 @@ inline bool ensureDetectorResources(RendererContext* ctx, SampleSlot* slot)
     return true;
 }
 
-inline bool scheduleSample(RendererContext* ctx, const pl_frame& image, uint64_t serial)
+inline bool scheduleSample(RendererContext* ctx,
+                           const pl_frame& image,
+                           uint64_t serial,
+                           uint64_t submitTimestamp)
 {
     SampleSlot* slot = nullptr;
     for (auto& candidate : ctx->slots) {
@@ -164,6 +169,7 @@ inline bool scheduleSample(RendererContext* ctx, const pl_frame& image, uint64_t
     }
 
     slot->serial = serial;
+    slot->submitTimestamp = submitTimestamp;
 
     const float sourceLeft = image.crop.x0 < image.crop.x1 ? image.crop.x0 : image.crop.x1;
     const float sourceRight = image.crop.x0 < image.crop.x1 ? image.crop.x1 : image.crop.x0;
@@ -333,10 +339,10 @@ inline bool swapchainSubmitFrame(pl_swapchain swapchain)
 
     // The 1x1 detector render is deliberately queued only after the actual
     // swapchain frame has been submitted. This keeps detector GPU work out of
-    // the measured frame's presentation path.
-    if (scheduleSample(context, pending.image, serial)) {
-        LatencyProbe::instance().onFrameSubmitted(serial, submitTimestamp);
-    }
+    // the measured frame's presentation path. Carry the exact submission
+    // timestamp with this sample so the asynchronous callback needs no history
+    // lookup or later frame association.
+    scheduleSample(context, pending.image, serial, submitTimestamp);
 
     return result;
 }

@@ -48,13 +48,8 @@ public:
             m_HasResult = false;
             m_Baseline = VisualState::Unknown;
             m_Expected = VisualState::Unknown;
-            m_DetectedSerial = 0;
             m_InputTimestamp = 0;
             m_LastLatencyMs = 0.0;
-            m_PresentWriteIndex = 0;
-            for (auto& frame : m_PresentFrames) {
-                frame = {};
-            }
         }
         SDL_AtomicUnlock(&m_Lock);
 
@@ -99,14 +94,16 @@ public:
         m_InputTimestamp = timestamp;
         m_Expected = m_Baseline == VisualState::Dark ? VisualState::Bright : VisualState::Dark;
         m_WaitingForTransition = true;
-        m_DetectedSerial = 0;
+        m_HasResult = false;
+        m_LastLatencyMs = 0.0;
 
         SDL_AtomicUnlock(&m_Lock);
     }
 
     // Called from the asynchronous Vulkan readback callback. Luma is normalized
     // to 0.0-1.0 after libplacebo has converted the sampled video frame to RGB.
-    void onVideoSample(uint64_t serial, float luma)
+    // The submit timestamp belongs to this exact sampled frame.
+    void onVideoSample(uint64_t serial, uint64_t submitTimestamp, float luma)
     {
         const VisualState state = classify(luma);
         if (state == VisualState::Unknown) {
@@ -132,28 +129,8 @@ public:
 
         if (m_WaitingForTransition && state == m_Expected) {
             m_Baseline = state;
-            m_DetectedSerial = serial;
-            tryCompleteLocked();
+            completeLocked(serial, submitTimestamp);
         }
-
-        SDL_AtomicUnlock(&m_Lock);
-    }
-
-    // For the VRR path this timestamp is taken immediately after a successful
-    // pl_swapchain_submit_frame(). It intentionally does not add a blocking
-    // swap_buffers wait, which would perturb the latency being measured.
-    void onFrameSubmitted(uint64_t serial, uint64_t timestamp)
-    {
-        SDL_AtomicLock(&m_Lock);
-
-        if (!m_Enabled) {
-            SDL_AtomicUnlock(&m_Lock);
-            return;
-        }
-
-        m_PresentFrames[m_PresentWriteIndex] = { serial, timestamp };
-        m_PresentWriteIndex = (m_PresentWriteIndex + 1) % kPresentHistorySize;
-        tryCompleteLocked();
 
         SDL_AtomicUnlock(&m_Lock);
     }
@@ -186,12 +163,6 @@ public:
     }
 
 private:
-    struct PresentedFrame {
-        uint64_t serial = 0;
-        uint64_t timestamp = 0;
-    };
-
-    static constexpr int kPresentHistorySize = 16;
     static constexpr uint64_t kTimeoutMs = 500;
 
     LatencyProbe() = default;
@@ -222,37 +193,24 @@ private:
         return VisualState::Unknown;
     }
 
-    void tryCompleteLocked()
+    void completeLocked(uint64_t serial, uint64_t submitTimestamp)
     {
-        if (!m_WaitingForTransition || m_DetectedSerial == 0) {
-            return;
-        }
-
-        uint64_t presentTimestamp = 0;
-        for (const auto& frame : m_PresentFrames) {
-            if (frame.serial == m_DetectedSerial) {
-                presentTimestamp = frame.timestamp;
-                break;
-            }
-        }
-
-        if (presentTimestamp == 0 || presentTimestamp < m_InputTimestamp) {
+        if (!m_WaitingForTransition || submitTimestamp == 0 || submitTimestamp < m_InputTimestamp) {
             return;
         }
 
         const uint64_t frequency = SDL_GetPerformanceFrequency();
         if (frequency != 0) {
-            m_LastLatencyMs = (double)(presentTimestamp - m_InputTimestamp) * 1000.0 / (double)frequency;
+            m_LastLatencyMs = (double)(submitTimestamp - m_InputTimestamp) * 1000.0 / (double)frequency;
             m_HasResult = true;
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                         "Latency probe: frame=%llu input-to-present=%.3f ms",
-                        (unsigned long long)m_DetectedSerial,
+                        (unsigned long long)serial,
                         m_LastLatencyMs);
         }
 
         m_WaitingForTransition = false;
         m_Expected = VisualState::Unknown;
-        m_DetectedSerial = 0;
     }
 
     void checkTimeoutLocked(uint64_t now)
@@ -273,7 +231,6 @@ private:
             m_WaitingForTransition = false;
             m_Baseline = VisualState::Unknown;
             m_Expected = VisualState::Unknown;
-            m_DetectedSerial = 0;
             m_InputTimestamp = 0;
         }
     }
@@ -286,8 +243,5 @@ private:
     VisualState m_Baseline = VisualState::Unknown;
     VisualState m_Expected = VisualState::Unknown;
     uint64_t m_InputTimestamp = 0;
-    uint64_t m_DetectedSerial = 0;
     double m_LastLatencyMs = 0.0;
-    PresentedFrame m_PresentFrames[kPresentHistorySize] = {};
-    int m_PresentWriteIndex = 0;
 };
