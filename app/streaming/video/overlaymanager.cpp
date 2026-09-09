@@ -77,9 +77,9 @@ void OverlayManager::updateOverlayText(OverlayType type, const char* text)
 
         size_t currentLength = SDL_strlen(m_Overlays[type].text);
         if (currentLength > 0 && m_Overlays[type].text[currentLength - 1] != '\n') {
-            SDL_utf8strlcat(m_Overlays[type].text, "\n", sizeof(m_Overlays[0].text));
+            SDL_strlcat(m_Overlays[type].text, "\n", sizeof(m_Overlays[0].text));
         }
-        SDL_utf8strlcat(m_Overlays[type].text, latencyLine, sizeof(m_Overlays[0].text));
+        SDL_strlcat(m_Overlays[type].text, latencyLine, sizeof(m_Overlays[0].text));
     }
 #endif
 
