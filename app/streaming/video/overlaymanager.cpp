@@ -181,7 +181,7 @@ void OverlayManager::notifyOverlayUpdated(OverlayType type)
                                       m_Overlays[type].color,
                                       {0, 0, 0, 255},
                                       4,
-                                      1024)
+                                      2048)
             : nullptr);
 
     // Notify the renderer
@@ -201,22 +201,24 @@ SDL_Surface* OverlayManager::RenderTextOutlinedWrapped(TTF_Font* font, const cha
     int oldOutline = TTF_GetFontOutline(font);
     TTF_SetFontOutline(font, outlineWidth);
 
-    // Keep every explicit OSD line unwrapped so the outlined and foreground text
-    // always use identical line breaks. If a line is wider than the normal wrap
-    // width, expand the render width instead of falling back to unoutlined text.
-    int effectiveWrapWidth = wrapWidth;
+    // Verify that the string won't require wrapping (which could cause the outline and the text
+    // to diverge due to different wrapping positions).
+    //
+    // FIXME: We do this rather than just disabling wrapping entirely (wrapWidth = 0) because we
+    // need further testing to ensure that all renderers can handle non-NPOT overlay textures.
     for (const QString& line : QString(text).split('\n')) {
-        int lineWidth = 0;
-        int lineHeight = 0;
-        if (TTF_SizeUTF8(font, line.toUtf8().constData(), &lineWidth, &lineHeight) == 0) {
-            effectiveWrapWidth = qMax(effectiveWrapWidth, lineWidth + (outlineWidth * 2));
+        int extent, count;
+        if (TTF_MeasureUTF8(font, line.toUtf8(), wrapWidth, &extent, &count) == 0 && count < line.size()) {
+            // If it requires wrapping, render it without the outline
+            TTF_SetFontOutline(font, oldOutline);
+            return TTF_RenderUTF8_Blended_Wrapped(font, text, textColor, wrapWidth);
         }
     }
 
     // Draw text twice, but outline is a bit bigger
-    auto outlineSurface = TTF_RenderUTF8_Blended_Wrapped(font, text, outlineColor, effectiveWrapWidth);
+    auto outlineSurface = TTF_RenderUTF8_Blended_Wrapped(font, text, outlineColor, wrapWidth);
     TTF_SetFontOutline(font, 0);
-    auto textSurface = TTF_RenderUTF8_Blended_Wrapped(font, text, textColor, effectiveWrapWidth);
+    auto textSurface = TTF_RenderUTF8_Blended_Wrapped(font, text, textColor, wrapWidth);
     TTF_SetFontOutline(font, oldOutline);
 
     if (outlineSurface == nullptr || textSurface == nullptr) {
