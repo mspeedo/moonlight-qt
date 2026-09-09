@@ -165,6 +165,31 @@ inline bool scheduleSample(RendererContext* ctx, const pl_frame& image, uint64_t
 
     slot->serial = serial;
 
+    const float sourceLeft = image.crop.x0 < image.crop.x1 ? image.crop.x0 : image.crop.x1;
+    const float sourceRight = image.crop.x0 < image.crop.x1 ? image.crop.x1 : image.crop.x0;
+    const float sourceTop = image.crop.y0 < image.crop.y1 ? image.crop.y0 : image.crop.y1;
+    const float sourceBottom = image.crop.y0 < image.crop.y1 ? image.crop.y1 : image.crop.y0;
+
+    if ((sourceRight - sourceLeft) < 1.0f || (sourceBottom - sourceTop) < 1.0f) {
+        slot->pending.store(false, std::memory_order_release);
+        return false;
+    }
+
+    // Sample exactly one logical source pixel at the center of the current
+    // decoded stream crop. Mapping a 1x1 source crop to a 1x1 target avoids
+    // downscaling/averaging the frame, so unrelated motion or noise elsewhere
+    // on screen cannot change the detector value.
+    const int centerX = static_cast<int>((sourceLeft + sourceRight) * 0.5f);
+    const int centerY = static_cast<int>((sourceTop + sourceBottom) * 0.5f);
+
+    pl_frame sampleImage = image;
+    sampleImage.crop = {
+        static_cast<float>(centerX),
+        static_cast<float>(centerY),
+        static_cast<float>(centerX + 1),
+        static_cast<float>(centerY + 1),
+    };
+
     pl_frame target = {};
     target.num_planes = 1;
     target.planes[0].texture = slot->texture;
@@ -177,10 +202,7 @@ inline bool scheduleSample(RendererContext* ctx, const pl_frame& image, uint64_t
     target.repr = pl_color_repr_rgb;
     target.color = pl_color_space_srgb;
 
-    // Render the source into a single RGB pixel. The helper's dark and bright
-    // noise distributions have a deliberately wide gap, so even a single
-    // downsampled value is enough for robust classification.
-    if (!pl_render_image(ctx->detectorRenderer, &image, &target, &pl_render_fast_params)) {
+    if (!pl_render_image(ctx->detectorRenderer, &sampleImage, &target, &pl_render_fast_params)) {
         slot->pending.store(false, std::memory_order_release);
         return false;
     }
