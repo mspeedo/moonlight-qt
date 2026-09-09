@@ -251,11 +251,12 @@ private:
     static constexpr uint64_t kTimeoutMs = 500;
 
     // Hold A for this long to start an automatic run. Automatic A-down edges
-    // are 250 ms apart (4 Hz) with a 50 ms release gap, giving roughly 40
-    // samples in the rolling 10-second average without overlapping normal
-    // 10-20 ms measurements.
+    // are deliberately 263 ms apart rather than a round 250 ms so samples walk
+    // across common 117/120/144 Hz phase relationships instead of repeatedly
+    // landing at nearly the same stream/display phase. The 50 ms release gap
+    // still leaves ample time between ordinary 10-20 ms measurements.
     static constexpr Uint32 kBenchmarkHoldMs = 750;
-    static constexpr Uint32 kBenchmarkPeriodMs = 250;
+    static constexpr Uint32 kBenchmarkPeriodMs = 263;
     static constexpr Uint32 kBenchmarkPressMs = 50;
     static constexpr Uint32 kBenchmarkTickMs = 25;
     static constexpr uint64_t kAverageWindowMs = 10000;
