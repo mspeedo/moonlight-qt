@@ -66,8 +66,8 @@ modules:
     sources:
       - type: git
         url: https://github.com/libsdl-org/SDL.git
-        tag: release-3.4.14
-        commit: 147a8ee32dbf9ac02f3794964490687b6bbda1bc
+        tag: release-3.4.16
+        commit: fa2c02bb6e21974a89ea9824bc53c9932abe5f9c
 
   - name: SDL2-compat
     buildsystem: cmake-ninja
