@@ -3,6 +3,7 @@
 #include "utils.h"
 #include "streaming/session.h"
 
+#include <chrono>
 #include <thread>
 
 #include <h264_stream.h>
@@ -2065,8 +2066,8 @@ void FFmpegVideoDecoder::decoderThreadProc()
                         LiCompleteVideoFrame(handle, submitDecodeUnit(du));
                     }
                     else {
-                        // Avoid a fixed 2 ms polling delay in the low-latency VRR path.
-                        std::this_thread::yield();
+                        // Poll frequently without busy-spinning while the hardware decoder is still working.
+                        std::this_thread::sleep_for(std::chrono::microseconds(100));
                     }
                 }
                 else {
