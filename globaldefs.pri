@@ -39,3 +39,10 @@ QMAKE_LFLAGS   += $$(LDFLAGS)
 unix:!macx:exists($$_PRO_FILE_PWD_/streaming/latencyprobe_hooks.h) {
     QMAKE_CXXFLAGS += -include $$_PRO_FILE_PWD_/streaming/latencyprobe_hooks.h
 }
+
+# The private Sunshine benchmark control client is app-local and Linux-only,
+# just like the libplacebo latency probe that consumes it.
+unix:!macx:exists($$_PRO_FILE_PWD_/streaming/latencybenchmarkcontrol.cpp) {
+    SOURCES += $$_PRO_FILE_PWD_/streaming/latencybenchmarkcontrol.cpp
+    HEADERS += $$_PRO_FILE_PWD_/streaming/latencybenchmarkcontrol.h
+}

@@ -121,6 +121,11 @@ public:
         return m_OverlayManager;
     }
 
+    NvComputer* getComputer() const
+    {
+        return m_Computer;
+    }
+
     void flushWindowEvents();
 
     void setShouldExit(bool quitHostApp = false);

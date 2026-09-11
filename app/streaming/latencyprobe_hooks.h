@@ -285,27 +285,31 @@ inline bool renderImage(pl_renderer renderer,
 {
     const bool result = pl_render_image(renderer, image, target, params);
 
-    // One relaxed atomic branch is the only steady-state cost while the OSD is
-    // disabled. No locks, lookups, sampling, or readback occur in that state.
-    if (!result || image == nullptr || !LatencyProbe::instance().isEnabled()) {
+    // swapchainStartFrame() performs the sole steady-state atomic gate. If it
+    // did not opt this frame into sampling, the thread-local swapchain is null
+    // and this wrapper becomes a couple of predictable local branches only.
+    if (!result || image == nullptr ||
+            g_PendingFrame.swapchain == nullptr ||
+            g_PendingFrame.sampleRequested) {
         return result;
     }
 
-    if (g_PendingFrame.swapchain != nullptr &&
-            !g_PendingFrame.sampleRequested &&
-            LatencyProbe::instance().needsVideoSample()) {
-        g_PendingFrame.renderer = renderer;
-        g_PendingFrame.image = *image;
-        g_PendingFrame.sampleRequested = true;
-    }
-
+    g_PendingFrame.renderer = renderer;
+    g_PendingFrame.image = *image;
+    g_PendingFrame.sampleRequested = true;
     return result;
 }
 
 inline bool swapchainStartFrame(pl_swapchain swapchain, pl_swapchain_frame* outFrame)
 {
-    g_PendingFrame = {};
+    // This relaxed atomic load is the only benchmark-specific steady-state work
+    // in the presentation path while no video sample is needed. With OSD off or
+    // with the benchmark idle, there are no pending-frame writes or GPU actions.
+    if (!LatencyProbe::instance().needsVideoSampleFast()) {
+        return pl_swapchain_start_frame(swapchain, outFrame);
+    }
 
+    g_PendingFrame = {};
     const bool result = pl_swapchain_start_frame(swapchain, outFrame);
     if (result) {
         g_PendingFrame.swapchain = swapchain;
@@ -317,16 +321,24 @@ inline bool swapchainStartFrame(pl_swapchain swapchain, pl_swapchain_frame* outF
 inline bool swapchainSubmitFrame(pl_swapchain swapchain)
 {
     const bool result = pl_swapchain_submit_frame(swapchain);
-    const uint64_t submitTimestamp = result ? SDL_GetPerformanceCounter() : 0;
+
+    const bool matchingFrame = g_PendingFrame.swapchain == swapchain;
+    const bool sampleRequested = matchingFrame &&
+            g_PendingFrame.sampleRequested &&
+            g_PendingFrame.renderer != nullptr;
+
+    // Capture t1 only for an actual benchmark sample. This removes the previous
+    // unconditional SDL_GetPerformanceCounter() call from every submitted frame.
+    const uint64_t submitTimestamp = result && sampleRequested ?
+                SDL_GetPerformanceCounter() : 0;
 
     PendingFrame pending = {};
-    if (g_PendingFrame.swapchain == swapchain) {
+    if (matchingFrame) {
         pending = g_PendingFrame;
         g_PendingFrame = {};
     }
 
-    if (!result || !pending.sampleRequested || pending.renderer == nullptr ||
-            !LatencyProbe::instance().isEnabled()) {
+    if (!result || !sampleRequested) {
         return result;
     }
 

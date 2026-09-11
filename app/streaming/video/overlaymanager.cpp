@@ -2,7 +2,9 @@
 #include "path.h"
 
 #if defined(HAVE_LIBPLACEBO_VULKAN) && defined(Q_OS_LINUX)
+#include "streaming/latencybenchmarkcontrol.h"
 #include "streaming/latencyprobe.h"
+#include "streaming/session.h"
 #define HAVE_LATENCY_PROBE 1
 #endif
 
@@ -35,6 +37,15 @@ OverlayManager::OverlayManager() :
 
 OverlayManager::~OverlayManager()
 {
+#ifdef HAVE_LATENCY_PROBE
+    // LatencyProbe is process-global while OverlayManager is per streaming
+    // session. Ensure a session ending with the debug OSD still visible cannot
+    // leave its SDL event watch/timer or host helper active into the next stream.
+    if (m_Overlays[OverlayType::OverlayDebug].enabled) {
+        LatencyProbe::instance().setEnabled(false);
+    }
+#endif
+
     for (int i = 0; i < OverlayType::OverlayMax; i++) {
         if (m_Overlays[i].surface != nullptr) {
             SDL_FreeSurface(m_Overlays[i].surface);
@@ -119,6 +130,10 @@ void OverlayManager::setOverlayState(OverlayType type, bool enabled)
 
 #ifdef HAVE_LATENCY_PROBE
     if (type == OverlayType::OverlayDebug && stateChanged) {
+        if (enabled) {
+            Session* session = Session::get();
+            LatencyBenchmarkControl::configure(session != nullptr ? session->getComputer() : nullptr);
+        }
         LatencyProbe::instance().setEnabled(enabled);
     }
 #endif
@@ -234,4 +249,3 @@ SDL_Surface* OverlayManager::RenderTextOutlinedWrapped(TTF_Font* font, const cha
     SDL_FreeSurface(textSurface);
     return outlineSurface;
 }
-
