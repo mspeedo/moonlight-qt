@@ -18,10 +18,9 @@ jobs:
     timeout-minutes: 120
 
     steps:
-      - name: Checkout vrr branch
+      - name: Checkout selected branch
         uses: actions/checkout@v5
         with:
-          ref: vrr
           submodules: recursive
           fetch-depth: 1
 
@@ -35,11 +34,16 @@ jobs:
       - name: Install Flatpak build tools
         shell: bash
         run: |
+          # Chrome is preconfigured on GitHub-hosted runners but is unrelated to
+          # this build. Disable its apt source so transient repository metadata
+          # mismatches cannot prevent us from installing Flatpak tooling.
+          sudo rm -f /etc/apt/sources.list.d/google-chrome.list \
+                     /etc/apt/sources.list.d/google-chrome.sources
           sudo apt-get update
           sudo apt-get install -y flatpak flatpak-builder
           flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
 
-      - name: Pin Moonlight source to this vrr revision
+      - name: Pin Moonlight source to selected revision
         shell: bash
         env:
           SOURCE_SHA: ${{ steps.source.outputs.sha }}

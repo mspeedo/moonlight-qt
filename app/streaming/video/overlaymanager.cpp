@@ -1,6 +1,13 @@
 #include "overlaymanager.h"
 #include "path.h"
 
+#if defined(HAVE_LIBPLACEBO_VULKAN) && defined(Q_OS_LINUX)
+#include "streaming/latencybenchmarkcontrol.h"
+#include "streaming/latencyprobe.h"
+#include "streaming/session.h"
+#define HAVE_LATENCY_PROBE 1
+#endif
+
 using namespace Overlay;
 
 OverlayManager::OverlayManager() :
@@ -30,6 +37,15 @@ OverlayManager::OverlayManager() :
 
 OverlayManager::~OverlayManager()
 {
+#ifdef HAVE_LATENCY_PROBE
+    // LatencyProbe is process-global while OverlayManager is per streaming
+    // session. Ensure a session ending with the debug OSD still visible cannot
+    // leave its SDL event watch/timer or host helper active into the next stream.
+    if (m_Overlays[OverlayType::OverlayDebug].enabled) {
+        LatencyProbe::instance().setEnabled(false);
+    }
+#endif
+
     for (int i = 0; i < OverlayType::OverlayMax; i++) {
         if (m_Overlays[i].surface != nullptr) {
             SDL_FreeSurface(m_Overlays[i].surface);
@@ -83,6 +99,22 @@ SDL_Surface* OverlayManager::getUpdatedOverlaySurface(OverlayType type)
 
 void OverlayManager::setOverlayTextUpdated(OverlayType type)
 {
+#ifdef HAVE_LATENCY_PROBE
+    // The performance OSD writes its stats directly into the debug overlay text
+    // buffer, then calls setOverlayTextUpdated(). Append the latency probe here so
+    // it becomes the normal final OSD row and uses the existing outline renderer.
+    if (type == OverlayType::OverlayDebug && m_Overlays[type].enabled) {
+        char latencyLine[96];
+        LatencyProbe::instance().formatOverlayLine(latencyLine, sizeof(latencyLine));
+
+        size_t currentLength = SDL_strlen(m_Overlays[type].text);
+        if (currentLength > 0 && m_Overlays[type].text[currentLength - 1] != '\n') {
+            SDL_strlcat(m_Overlays[type].text, "\n", sizeof(m_Overlays[0].text));
+        }
+        SDL_strlcat(m_Overlays[type].text, latencyLine, sizeof(m_Overlays[0].text));
+    }
+#endif
+
     // Only update the overlay state if it's enabled. If it's not enabled,
     // the renderer has already been notified by setOverlayState().
     if (m_Overlays[type].enabled) {
@@ -95,6 +127,16 @@ void OverlayManager::setOverlayState(OverlayType type, bool enabled)
     bool stateChanged = m_Overlays[type].enabled != enabled;
 
     m_Overlays[type].enabled = enabled;
+
+#ifdef HAVE_LATENCY_PROBE
+    if (type == OverlayType::OverlayDebug && stateChanged) {
+        if (enabled) {
+            Session* session = Session::get();
+            LatencyBenchmarkControl::configure(session != nullptr ? session->getComputer() : nullptr);
+        }
+        LatencyProbe::instance().setEnabled(enabled);
+    }
+#endif
 
     if (stateChanged) {
         if (!enabled) {
@@ -154,7 +196,7 @@ void OverlayManager::notifyOverlayUpdated(OverlayType type)
                                       m_Overlays[type].color,
                                       {0, 0, 0, 255},
                                       4,
-                                      1024)
+                                      2048)
             : nullptr);
 
     // Notify the renderer
@@ -207,5 +249,3 @@ SDL_Surface* OverlayManager::RenderTextOutlinedWrapped(TTF_Font* font, const cha
     SDL_FreeSurface(textSurface);
     return outlineSurface;
 }
-
-
