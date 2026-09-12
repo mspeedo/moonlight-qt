@@ -1,5 +1,5 @@
 ---
-name: Build - VRR Flatpak
+name: Build - Moonlight Flatpak
 
 permissions:
   contents: read
@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: moonlight-vrr-flatpak
+  group: moonlight-flatpak-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -18,18 +18,22 @@ jobs:
     timeout-minutes: 120
 
     steps:
-      - name: Checkout selected branch
+      - name: Checkout selected Moonlight branch
         uses: actions/checkout@v5
         with:
-          submodules: recursive
+          submodules: false
           fetch-depth: 1
 
-      - name: Record source revision
+      - name: Resolve selected Moonlight revision
         id: source
         shell: bash
         run: |
-          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-          echo "short_sha=$(git rev-parse --short=12 HEAD)" >> "$GITHUB_OUTPUT"
+          SOURCE_SHA="${GITHUB_SHA}"
+          SOURCE_BRANCH="${GITHUB_REF_NAME}"
+          SAFE_BRANCH="${SOURCE_BRANCH//\//-}"
+          echo "sha=${SOURCE_SHA}" >> "$GITHUB_OUTPUT"
+          echo "short_sha=${SOURCE_SHA:0:12}" >> "$GITHUB_OUTPUT"
+          echo "safe_branch=${SAFE_BRANCH}" >> "$GITHUB_OUTPUT"
 
       - name: Install Flatpak build tools
         shell: bash
@@ -53,12 +57,33 @@ jobs:
           from pathlib import Path
 
           manifest = Path("com.moonlight_stream.Moonlight.yaml")
-          text = manifest.read_text()
-          old = "        branch: vrr\n        disable-shallow-clone: true\n"
-          new = f"        commit: {os.environ['SOURCE_SHA']}\n        disable-shallow-clone: true\n"
-          if old not in text:
-              raise SystemExit("Unable to locate the Moonlight vrr git source in the Flatpak manifest")
-          manifest.write_text(text.replace(old, new, 1))
+          lines = manifest.read_text().splitlines(keepends=True)
+          source_url = "        url: https://github.com/mspeedo/moonlight-qt.git\n"
+
+          try:
+              url_index = lines.index(source_url)
+          except ValueError:
+              raise SystemExit("Unable to locate the Moonlight git source in the Flatpak manifest")
+
+          source_end = len(lines)
+          for i in range(url_index + 1, len(lines)):
+              if lines[i].startswith("      - type: "):
+                  source_end = i
+                  break
+
+          source_options = [
+              line for line in lines[url_index + 1:source_end]
+              if not line.startswith("        branch: ")
+              and not line.startswith("        commit: ")
+          ]
+
+          lines = (
+              lines[:url_index + 1]
+              + [f"        commit: {os.environ['SOURCE_SHA']}\n"]
+              + source_options
+              + lines[source_end:]
+          )
+          manifest.write_text("".join(lines))
           PY
 
       - name: Build Flatpak
@@ -79,13 +104,13 @@ jobs:
         run: |
           flatpak build-bundle \
             repo \
-            "Moonlight-VRR-${{ steps.source.outputs.short_sha }}.flatpak" \
+            "Moonlight-${{ steps.source.outputs.safe_branch }}-${{ steps.source.outputs.short_sha }}.flatpak" \
             com.moonlight_stream.Moonlight
 
       - name: Upload Flatpak artifact
         uses: actions/upload-artifact@v6
         with:
-          name: Moonlight-VRR-${{ steps.source.outputs.short_sha }}
-          path: Moonlight-VRR-${{ steps.source.outputs.short_sha }}.flatpak
+          name: Moonlight-${{ steps.source.outputs.safe_branch }}-${{ steps.source.outputs.short_sha }}
+          path: Moonlight-${{ steps.source.outputs.safe_branch }}-${{ steps.source.outputs.short_sha }}.flatpak
           compression-level: 0
           if-no-files-found: error

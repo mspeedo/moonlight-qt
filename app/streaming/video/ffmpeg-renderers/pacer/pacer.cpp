@@ -1,5 +1,6 @@
 #include "pacer.h"
 #include "streaming/streamutils.h"
+#include "streaming/streampipelinetelemetry.h"
 
 #ifdef Q_OS_WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -237,6 +238,7 @@ void Pacer::handleVsync(int timeUntilNextVsyncMillis)
         // Drop the lock while we call av_frame_free()
         m_FrameQueueLock.unlock();
         m_VideoStats->pacerDroppedFrames++;
+        StreamPipelineTelemetry::pacerDrop();
         av_frame_free(&frame);
         m_FrameQueueLock.lock();
     }
@@ -335,8 +337,25 @@ void Pacer::renderFrame(AVFrame* frame)
     uint64_t beforeRender = LiGetMicroseconds();
     m_VideoStats->totalPacerTimeUs += (beforeRender - (uint64_t)frame->pkt_dts);
 
-    // Render it
+    // Resolve the frame identity before taking the semantic render-start clock.
+    // After the timestamp, armRenderStart() is an inline TLS store and then the
+    // very next operation is the actual frontend renderer call.
+    const bool pipelineTelemetryActive = StreamPipelineTelemetry::isActiveFast();
+    std::uint32_t pipelineFrameNumber = 0;
+    std::uint64_t pipelineRenderStartUs = 0;
+    if (pipelineTelemetryActive) {
+        pipelineFrameNumber = StreamPipelineTelemetry::prepareRender(frame);
+        if (pipelineFrameNumber != 0) {
+            pipelineRenderStartUs = LiGetMicroseconds();
+            StreamPipelineTelemetry::armRenderStart(pipelineRenderStartUs);
+        }
+    }
     m_VsyncRenderer->renderFrame(frame);
+    if (pipelineFrameNumber != 0) {
+        StreamPipelineTelemetry::recordDecodedToRenderStart(
+                    pipelineFrameNumber, pipelineRenderStartUs);
+        StreamPipelineTelemetry::renderEnd();
+    }
     uint64_t afterRender = LiGetMicroseconds();
 
     m_VideoStats->totalRenderTimeUs += (afterRender - beforeRender);
@@ -384,6 +403,7 @@ void Pacer::renderFrame(AVFrame* frame)
         // Drop the lock while we call av_frame_free()
         m_FrameQueueLock.unlock();
         m_VideoStats->pacerDroppedFrames++;
+        StreamPipelineTelemetry::pacerDrop();
         av_frame_free(&frame);
         m_FrameQueueLock.lock();
     }

@@ -4,6 +4,8 @@
 #if defined(HAVE_LIBPLACEBO_VULKAN) && defined(Q_OS_LINUX)
 #include "streaming/latencybenchmarkcontrol.h"
 #include "streaming/latencyprobe.h"
+#include "streaming/streamhealthtelemetry.h"
+#include "streaming/streampipelinetelemetry.h"
 #include "streaming/session.h"
 #define HAVE_LATENCY_PROBE 1
 #endif
@@ -15,6 +17,13 @@ OverlayManager::OverlayManager() :
     m_FontData(Path::readDataFile("ModeSeven.ttf"))
 {
     memset(m_Overlays, 0, sizeof(m_Overlays));
+
+#ifdef HAVE_LATENCY_PROBE
+    // OverlayManager is per streaming Session, so this gives the Moonlight-side
+    // stream-health counters the same lifetime as the stream rather than the
+    // latency benchmark. Common C resets its FEC counters with the RTP queue.
+    StreamHealthTelemetry::reset();
+#endif
 
     m_Overlays[OverlayType::OverlayDebug].color = {0xD0, 0xD0, 0x00, 0xFF};
     m_Overlays[OverlayType::OverlayDebug].fontSize = 20;
@@ -44,6 +53,10 @@ OverlayManager::~OverlayManager()
     if (m_Overlays[OverlayType::OverlayDebug].enabled) {
         LatencyProbe::instance().setEnabled(false);
     }
+
+    // Stop the async debug-OSD worker before freeing its font or shutting down
+    // SDL_ttf. The renderer has already been detached by decoder teardown.
+    stopDebugOverlayWorker();
 #endif
 
     for (int i = 0; i < OverlayType::OverlayMax; i++) {
@@ -97,21 +110,245 @@ SDL_Surface* OverlayManager::getUpdatedOverlaySurface(OverlayType type)
     return (SDL_Surface*)SDL_AtomicSetPtr((void**)&m_Overlays[type].surface, nullptr);
 }
 
+#ifdef HAVE_LATENCY_PROBE
+void OverlayManager::appendDebugTelemetry(char* text, std::size_t length)
+{
+    char healthLines[320];
+    StreamHealthTelemetry::formatOverlayLines(healthLines, sizeof(healthLines));
+
+    const size_t currentLength = SDL_strlen(text);
+    if (currentLength > 0 && text[currentLength - 1] != '\n') {
+        SDL_strlcat(text, "\n", length);
+    }
+    SDL_strlcat(text, healthLines, length);
+
+    char latencyLine[192];
+    LatencyProbe::instance().formatOverlayLine(latencyLine, sizeof(latencyLine));
+    SDL_strlcat(text, "\n\n", length);
+    SDL_strlcat(text, latencyLine, length);
+
+    char pipelineLines[1024];
+    StreamPipelineTelemetry::formatOverlayLines(pipelineLines, sizeof(pipelineLines));
+    if (pipelineLines[0] != '\0') {
+        SDL_strlcat(text, "\n\n", length);
+        SDL_strlcat(text, pipelineLines, length);
+    }
+}
+
+int OverlayManager::debugOverlayThreadEntry(void* opaque)
+{
+    SDL_SetThreadPriority(SDL_THREAD_PRIORITY_LOW);
+    static_cast<OverlayManager*>(opaque)->debugOverlayThreadProc();
+    return 0;
+}
+
+bool OverlayManager::ensureDebugOverlayWorker()
+{
+    std::lock_guard<std::mutex> lock(m_DebugOverlayMutex);
+
+    if (m_DebugOverlayThread != nullptr) {
+        return true;
+    }
+    if (m_FontData.isEmpty()) {
+        return false;
+    }
+
+    m_DebugOverlayFont = TTF_OpenFontRW(SDL_RWFromConstMem(m_FontData.constData(), m_FontData.size()),
+                                        1,
+                                        m_Overlays[OverlayType::OverlayDebug].fontSize);
+    if (m_DebugOverlayFont == nullptr) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "SDL async debug overlay font failed to load: %s",
+                    TTF_GetError());
+        return false;
+    }
+
+    m_DebugOverlayStop = false;
+    m_DebugOverlayPending = false;
+    m_DebugOverlayThread = SDL_CreateThread(debugOverlayThreadEntry,
+                                             "Moonlight debug OSD",
+                                             this);
+    if (m_DebugOverlayThread == nullptr) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "Unable to create async debug overlay thread: %s",
+                    SDL_GetError());
+        TTF_CloseFont(m_DebugOverlayFont);
+        m_DebugOverlayFont = nullptr;
+        return false;
+    }
+
+    return true;
+}
+
+void OverlayManager::stopDebugOverlayWorker()
+{
+    SDL_Thread* thread = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(m_DebugOverlayMutex);
+        if (m_DebugOverlayThread == nullptr) {
+            return;
+        }
+
+        m_DebugOverlayStop = true;
+        m_DebugOverlayPending = false;
+        m_DebugOverlayEnabled = false;
+        ++m_DebugOverlayGeneration;
+        thread = m_DebugOverlayThread;
+        m_DebugOverlayCondition.notify_all();
+    }
+
+    SDL_WaitThread(thread, nullptr);
+
+    {
+        std::lock_guard<std::mutex> lock(m_DebugOverlayMutex);
+        m_DebugOverlayThread = nullptr;
+        m_DebugOverlayStop = false;
+    }
+
+    if (m_DebugOverlayFont != nullptr) {
+        TTF_CloseFont(m_DebugOverlayFont);
+        m_DebugOverlayFont = nullptr;
+    }
+}
+
+void OverlayManager::setDebugOverlayWorkerEnabled(bool enabled)
+{
+    if (enabled && !ensureDebugOverlayWorker()) {
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(m_DebugOverlayMutex);
+    m_DebugOverlayEnabled = enabled;
+    m_DebugOverlayPending = false;
+    ++m_DebugOverlayGeneration;
+    m_DebugOverlayCondition.notify_all();
+}
+
+void OverlayManager::invalidateDebugOverlayUpdate()
+{
+    std::lock_guard<std::mutex> lock(m_DebugOverlayMutex);
+    m_DebugOverlayPending = false;
+    ++m_DebugOverlayGeneration;
+}
+
+bool OverlayManager::queueDebugOverlayUpdate()
+{
+    std::lock_guard<std::mutex> lock(m_DebugOverlayMutex);
+    if (m_DebugOverlayThread == nullptr ||
+            m_DebugOverlayStop ||
+            !m_DebugOverlayEnabled) {
+        return false;
+    }
+
+    // The decoder thread does only a bounded text copy and worker wakeup. If the
+    // worker is still processing the previous one-second update, overwrite the
+    // pending text so updates coalesce instead of building a queue.
+    SDL_utf8strlcpy(m_DebugOverlayPendingText,
+                    m_Overlays[OverlayType::OverlayDebug].text,
+                    sizeof(m_DebugOverlayPendingText));
+    m_DebugOverlayPending = true;
+    ++m_DebugOverlayGeneration;
+    m_DebugOverlayCondition.notify_one();
+    return true;
+}
+
+void OverlayManager::publishDebugOverlaySurface(SDL_Surface* newSurface,
+                                                std::uint64_t generation)
+{
+    if (newSurface == nullptr) {
+        return;
+    }
+
+    SDL_Surface* oldSurface = nullptr;
+    bool published = false;
+    {
+        // Serializing renderer callbacks also guarantees that
+        // setOverlayRenderer(nullptr) cannot race renderer destruction with this
+        // worker callback.
+        std::lock_guard<std::mutex> rendererLock(m_RendererMutex);
+
+        bool valid = false;
+        {
+            std::lock_guard<std::mutex> workerLock(m_DebugOverlayMutex);
+            valid = !m_DebugOverlayStop &&
+                    m_DebugOverlayEnabled &&
+                    generation == m_DebugOverlayGeneration;
+        }
+
+        if (valid && m_Renderer != nullptr) {
+            oldSurface = (SDL_Surface*)SDL_AtomicSetPtr(
+                (void**)&m_Overlays[OverlayType::OverlayDebug].surface,
+                newSurface);
+            m_Renderer->notifyOverlayUpdated(OverlayType::OverlayDebug);
+            published = true;
+        }
+    }
+
+    if (!published) {
+        SDL_FreeSurface(newSurface);
+    }
+    if (oldSurface != nullptr) {
+        SDL_FreeSurface(oldSurface);
+    }
+}
+
+void OverlayManager::debugOverlayThreadProc()
+{
+    for (;;) {
+        char text[sizeof(m_DebugOverlayPendingText)];
+        std::uint64_t generation = 0;
+
+        {
+            std::unique_lock<std::mutex> lock(m_DebugOverlayMutex);
+            m_DebugOverlayCondition.wait(lock, [this]() {
+                return m_DebugOverlayStop || m_DebugOverlayPending;
+            });
+
+            if (m_DebugOverlayStop) {
+                return;
+            }
+
+            SDL_utf8strlcpy(text,
+                            m_DebugOverlayPendingText,
+                            sizeof(text));
+            generation = m_DebugOverlayGeneration;
+            m_DebugOverlayPending = false;
+        }
+
+        // Everything below this point used to execute synchronously on the
+        // decoder thread before avcodec_send_packet(). Keep telemetry snapshot,
+        // text layout, rasterization, and renderer upload off that measured path.
+        appendDebugTelemetry(text, sizeof(text));
+
+        SDL_Surface* newSurface = RenderTextOutlinedWrapped(
+            m_DebugOverlayFont,
+            text,
+            m_Overlays[OverlayType::OverlayDebug].color,
+            {0, 0, 0, 255},
+            4,
+            2048);
+        publishDebugOverlaySurface(newSurface, generation);
+    }
+}
+#endif
+
 void OverlayManager::setOverlayTextUpdated(OverlayType type)
 {
 #ifdef HAVE_LATENCY_PROBE
-    // The performance OSD writes its stats directly into the debug overlay text
-    // buffer, then calls setOverlayTextUpdated(). Append the latency probe here so
-    // it becomes the normal final OSD row and uses the existing outline renderer.
+    // While telemetry is active, the performance OSD is part of the system being
+    // measured. Keep its expensive telemetry scan, SDL_ttf rasterization, and
+    // renderer upload off the decoder thread. The worker keeps only the newest
+    // pending one-second update.
     if (type == OverlayType::OverlayDebug && m_Overlays[type].enabled) {
-        char latencyLine[96];
-        LatencyProbe::instance().formatOverlayLine(latencyLine, sizeof(latencyLine));
-
-        size_t currentLength = SDL_strlen(m_Overlays[type].text);
-        if (currentLength > 0 && m_Overlays[type].text[currentLength - 1] != '\n') {
-            SDL_strlcat(m_Overlays[type].text, "\n", sizeof(m_Overlays[0].text));
+        if (StreamPipelineTelemetry::isActiveFast() && queueDebugOverlayUpdate()) {
+            return;
         }
-        SDL_strlcat(m_Overlays[type].text, latencyLine, sizeof(m_Overlays[0].text));
+
+        // Prevent a late active-benchmark worker result from overwriting a newer
+        // synchronous idle/frozen OSD surface after telemetry has stopped.
+        invalidateDebugOverlayUpdate();
+        appendDebugTelemetry(m_Overlays[type].text,
+                             sizeof(m_Overlays[0].text));
     }
 #endif
 
@@ -130,6 +367,8 @@ void OverlayManager::setOverlayState(OverlayType type, bool enabled)
 
 #ifdef HAVE_LATENCY_PROBE
     if (type == OverlayType::OverlayDebug && stateChanged) {
+        setDebugOverlayWorkerEnabled(enabled);
+
         if (enabled) {
             Session* session = Session::get();
             LatencyBenchmarkControl::configure(session != nullptr ? session->getComputer() : nullptr);
@@ -155,13 +394,43 @@ SDL_Color OverlayManager::getOverlayColor(OverlayType type)
 
 void OverlayManager::setOverlayRenderer(IOverlayRenderer* renderer)
 {
+    // The async debug worker may be inside notifyOverlayUpdated(). Decoder reset
+    // detaches the renderer here before deleting it, so serialize the pointer
+    // change with worker callbacks to make that lifetime guarantee explicit.
+    std::lock_guard<std::mutex> lock(m_RendererMutex);
     m_Renderer = renderer;
+}
+
+void OverlayManager::publishOverlaySurface(OverlayType type, SDL_Surface* newSurface)
+{
+    SDL_Surface* oldSurface = nullptr;
+    bool published = false;
+    {
+        std::lock_guard<std::mutex> lock(m_RendererMutex);
+        if (m_Renderer != nullptr) {
+            oldSurface = (SDL_Surface*)SDL_AtomicSetPtr(
+                (void**)&m_Overlays[type].surface,
+                newSurface);
+            m_Renderer->notifyOverlayUpdated(type);
+            published = true;
+        }
+    }
+
+    if (!published && newSurface != nullptr) {
+        SDL_FreeSurface(newSurface);
+    }
+    if (oldSurface != nullptr) {
+        SDL_FreeSurface(oldSurface);
+    }
 }
 
 void OverlayManager::notifyOverlayUpdated(OverlayType type)
 {
-    if (m_Renderer == nullptr) {
-        return;
+    {
+        std::lock_guard<std::mutex> lock(m_RendererMutex);
+        if (m_Renderer == nullptr) {
+            return;
+        }
     }
 
     // Construct the required font to render the overlay
@@ -186,26 +455,18 @@ void OverlayManager::notifyOverlayUpdated(OverlayType type)
         }
     }
 
-    // Exchange the old surface with the new one
-    SDL_Surface* oldSurface = (SDL_Surface*)SDL_AtomicSetPtr(
-        (void**)&m_Overlays[type].surface,
-        m_Overlays[type].enabled ?
-            // The _Wrapped variant is required for line breaks to work
-            RenderTextOutlinedWrapped(m_Overlays[type].font,
-                                      m_Overlays[type].text,
-                                      m_Overlays[type].color,
-                                      {0, 0, 0, 255},
-                                      4,
-                                      2048)
-            : nullptr);
-
-    // Notify the renderer
-    m_Renderer->notifyOverlayUpdated(type);
-
-    // Free the old surface
-    if (oldSurface != nullptr) {
-        SDL_FreeSurface(oldSurface);
+    SDL_Surface* newSurface = nullptr;
+    if (m_Overlays[type].enabled) {
+        // The _Wrapped variant is required for line breaks to work
+        newSurface = RenderTextOutlinedWrapped(m_Overlays[type].font,
+                                               m_Overlays[type].text,
+                                               m_Overlays[type].color,
+                                               {0, 0, 0, 255},
+                                               4,
+                                               2048);
     }
+
+    publishOverlaySurface(type, newSurface);
 }
 
 SDL_Surface* OverlayManager::RenderTextOutlinedWrapped(TTF_Font* font, const char* text, SDL_Color textColor, SDL_Color outlineColor, int outlineWidth, int wrapWidth) {

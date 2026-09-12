@@ -8,6 +8,12 @@
 #ifdef HAVE_LIBPLACEBO_VULKAN
 
 #include "latencyprobe.h"
+#include "streampipelinetelemetry.h"
+#include "streamhealthtelemetry.h"
+
+extern "C" {
+#include <libavcodec/avcodec.h>
+}
 
 #include <libplacebo/gpu.h>
 #include <libplacebo/renderer.h>
@@ -327,10 +333,18 @@ inline bool swapchainSubmitFrame(pl_swapchain swapchain)
             g_PendingFrame.sampleRequested &&
             g_PendingFrame.renderer != nullptr;
 
-    // Capture t1 only for an actual benchmark sample. This removes the previous
-    // unconditional SDL_GetPerformanceCounter() call from every submitted frame.
+    // Preserve the frozen input benchmark's t1 ordering: its SDL timestamp stays
+    // the first benchmark clock sampled after a successful real swapchain submit.
     const uint64_t submitTimestamp = result && sampleRequested ?
                 SDL_GetPerformanceCounter() : 0;
+
+    // Phase 1 uses LiGetMicroseconds() so it shares the Common C clock domain.
+    // Keep this immediately after the pre-existing input t1 capture. On the vast
+    // majority of frames no input sample is pending, so only the TLS predicate
+    // sits between the real submit return and this timestamp.
+    if (result && StreamPipelineTelemetry::presentPendingFast()) {
+        StreamPipelineTelemetry::presentSuccess(LiGetMicroseconds());
+    }
 
     PendingFrame pending = {};
     if (matchingFrame) {
@@ -359,6 +373,59 @@ inline bool swapchainSubmitFrame(pl_swapchain swapchain)
     return result;
 }
 
+inline bool waitForNextVideoFrame(VIDEO_FRAME_HANDLE* frameHandle, PDECODE_UNIT* decodeUnit)
+{
+    const bool result = LiWaitForNextVideoFrame(frameHandle, decodeUnit);
+    if (result && decodeUnit != nullptr) {
+        StreamHealthTelemetry::noteDecodeUnit((*decodeUnit)->frameNumber);
+        if (StreamPipelineTelemetry::isActiveFast()) {
+            StreamPipelineTelemetry::noteDecodeUnit(*decodeUnit);
+        }
+    }
+    return result;
+}
+
+inline bool pollNextVideoFrame(VIDEO_FRAME_HANDLE* frameHandle, PDECODE_UNIT* decodeUnit)
+{
+    const bool result = LiPollNextVideoFrame(frameHandle, decodeUnit);
+    if (result && decodeUnit != nullptr) {
+        StreamHealthTelemetry::noteDecodeUnit((*decodeUnit)->frameNumber);
+        if (StreamPipelineTelemetry::isActiveFast()) {
+            StreamPipelineTelemetry::noteDecodeUnit(*decodeUnit);
+        }
+    }
+    return result;
+}
+
+inline int avcodecSendPacket(AVCodecContext* context, const AVPacket* packet)
+{
+    if (!StreamPipelineTelemetry::isActiveFast()) {
+        return avcodec_send_packet(context, packet);
+    }
+
+    // No telemetry bookkeeping may occur between this timestamp and the real
+    // decoder submission. Association/ring updates happen after the call returns.
+    const std::uint64_t decodeStartUs = LiGetMicroseconds();
+    const int result = avcodec_send_packet(context, packet);
+    StreamPipelineTelemetry::decodeSubmitted(decodeStartUs, result >= 0);
+    return result;
+}
+
+inline int avcodecReceiveFrame(AVCodecContext* context, AVFrame* frame)
+{
+    if (!StreamPipelineTelemetry::isActiveFast()) {
+        return avcodec_receive_frame(context, frame);
+    }
+
+    const int result = avcodec_receive_frame(context, frame);
+    if (result == 0) {
+        // The active gate ran before the decoder call, leaving only the result
+        // branch between a successful return and this exact output timestamp.
+        StreamPipelineTelemetry::decodedFrame(frame, LiGetMicroseconds());
+    }
+    return result;
+}
+
 } // namespace LatencyProbeHooks
 
 // These wrappers are defined after all real libplacebo declarations and after
@@ -374,5 +441,13 @@ inline bool swapchainSubmitFrame(pl_swapchain swapchain)
     LatencyProbeHooks::swapchainStartFrame((swapchain), (frame))
 #define pl_swapchain_submit_frame(swapchain) \
     LatencyProbeHooks::swapchainSubmitFrame((swapchain))
+#define LiWaitForNextVideoFrame(frameHandle, decodeUnit) \
+    LatencyProbeHooks::waitForNextVideoFrame((frameHandle), (decodeUnit))
+#define LiPollNextVideoFrame(frameHandle, decodeUnit) \
+    LatencyProbeHooks::pollNextVideoFrame((frameHandle), (decodeUnit))
+#define avcodec_send_packet(context, packet) \
+    LatencyProbeHooks::avcodecSendPacket((context), (packet))
+#define avcodec_receive_frame(context, frame) \
+    LatencyProbeHooks::avcodecReceiveFrame((context), (frame))
 
 #endif // HAVE_LIBPLACEBO_VULKAN

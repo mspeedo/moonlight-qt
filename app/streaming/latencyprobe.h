@@ -2,6 +2,7 @@
 
 #include "SDL_compat.h"
 #include "latencybenchmarkcontrol.h"
+#include "streampipelinetelemetry.h"
 
 #include <atomic>
 #include <cstddef>
@@ -46,6 +47,7 @@ public:
         bool stateChanged = false;
         bool restorePhysicalA = false;
         bool requestStop = false;
+        bool stopStreamTelemetry = false;
         SDL_JoystickID restoreController = 0;
         SDL_TimerID holdTimerToRemove = 0;
         SDL_TimerID benchmarkTimerToRemove = 0;
@@ -63,6 +65,7 @@ public:
                         m_PhysicalAHeld;
                 restoreController = m_BenchmarkControllerId;
                 requestStop = m_BenchmarkStarting || m_HelperRunning || m_AutoBenchmark;
+                stopStreamTelemetry = m_AutoBenchmark;
                 holdTimerToRemove = m_HoldTimer;
                 benchmarkTimerToRemove = m_BenchmarkTimer;
                 m_HoldTimer = 0;
@@ -76,6 +79,7 @@ public:
             m_Expected = VisualState::Unknown;
             m_InputTimestamp = 0;
             m_LastLatencyMs = 0.0;
+            m_RunMaximumMs = 0.0;
 
             m_PhysicalAHeld = false;
             m_BenchmarkStarting = false;
@@ -99,6 +103,8 @@ public:
         }
 
         if (enabled) {
+            StreamPipelineTelemetry::clear();
+
             // Idle OSD cost is only the controller event watch. The hold timer is
             // armed lazily on a real A-down, and the 17 ms timer exists only once
             // the 750 ms hold actually activates the benchmark.
@@ -118,9 +124,9 @@ public:
                 pushSyntheticAEvent(restoreController, true);
             }
 
-            // Never block the OSD/UI teardown path on host networking. START and
-            // STOP are best-effort asynchronous requests serialized by
-            // LatencyBenchmarkControl.
+            if (stopStreamTelemetry) {
+                StreamPipelineTelemetry::stop();
+            }
             if (requestStop) {
                 LatencyBenchmarkControl::stopAsync();
             }
@@ -174,50 +180,51 @@ public:
         checkTimeoutLocked(now);
 
         double averageMs = 0.0;
+        double maximumMs = 0.0;
         size_t averageCount = 0;
-        const bool hasAverage = getAverageLocked(now, averageMs, averageCount);
+        const bool hasAverage = getAverageLocked(now, averageMs, maximumMs, averageCount);
 
         if (m_BenchmarkStarting) {
             std::snprintf(output, length,
-                          "Input to present latency: starting host helper...");
+                          "Input -> present: starting host helper...");
         }
         else if (m_HelperRunning && m_Baseline == VisualState::Unknown) {
             std::snprintf(output, length,
-                          "Input to present latency: acquiring helper baseline...");
+                          "Input -> present: acquiring helper baseline...");
         }
         else if (m_AutoBenchmark) {
             if (m_ValidationPending) {
                 std::snprintf(output, length,
-                              "Input to present latency: validating helper...");
+                              "Input -> present: validating helper...");
             }
             else if (hasAverage) {
                 std::snprintf(output, length,
-                              "Input to present latency: auto benchmark | AVG10s %.2f ms (n=%zu)",
-                              averageMs, averageCount);
+                              "Input -> present: AVG10s %.2f ms | MAX10s %.2f ms (n=%zu) | MAX %.2f ms",
+                              averageMs, maximumMs, averageCount, m_RunMaximumMs);
+            }
+            else if (m_HasResult) {
+                std::snprintf(output, length,
+                              "Input -> present: AVG10s N/A | MAX10s N/A (n=0) | MAX %.2f ms",
+                              m_RunMaximumMs);
             }
             else {
                 std::snprintf(output, length,
-                              "Input to present latency: auto benchmark starting...");
+                              "Input -> present: auto benchmark starting...");
             }
-        }
-        else if (hasAverage && m_HasResult) {
-            std::snprintf(output, length,
-                          "Input to present latency: %.2f ms | AVG10s %.2f ms (n=%zu)",
-                          m_LastLatencyMs, averageMs, averageCount);
         }
         else if (hasAverage) {
             std::snprintf(output, length,
-                          "Input to present latency: ready (hold A) | AVG10s %.2f ms (n=%zu)",
-                          averageMs, averageCount);
+                          "Input -> present: AVG10s %.2f ms | MAX10s %.2f ms (n=%zu) | MAX %.2f ms",
+                          averageMs, maximumMs, averageCount, m_RunMaximumMs);
         }
         else if (m_HasResult) {
             std::snprintf(output, length,
-                          "Input to present latency: %.2f ms | ready (hold A)",
-                          m_LastLatencyMs);
+                          "Input -> present: AVG10s N/A | MAX10s N/A (n=0) | MAX %.2f ms",
+                          m_RunMaximumMs);
         }
         else {
             std::snprintf(output, length,
-                          "Input to present latency: ready (hold A)");
+                          "Input -> present: ready (hold A)");
         }
 
         SDL_AtomicUnlock(&m_Lock);
@@ -415,6 +422,7 @@ private:
             m_InputTimestamp = 0;
             m_HasResult = false;
             m_LastLatencyMs = 0.0;
+            m_RunMaximumMs = 0.0;
             m_ValidationPending = false;
             resetAverageLocked();
             controllerId = m_BenchmarkControllerId;
@@ -460,6 +468,8 @@ private:
         SDL_JoystickID controllerId = 0;
         bool requestStart = false;
         bool requestStop = false;
+        bool telemetryStart = false;
+        bool telemetryStop = false;
         const Uint32 nowTick = SDL_GetTicks();
         const uint64_t nowCounter = SDL_GetPerformanceCounter();
 
@@ -520,6 +530,7 @@ private:
                 m_AutoDownTick = 0;
                 m_AutoNextDownTick = nowTick + kBenchmarkPressMs;
                 m_PulseJitterState = static_cast<uint32_t>(nowCounter);
+                telemetryStart = true;
 
                 SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                             "Latency probe: automatic benchmark started");
@@ -541,6 +552,7 @@ private:
                 m_InputTimestamp = 0;
                 action = PulseAction::Release;
                 requestStop = true;
+                telemetryStop = true;
 
                 SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                             "Latency probe: automatic benchmark stopped");
@@ -577,6 +589,13 @@ private:
         }
         else if (action == PulseAction::Release) {
             pushSyntheticAEvent(controllerId, false);
+        }
+
+        if (telemetryStart) {
+            StreamPipelineTelemetry::start();
+        }
+        if (telemetryStop) {
+            StreamPipelineTelemetry::stop();
         }
 
         if (requestStart) {
@@ -629,6 +648,9 @@ private:
             }
             else {
                 m_LastLatencyMs = latencyMs;
+                if (!m_HasResult || latencyMs > m_RunMaximumMs) {
+                    m_RunMaximumMs = latencyMs;
+                }
                 m_HasResult = true;
 
                 if (m_AutoBenchmark) {
@@ -711,7 +733,7 @@ private:
         }
     }
 
-    bool getAverageLocked(uint64_t now, double& averageMs, size_t& count)
+    bool getAverageLocked(uint64_t now, double& averageMs, double& maximumMs, size_t& count)
     {
         if (m_AutoBenchmark) {
             pruneAverageLocked(now);
@@ -719,14 +741,20 @@ private:
 
         if (m_AverageCount == 0) {
             averageMs = 0.0;
+            maximumMs = 0.0;
             count = 0;
             return false;
         }
 
         double sum = 0.0;
+        maximumMs = 0.0;
         for (size_t i = 0; i < m_AverageCount; ++i) {
             const size_t index = (m_AverageStart + i) % kAverageCapacity;
-            sum += m_AverageSamples[index].latencyMs;
+            const double latencyMs = m_AverageSamples[index].latencyMs;
+            sum += latencyMs;
+            if (i == 0 || latencyMs > maximumMs) {
+                maximumMs = latencyMs;
+            }
         }
 
         count = m_AverageCount;
@@ -743,6 +771,7 @@ private:
     VisualState m_Expected = VisualState::Unknown;
     uint64_t m_InputTimestamp = 0;
     double m_LastLatencyMs = 0.0;
+    double m_RunMaximumMs = 0.0;
 
     SDL_TimerID m_HoldTimer = 0;
     SDL_TimerID m_BenchmarkTimer = 0;

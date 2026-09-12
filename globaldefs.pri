@@ -46,3 +46,17 @@ unix:!macx:exists($$_PRO_FILE_PWD_/streaming/latencybenchmarkcontrol.cpp) {
     SOURCES += $$_PRO_FILE_PWD_/streaming/latencybenchmarkcontrol.cpp
     HEADERS += $$_PRO_FILE_PWD_/streaming/latencybenchmarkcontrol.h
 }
+
+# Stream-health counters are session-lifetime diagnostics and remain independent
+# of whether the automatic latency benchmark is running.
+unix:!macx:exists($$_PRO_FILE_PWD_/streaming/streamhealthtelemetry.cpp) {
+    SOURCES += $$_PRO_FILE_PWD_/streaming/streamhealthtelemetry.cpp
+    HEADERS += $$_PRO_FILE_PWD_/streaming/streamhealthtelemetry.h
+}
+
+# Phase 1 stream-pipeline telemetry stays in a downstream-only unit and is
+# activated only while the automatic latency benchmark is running.
+unix:!macx:exists($$_PRO_FILE_PWD_/streaming/streampipelinetelemetry.cpp) {
+    SOURCES += $$_PRO_FILE_PWD_/streaming/streampipelinetelemetry.cpp
+    HEADERS += $$_PRO_FILE_PWD_/streaming/streampipelinetelemetry.h
+}
