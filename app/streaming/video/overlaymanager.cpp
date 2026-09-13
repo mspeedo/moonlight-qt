@@ -168,7 +168,7 @@ SDL_Surface* renderTelemetryGraphs(TTF_Font* font, SDL_Color color)
             static_cast<int>(sizeof(rows) / sizeof(rows[0])) * rowHeight;
 
     SDL_Surface* surface = SDL_CreateRGBSurfaceWithFormat(
-            0, width, height, 32, SDL_PIXELFORMAT_RGBA32);
+            0, width, height, 32, SDL_PIXELFORMAT_ARGB8888);
     if (surface == nullptr) {
         return nullptr;
     }
@@ -219,7 +219,7 @@ SDL_Surface* combineDebugOverlaySurfaces(SDL_Surface* textSurface,
     const int width = textSurface->w + kTelemetryGraphSurfaceGap + graphSurface->w;
     const int height = textSurface->h > graphSurface->h ? textSurface->h : graphSurface->h;
     SDL_Surface* combined = SDL_CreateRGBSurfaceWithFormat(
-            0, width, height, 32, SDL_PIXELFORMAT_RGBA32);
+            0, width, height, 32, SDL_PIXELFORMAT_ARGB8888);
     if (combined == nullptr) {
         SDL_FreeSurface(graphSurface);
         return textSurface;
