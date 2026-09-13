@@ -109,6 +109,52 @@ public:
         return result;
     }
 
+    bool fillGraph(std::uint64_t nowUs, GraphSeries& graph) const
+    {
+        graph = {};
+        const std::uint64_t windowStartUs = nowUs > kWindowUs ? nowUs - kWindowUs : 0;
+        bool hasData = false;
+
+        // The OSD worker reads the same lock-free slots used by snapshot(). Each
+        // horizontal bucket covers an equal slice of the shared 10-second time
+        // window, and keeps the maximum so a one-frame hitch can never be averaged
+        // away by neighboring normal frames.
+        for (const auto& slot : m_Slots) {
+            const std::uint64_t serialBefore = slot.serial.load(std::memory_order_acquire);
+            if (serialBefore == 0) {
+                continue;
+            }
+
+            const std::uint64_t completedUs = slot.completedUs.load(std::memory_order_relaxed);
+            const std::uint64_t durationUs = slot.durationUs.load(std::memory_order_relaxed);
+            const std::uint64_t serialAfter = slot.serial.load(std::memory_order_acquire);
+
+            if (serialBefore != serialAfter || serialAfter == 0) {
+                continue;
+            }
+            if (completedUs > nowUs || nowUs - completedUs > kWindowUs ||
+                    completedUs < windowStartUs) {
+                continue;
+            }
+
+            const std::uint64_t offsetUs = completedUs - windowStartUs;
+            std::size_t bucket = static_cast<std::size_t>(
+                    (offsetUs * kGraphColumns) / kWindowUs);
+            if (bucket >= kGraphColumns) {
+                bucket = kGraphColumns - 1;
+            }
+
+            const float durationMs = static_cast<float>(durationUs) / 1000.0f;
+            if (!graph.valid[bucket] || durationMs > graph.maximumMs[bucket]) {
+                graph.maximumMs[bucket] = durationMs;
+                graph.valid[bucket] = 1;
+            }
+            hasData = true;
+        }
+
+        return hasData;
+    }
+
 private:
     std::array<SampleSlot, kRingCapacity> m_Slots;
     std::atomic<std::uint64_t> m_NextSerial {0};
@@ -575,6 +621,34 @@ Snapshot snapshot()
                      result.presentInterval.valid || result.presentInterval.runValid;
 
     result.frames = g_Frames.load(std::memory_order_relaxed);
+    return result;
+}
+
+GraphSnapshot graphSnapshot()
+{
+    GraphSnapshot result;
+    const bool active = g_Active.load(std::memory_order_acquire);
+    const std::uint64_t frozenNowUs = g_FrozenNowUs.load(std::memory_order_acquire);
+    if (!active && frozenNowUs == 0) {
+        return result;
+    }
+
+    std::uint64_t nowUs = active ? LiGetMicroseconds() : frozenNowUs;
+    if (nowUs == 0) {
+        nowUs = LiGetMicroseconds();
+    }
+
+    result.hasData |= g_HostFrameInterval.fillGraph(nowUs, result.hostFrameInterval);
+    result.hasData |= g_FirstPacketInterval.fillGraph(nowUs, result.firstPacketInterval);
+    result.hasData |= g_CompleteFrameInterval.fillGraph(nowUs, result.completeFrameInterval);
+    result.hasData |= g_FirstPacketToComplete.fillGraph(nowUs, result.firstPacketToComplete);
+    result.hasData |= g_PresentInterval.fillGraph(nowUs, result.presentInterval);
+
+    const MetricSnapshot hostCadence = g_HostFrameInterval.snapshot(nowUs);
+    if (hostCadence.valid) {
+        result.framePeriodMs = hostCadence.averageMs;
+    }
+
     return result;
 }
 
