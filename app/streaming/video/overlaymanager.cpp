@@ -12,6 +12,239 @@
 
 using namespace Overlay;
 
+#ifdef HAVE_LATENCY_PROBE
+namespace {
+
+constexpr int kTelemetryGraphPlotHeight = 44;
+constexpr int kTelemetryGraphRowGap = 8;
+constexpr int kTelemetryGraphPanelPadding = 8;
+constexpr int kTelemetryGraphSurfaceGap = 24;
+constexpr float kTelemetryGraphMaxMs = 25.0f;
+
+void blitGraphLabel(SDL_Surface* destination,
+                    TTF_Font* font,
+                    const char* text,
+                    int x,
+                    int y,
+                    SDL_Color color)
+{
+    SDL_Surface* shadow = TTF_RenderUTF8_Blended(font, text, {0, 0, 0, 255});
+    SDL_Surface* label = TTF_RenderUTF8_Blended(font, text, color);
+
+    if (shadow != nullptr) {
+        SDL_Rect dst = {x + 1, y + 1, shadow->w, shadow->h};
+        SDL_BlitSurface(shadow, nullptr, destination, &dst);
+        SDL_FreeSurface(shadow);
+    }
+    if (label != nullptr) {
+        SDL_Rect dst = {x, y, label->w, label->h};
+        SDL_BlitSurface(label, nullptr, destination, &dst);
+        SDL_FreeSurface(label);
+    }
+}
+
+int graphValueToY(float valueMs, int plotY)
+{
+    if (valueMs < 0.0f) {
+        valueMs = 0.0f;
+    }
+    if (valueMs > kTelemetryGraphMaxMs) {
+        valueMs = kTelemetryGraphMaxMs;
+    }
+
+    const int usableHeight = kTelemetryGraphPlotHeight - 3;
+    const int scaled = static_cast<int>(
+            (valueMs / kTelemetryGraphMaxMs) * usableHeight + 0.5f);
+    return plotY + kTelemetryGraphPlotHeight - 2 - scaled;
+}
+
+void drawTelemetryGraph(SDL_Surface* surface,
+                        int plotX,
+                        int plotY,
+                        const StreamPipelineTelemetry::GraphSeries& series,
+                        double framePeriodMs,
+                        bool drawFramePeriod,
+                        SDL_Color color)
+{
+    const Uint32 background = SDL_MapRGBA(surface->format, 0, 0, 0, 0x70);
+    const Uint32 grid = SDL_MapRGBA(surface->format,
+                                    color.r / 3,
+                                    color.g / 3,
+                                    color.b / 3,
+                                    0x70);
+    const Uint32 border = SDL_MapRGBA(surface->format,
+                                      color.r / 2,
+                                      color.g / 2,
+                                      color.b / 2,
+                                      0xB0);
+    const Uint32 reference = SDL_MapRGBA(surface->format,
+                                         color.r,
+                                         color.g,
+                                         color.b,
+                                         0x70);
+    const Uint32 trace = SDL_MapRGBA(surface->format,
+                                     color.r,
+                                     color.g,
+                                     color.b,
+                                     0xD0);
+
+    SDL_Rect plot = {plotX,
+                     plotY,
+                     static_cast<int>(StreamPipelineTelemetry::kGraphColumns),
+                     kTelemetryGraphPlotHeight};
+    SDL_FillRect(surface, &plot, background);
+
+    for (int ms = 5; ms < static_cast<int>(kTelemetryGraphMaxMs); ms += 5) {
+        const int y = graphValueToY(static_cast<float>(ms), plotY);
+        SDL_Rect line = {plotX, y,
+                         static_cast<int>(StreamPipelineTelemetry::kGraphColumns), 1};
+        SDL_FillRect(surface, &line, grid);
+    }
+
+    if (drawFramePeriod && framePeriodMs > 0.0 &&
+            framePeriodMs < kTelemetryGraphMaxMs) {
+        const int y = graphValueToY(static_cast<float>(framePeriodMs), plotY);
+        SDL_Rect line = {plotX, y,
+                         static_cast<int>(StreamPipelineTelemetry::kGraphColumns), 1};
+        SDL_FillRect(surface, &line, reference);
+    }
+
+    const int bottom = plotY + kTelemetryGraphPlotHeight - 2;
+    for (std::size_t i = 0; i < StreamPipelineTelemetry::kGraphColumns; ++i) {
+        if (!series.valid[i]) {
+            continue;
+        }
+
+        const int y = graphValueToY(series.maximumMs[i], plotY);
+        SDL_Rect bar = {plotX + static_cast<int>(i),
+                        y,
+                        1,
+                        bottom - y + 1};
+        SDL_FillRect(surface, &bar, trace);
+    }
+
+    SDL_Rect top = {plotX, plotY,
+                    static_cast<int>(StreamPipelineTelemetry::kGraphColumns), 1};
+    SDL_Rect bottomLine = {plotX, plotY + kTelemetryGraphPlotHeight - 1,
+                           static_cast<int>(StreamPipelineTelemetry::kGraphColumns), 1};
+    SDL_Rect left = {plotX, plotY, 1, kTelemetryGraphPlotHeight};
+    SDL_Rect right = {plotX + static_cast<int>(StreamPipelineTelemetry::kGraphColumns) - 1,
+                      plotY, 1, kTelemetryGraphPlotHeight};
+    SDL_FillRect(surface, &top, border);
+    SDL_FillRect(surface, &bottomLine, border);
+    SDL_FillRect(surface, &left, border);
+    SDL_FillRect(surface, &right, border);
+}
+
+SDL_Surface* renderTelemetryGraphs(TTF_Font* font, SDL_Color color)
+{
+    const StreamPipelineTelemetry::GraphSnapshot graphs =
+            StreamPipelineTelemetry::graphSnapshot();
+    if (!graphs.hasData || font == nullptr) {
+        return nullptr;
+    }
+
+    struct GraphRow {
+        const char* label;
+        const StreamPipelineTelemetry::GraphSeries* series;
+        bool drawFramePeriod;
+    };
+
+    const GraphRow rows[] = {
+        {"Host frame interval", &graphs.hostFrameInterval, true},
+        {"First packet interval", &graphs.firstPacketInterval, true},
+        {"Complete frame interval", &graphs.completeFrameInterval, true},
+        {"First packet -> complete", &graphs.firstPacketToComplete, false},
+        {"Present interval", &graphs.presentInterval, true},
+    };
+
+    const int fontHeight = TTF_FontHeight(font);
+    const int titleHeight = fontHeight + 6;
+    const int labelHeight = fontHeight + 2;
+    const int rowHeight = labelHeight + kTelemetryGraphPlotHeight + kTelemetryGraphRowGap;
+    const int width = kTelemetryGraphPanelPadding * 2 +
+            static_cast<int>(StreamPipelineTelemetry::kGraphColumns);
+    const int height = kTelemetryGraphPanelPadding * 2 + titleHeight +
+            static_cast<int>(sizeof(rows) / sizeof(rows[0])) * rowHeight;
+
+    SDL_Surface* surface = SDL_CreateRGBSurfaceWithFormat(
+            0, width, height, 32, SDL_PIXELFORMAT_RGBA32);
+    if (surface == nullptr) {
+        return nullptr;
+    }
+
+    SDL_SetSurfaceBlendMode(surface, SDL_BLENDMODE_BLEND);
+    SDL_FillRect(surface, nullptr, SDL_MapRGBA(surface->format, 0, 0, 0, 0));
+
+    blitGraphLabel(surface,
+                   font,
+                   "10 s spike history (0-25 ms, max per bucket)",
+                   kTelemetryGraphPanelPadding,
+                   kTelemetryGraphPanelPadding,
+                   color);
+
+    int y = kTelemetryGraphPanelPadding + titleHeight;
+    for (const GraphRow& row : rows) {
+        blitGraphLabel(surface,
+                       font,
+                       row.label,
+                       kTelemetryGraphPanelPadding,
+                       y,
+                       color);
+        y += labelHeight;
+
+        drawTelemetryGraph(surface,
+                           kTelemetryGraphPanelPadding,
+                           y,
+                           *row.series,
+                           graphs.framePeriodMs,
+                           row.drawFramePeriod,
+                           color);
+        y += kTelemetryGraphPlotHeight + kTelemetryGraphRowGap;
+    }
+
+    return surface;
+}
+
+SDL_Surface* combineDebugOverlaySurfaces(SDL_Surface* textSurface,
+                                         SDL_Surface* graphSurface)
+{
+    if (graphSurface == nullptr) {
+        return textSurface;
+    }
+    if (textSurface == nullptr) {
+        return graphSurface;
+    }
+
+    const int width = textSurface->w + kTelemetryGraphSurfaceGap + graphSurface->w;
+    const int height = textSurface->h > graphSurface->h ? textSurface->h : graphSurface->h;
+    SDL_Surface* combined = SDL_CreateRGBSurfaceWithFormat(
+            0, width, height, 32, SDL_PIXELFORMAT_RGBA32);
+    if (combined == nullptr) {
+        SDL_FreeSurface(graphSurface);
+        return textSurface;
+    }
+
+    SDL_SetSurfaceBlendMode(combined, SDL_BLENDMODE_BLEND);
+    SDL_FillRect(combined, nullptr, SDL_MapRGBA(combined->format, 0, 0, 0, 0));
+
+    SDL_Rect textDst = {0, 0, textSurface->w, textSurface->h};
+    SDL_BlitSurface(textSurface, nullptr, combined, &textDst);
+
+    SDL_Rect graphDst = {textSurface->w + kTelemetryGraphSurfaceGap,
+                         0,
+                         graphSurface->w,
+                         graphSurface->h};
+    SDL_BlitSurface(graphSurface, nullptr, combined, &graphDst);
+
+    SDL_FreeSurface(textSurface);
+    SDL_FreeSurface(graphSurface);
+    return combined;
+}
+
+} // namespace
+#endif
+
 OverlayManager::OverlayManager() :
     m_Renderer(nullptr),
     m_FontData(Path::readDataFile("ModeSeven.ttf"))
@@ -317,16 +550,21 @@ void OverlayManager::debugOverlayThreadProc()
 
         // Everything below this point used to execute synchronously on the
         // decoder thread before avcodec_send_packet(). Keep telemetry snapshot,
-        // text layout, rasterization, and renderer upload off that measured path.
+        // text layout, rasterization, graph generation, and renderer upload off
+        // that measured path.
         appendDebugTelemetry(text, sizeof(text));
 
-        SDL_Surface* newSurface = RenderTextOutlinedWrapped(
+        SDL_Surface* textSurface = RenderTextOutlinedWrapped(
             m_DebugOverlayFont,
             text,
             m_Overlays[OverlayType::OverlayDebug].color,
             {0, 0, 0, 255},
             4,
             2048);
+        SDL_Surface* graphSurface = renderTelemetryGraphs(
+            m_DebugOverlayFont,
+            m_Overlays[OverlayType::OverlayDebug].color);
+        SDL_Surface* newSurface = combineDebugOverlaySurfaces(textSurface, graphSurface);
         publishDebugOverlaySurface(newSurface, generation);
     }
 }
@@ -464,6 +702,14 @@ void OverlayManager::notifyOverlayUpdated(OverlayType type)
                                                {0, 0, 0, 255},
                                                4,
                                                2048);
+#ifdef HAVE_LATENCY_PROBE
+        if (type == OverlayType::OverlayDebug) {
+            SDL_Surface* graphSurface = renderTelemetryGraphs(
+                    m_Overlays[type].font,
+                    m_Overlays[type].color);
+            newSurface = combineDebugOverlaySurfaces(newSurface, graphSurface);
+        }
+#endif
     }
 
     publishOverlaySurface(type, newSurface);
