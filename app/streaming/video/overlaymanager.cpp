@@ -560,7 +560,7 @@ void OverlayManager::debugOverlayThreadProc()
             m_Overlays[OverlayType::OverlayDebug].color,
             {0, 0, 0, 255},
             4,
-            2048);
+            0);
         SDL_Surface* graphSurface = renderTelemetryGraphs(
             m_DebugOverlayFont,
             m_Overlays[OverlayType::OverlayDebug].color);
@@ -695,13 +695,22 @@ void OverlayManager::notifyOverlayUpdated(OverlayType type)
 
     SDL_Surface* newSurface = nullptr;
     if (m_Overlays[type].enabled) {
-        // The _Wrapped variant is required for line breaks to work
+        // The _Wrapped variant is required for line breaks to work. The telemetry
+        // debug OSD uses wrapLength 0 so SDL_ttf sizes the surface to the actual
+        // longest line instead of padding multiline text to 2048 pixels. This
+        // keeps the graph panel adjacent to the visible text rather than off-screen.
+        int wrapWidth = 2048;
+#ifdef HAVE_LATENCY_PROBE
+        if (type == OverlayType::OverlayDebug) {
+            wrapWidth = 0;
+        }
+#endif
         newSurface = RenderTextOutlinedWrapped(m_Overlays[type].font,
                                                m_Overlays[type].text,
                                                m_Overlays[type].color,
                                                {0, 0, 0, 255},
                                                4,
-                                               2048);
+                                               wrapWidth);
 #ifdef HAVE_LATENCY_PROBE
         if (type == OverlayType::OverlayDebug) {
             SDL_Surface* graphSurface = renderTelemetryGraphs(
@@ -724,16 +733,19 @@ SDL_Surface* OverlayManager::RenderTextOutlinedWrapped(TTF_Font* font, const cha
     TTF_SetFontOutline(font, outlineWidth);
 
     // Verify that the string won't require wrapping (which could cause the outline and the text
-    // to diverge due to different wrapping positions).
+    // to diverge due to different wrapping positions). With wrapWidth 0, SDL_ttf is newline-aware
+    // but does not wrap by width, so this check is unnecessary.
     //
     // FIXME: We do this rather than just disabling wrapping entirely (wrapWidth = 0) because we
     // need further testing to ensure that all renderers can handle non-NPOT overlay textures.
-    for (const QString& line : QString(text).split('\n')) {
-        int extent, count;
-        if (TTF_MeasureUTF8(font, line.toUtf8(), wrapWidth, &extent, &count) == 0 && count < line.size()) {
-            // If it requires wrapping, render it without the outline
-            TTF_SetFontOutline(font, oldOutline);
-            return TTF_RenderUTF8_Blended_Wrapped(font, text, textColor, wrapWidth);
+    if (wrapWidth > 0) {
+        for (const QString& line : QString(text).split('\n')) {
+            int extent, count;
+            if (TTF_MeasureUTF8(font, line.toUtf8(), wrapWidth, &extent, &count) == 0 && count < line.size()) {
+                // If it requires wrapping, render it without the outline
+                TTF_SetFontOutline(font, oldOutline);
+                return TTF_RenderUTF8_Blended_Wrapped(font, text, textColor, wrapWidth);
+            }
         }
     }
 
