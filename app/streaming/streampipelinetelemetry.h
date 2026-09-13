@@ -2,6 +2,7 @@
 
 #include <Limelight.h>
 
+#include <array>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -9,6 +10,8 @@
 struct AVFrame;
 
 namespace StreamPipelineTelemetry {
+
+constexpr std::size_t kGraphColumns = 480;
 
 struct MetricSnapshot {
     bool valid = false;
@@ -30,6 +33,21 @@ struct Snapshot {
     MetricSnapshot renderStartToPresent;
     MetricSnapshot presentInterval;
     std::uint64_t frames = 0;
+    bool hasData = false;
+};
+
+struct GraphSeries {
+    std::array<float, kGraphColumns> maximumMs {};
+    std::array<std::uint8_t, kGraphColumns> valid {};
+};
+
+struct GraphSnapshot {
+    GraphSeries hostFrameInterval;
+    GraphSeries firstPacketInterval;
+    GraphSeries completeFrameInterval;
+    GraphSeries firstPacketToComplete;
+    GraphSeries presentInterval;
+    double framePeriodMs = 0.0;
     bool hasData = false;
 };
 
@@ -116,6 +134,7 @@ void presentSuccess(std::uint64_t presentUs);
 #endif
 
 Snapshot snapshot();
+GraphSnapshot graphSnapshot();
 void formatOverlayLines(char* output, std::size_t length);
 
 } // namespace StreamPipelineTelemetry
