@@ -15,11 +15,12 @@ using namespace Overlay;
 #ifdef HAVE_LATENCY_PROBE
 namespace {
 
-constexpr int kTelemetryGraphPlotHeight = 44;
+constexpr int kTelemetryGraphPlotHeight = 88;
 constexpr int kTelemetryGraphRowGap = 8;
 constexpr int kTelemetryGraphPanelPadding = 8;
 constexpr int kTelemetryGraphSurfaceGap = 24;
-constexpr float kTelemetryGraphMaxMs = 25.0f;
+constexpr float kTelemetryGraphScaleStepMs = 5.0f;
+constexpr float kTelemetryGraphMinScaleMs = 5.0f;
 
 void blitGraphLabel(SDL_Surface* destination,
                     TTF_Font* font,
@@ -43,18 +44,39 @@ void blitGraphLabel(SDL_Surface* destination,
     }
 }
 
-int graphValueToY(float valueMs, int plotY)
+float graphScaleMaxMs(const StreamPipelineTelemetry::GraphSeries& series)
+{
+    float maximumMs = 0.0f;
+    for (std::size_t i = 0; i < StreamPipelineTelemetry::kGraphColumns; ++i) {
+        if (series.valid[i] && series.maximumMs[i] > maximumMs) {
+            maximumMs = series.maximumMs[i];
+        }
+    }
+
+    if (maximumMs <= kTelemetryGraphMinScaleMs) {
+        return kTelemetryGraphMinScaleMs;
+    }
+
+    const int completeSteps = static_cast<int>(maximumMs / kTelemetryGraphScaleStepMs);
+    float scaleMaxMs = static_cast<float>(completeSteps) * kTelemetryGraphScaleStepMs;
+    if (scaleMaxMs < maximumMs) {
+        scaleMaxMs += kTelemetryGraphScaleStepMs;
+    }
+    return scaleMaxMs;
+}
+
+int graphValueToY(float valueMs, int plotY, float scaleMaxMs)
 {
     if (valueMs < 0.0f) {
         valueMs = 0.0f;
     }
-    if (valueMs > kTelemetryGraphMaxMs) {
-        valueMs = kTelemetryGraphMaxMs;
+    if (valueMs > scaleMaxMs) {
+        valueMs = scaleMaxMs;
     }
 
     const int usableHeight = kTelemetryGraphPlotHeight - 3;
     const int scaled = static_cast<int>(
-            (valueMs / kTelemetryGraphMaxMs) * usableHeight + 0.5f);
+            (valueMs / scaleMaxMs) * usableHeight + 0.5f);
     return plotY + kTelemetryGraphPlotHeight - 2 - scaled;
 }
 
@@ -62,6 +84,7 @@ void drawTelemetryGraph(SDL_Surface* surface,
                         int plotX,
                         int plotY,
                         const StreamPipelineTelemetry::GraphSeries& series,
+                        float scaleMaxMs,
                         double framePeriodMs,
                         bool drawFramePeriod,
                         SDL_Color color)
@@ -94,16 +117,18 @@ void drawTelemetryGraph(SDL_Surface* surface,
                      kTelemetryGraphPlotHeight};
     SDL_FillRect(surface, &plot, background);
 
-    for (int ms = 5; ms < static_cast<int>(kTelemetryGraphMaxMs); ms += 5) {
-        const int y = graphValueToY(static_cast<float>(ms), plotY);
+    for (float ms = kTelemetryGraphScaleStepMs;
+         ms < scaleMaxMs;
+         ms += kTelemetryGraphScaleStepMs) {
+        const int y = graphValueToY(ms, plotY, scaleMaxMs);
         SDL_Rect line = {plotX, y,
                          static_cast<int>(StreamPipelineTelemetry::kGraphColumns), 1};
         SDL_FillRect(surface, &line, grid);
     }
 
     if (drawFramePeriod && framePeriodMs > 0.0 &&
-            framePeriodMs < kTelemetryGraphMaxMs) {
-        const int y = graphValueToY(static_cast<float>(framePeriodMs), plotY);
+            framePeriodMs < scaleMaxMs) {
+        const int y = graphValueToY(static_cast<float>(framePeriodMs), plotY, scaleMaxMs);
         SDL_Rect line = {plotX, y,
                          static_cast<int>(StreamPipelineTelemetry::kGraphColumns), 1};
         SDL_FillRect(surface, &line, reference);
@@ -115,7 +140,7 @@ void drawTelemetryGraph(SDL_Surface* surface,
             continue;
         }
 
-        const int y = graphValueToY(series.maximumMs[i], plotY);
+        const int y = graphValueToY(series.maximumMs[i], plotY, scaleMaxMs);
         SDL_Rect bar = {plotX + static_cast<int>(i),
                         y,
                         1,
@@ -178,16 +203,23 @@ SDL_Surface* renderTelemetryGraphs(TTF_Font* font, SDL_Color color)
 
     blitGraphLabel(surface,
                    font,
-                   "10 s spike history (0-25 ms, max per bucket)",
+                   "10s history",
                    kTelemetryGraphPanelPadding,
                    kTelemetryGraphPanelPadding,
                    color);
 
     int y = kTelemetryGraphPanelPadding + titleHeight;
     for (const GraphRow& row : rows) {
+        const float scaleMaxMs = graphScaleMaxMs(*row.series);
+        char label[96];
+        SDL_snprintf(label,
+                     sizeof(label),
+                     "%s (0-%.0f ms)",
+                     row.label,
+                     static_cast<double>(scaleMaxMs));
         blitGraphLabel(surface,
                        font,
-                       row.label,
+                       label,
                        kTelemetryGraphPanelPadding,
                        y,
                        color);
@@ -197,6 +229,7 @@ SDL_Surface* renderTelemetryGraphs(TTF_Font* font, SDL_Color color)
                            kTelemetryGraphPanelPadding,
                            y,
                            *row.series,
+                           scaleMaxMs,
                            graphs.framePeriodMs,
                            row.drawFramePeriod,
                            color);
