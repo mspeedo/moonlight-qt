@@ -291,12 +291,12 @@ inline bool renderImage(pl_renderer renderer,
 {
     const bool result = pl_render_image(renderer, image, target, params);
 
-    // swapchainStartFrame() performs the sole steady-state atomic gate. If it
-    // did not opt this frame into sampling, the thread-local swapchain is null
-    // and this wrapper becomes a couple of predictable local branches only.
+    // Check sampling when the video frame is rendered: a trigger may arrive
+    // after swapchain acquisition while Pacer waits for the decoded frame.
     if (!result || image == nullptr ||
             g_PendingFrame.swapchain == nullptr ||
-            g_PendingFrame.sampleRequested) {
+            g_PendingFrame.sampleRequested ||
+            !LatencyProbe::instance().needsVideoSampleFast()) {
         return result;
     }
 
@@ -308,18 +308,12 @@ inline bool renderImage(pl_renderer renderer,
 
 inline bool swapchainStartFrame(pl_swapchain swapchain, pl_swapchain_frame* outFrame)
 {
-    // This relaxed atomic load is the only benchmark-specific steady-state work
-    // in the presentation path while no video sample is needed. With OSD off or
-    // with the benchmark idle, there are no pending-frame writes or GPU actions.
-    if (!LatencyProbe::instance().needsVideoSampleFast()) {
-        return pl_swapchain_start_frame(swapchain, outFrame);
-    }
-
-    g_PendingFrame = {};
+    // Track acquisition independently of sampling, without clearing the large
+    // image structure on frames that do not need a sample.
     const bool result = pl_swapchain_start_frame(swapchain, outFrame);
-    if (result) {
-        g_PendingFrame.swapchain = swapchain;
-    }
+    g_PendingFrame.swapchain = result ? swapchain : nullptr;
+    g_PendingFrame.renderer = nullptr;
+    g_PendingFrame.sampleRequested = false;
 
     return result;
 }
@@ -348,8 +342,12 @@ inline bool swapchainSubmitFrame(pl_swapchain swapchain)
 
     PendingFrame pending = {};
     if (matchingFrame) {
-        pending = g_PendingFrame;
-        g_PendingFrame = {};
+        if (sampleRequested) {
+            pending = g_PendingFrame;
+        }
+        g_PendingFrame.swapchain = nullptr;
+        g_PendingFrame.renderer = nullptr;
+        g_PendingFrame.sampleRequested = false;
     }
 
     if (!result || !sampleRequested) {

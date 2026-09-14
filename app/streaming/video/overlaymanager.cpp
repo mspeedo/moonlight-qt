@@ -606,17 +606,15 @@ void OverlayManager::debugOverlayThreadProc()
 void OverlayManager::setOverlayTextUpdated(OverlayType type)
 {
 #ifdef HAVE_LATENCY_PROBE
-    // While telemetry is active, the performance OSD is part of the system being
-    // measured. Keep its expensive telemetry scan, SDL_ttf rasterization, and
-    // renderer upload off the decoder thread. The worker keeps only the newest
-    // pending one-second update.
+    // Keep debug OSD updates off the decoder thread in active, idle, and frozen
+    // states. The worker keeps only the newest pending one-second update.
     if (type == OverlayType::OverlayDebug && m_Overlays[type].enabled) {
-        if (StreamPipelineTelemetry::isActiveFast() && queueDebugOverlayUpdate()) {
+        if (queueDebugOverlayUpdate()) {
             return;
         }
 
-        // Prevent a late active-benchmark worker result from overwriting a newer
-        // synchronous idle/frozen OSD surface after telemetry has stopped.
+        // If the worker is unavailable, invalidate any pending result before
+        // falling back to a synchronous update.
         invalidateDebugOverlayUpdate();
         appendDebugTelemetry(m_Overlays[type].text,
                              sizeof(m_Overlays[0].text));
