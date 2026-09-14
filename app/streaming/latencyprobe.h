@@ -21,7 +21,8 @@
 // startup interval it acquires the center-marker baseline and sends one validation
 // A pulse that must produce a real black/white transition. That first transition
 // is discarded; only subsequent synthetic A pulses contribute latency samples.
-// Releasing physical A stops the run and sends best-effort STOP.
+// Releasing physical A leaves the run active. Physical B-down stops the run
+// (including helper startup) and sends best-effort STOP.
 class LatencyProbe
 {
 public:
@@ -45,6 +46,7 @@ public:
     void setEnabled(bool enabled)
     {
         bool stateChanged = false;
+        bool restoreAState = false;
         bool restorePhysicalA = false;
         bool requestStop = false;
         bool stopStreamTelemetry = false;
@@ -57,12 +59,12 @@ public:
             stateChanged = true;
 
             if (!enabled) {
-                // Once the hold threshold is crossed, Moonlight deliberately
-                // sends an A-up while the real button can remain held. Restore
-                // that true physical state before disabling the probe.
-                restorePhysicalA =
+                // Restore the physical A state, including releasing a synthetic
+                // pulse if the user has already released the start button.
+                restorePhysicalA = m_PhysicalAHeld;
+                restoreAState =
                         (m_BenchmarkStarting || m_HelperRunning || m_AutoBenchmark) &&
-                        m_PhysicalAHeld;
+                        (m_PhysicalAHeld || m_AutoButtonDown);
                 restoreController = m_BenchmarkControllerId;
                 requestStop = m_BenchmarkStarting || m_HelperRunning || m_AutoBenchmark;
                 stopStreamTelemetry = m_AutoBenchmark;
@@ -82,6 +84,7 @@ public:
             m_RunMaximumMs = 0.0;
 
             m_PhysicalAHeld = false;
+            m_StopRequested = false;
             m_BenchmarkStarting = false;
             m_StartRequestPending = false;
             m_StartRequestAfterTick = 0;
@@ -120,8 +123,8 @@ public:
                 SDL_RemoveTimer(benchmarkTimerToRemove);
             }
 
-            if (restorePhysicalA) {
-                pushSyntheticAEvent(restoreController, true);
+            if (restoreAState) {
+                pushSyntheticAEvent(restoreController, restorePhysicalA);
             }
 
             if (stopStreamTelemetry) {
@@ -224,7 +227,11 @@ public:
         }
         else {
             std::snprintf(output, length,
-                          "Input -> present: ready (hold A)");
+                          "Input -> present: ready (hold A to start)");
+        }
+
+        if (m_BenchmarkStarting || m_HelperRunning || m_AutoBenchmark) {
+            SDL_strlcat(output, " (B to stop)", length);
         }
 
         SDL_AtomicUnlock(&m_Lock);
@@ -277,14 +284,20 @@ private:
     {
         if ((event->type == SDL_CONTROLLERBUTTONDOWN ||
              event->type == SDL_CONTROLLERBUTTONUP) &&
-                event->cbutton.button == SDL_CONTROLLER_BUTTON_A) {
-            if (event->cbutton.timestamp == kSyntheticEventTimestamp) {
-                return 1;
+                event->cbutton.timestamp != kSyntheticEventTimestamp) {
+            auto* probe = static_cast<LatencyProbe*>(userdata);
+            if (event->cbutton.button == SDL_CONTROLLER_BUTTON_A) {
+                probe->onPhysicalAEvent(event->type == SDL_CONTROLLERBUTTONDOWN,
+                                        event->cbutton.which);
             }
-
-            static_cast<LatencyProbe*>(userdata)->onPhysicalAEvent(
-                        event->type == SDL_CONTROLLERBUTTONDOWN,
-                        event->cbutton.which);
+            else if (event->type == SDL_CONTROLLERBUTTONDOWN &&
+                     event->cbutton.button == SDL_CONTROLLER_BUTTON_B) {
+                SDL_AtomicLock(&probe->m_Lock);
+                if (probe->m_Enabled) {
+                    probe->m_StopRequested = true;
+                }
+                SDL_AtomicUnlock(&probe->m_Lock);
+            }
         }
 
         return 1;
@@ -332,6 +345,13 @@ private:
             return;
         }
 
+        // Keep synthetic pulses bound to the controller that started the run.
+        if ((m_BenchmarkStarting || m_HelperRunning || m_AutoBenchmark) &&
+                controllerId != m_BenchmarkControllerId) {
+            SDL_AtomicUnlock(&m_Lock);
+            return;
+        }
+
         if (pressed) {
             // A normal press remains purely normal gameplay input. Arm only a
             // one-shot 750 ms hold timer; short presses never create the 17 ms
@@ -341,6 +361,7 @@ private:
                 m_BenchmarkControllerId = controllerId;
                 if (!m_BenchmarkStarting && !m_HelperRunning && !m_AutoBenchmark &&
                         m_HoldTimer == 0) {
+                    m_StopRequested = false;
                     armHoldTimer = true;
                 }
             }
@@ -388,7 +409,7 @@ private:
     {
         SDL_AtomicLock(&m_Lock);
         m_HoldTimer = 0;
-        const bool eligible = m_Enabled && m_PhysicalAHeld &&
+        const bool eligible = m_Enabled && m_PhysicalAHeld && !m_StopRequested &&
                 !m_BenchmarkStarting && !m_HelperRunning && !m_AutoBenchmark;
         SDL_AtomicUnlock(&m_Lock);
 
@@ -408,7 +429,7 @@ private:
         const Uint32 nowTick = SDL_GetTicks();
 
         SDL_AtomicLock(&m_Lock);
-        if (m_Enabled && m_PhysicalAHeld &&
+        if (m_Enabled && m_PhysicalAHeld && !m_StopRequested &&
                 !m_BenchmarkStarting && !m_HelperRunning && !m_AutoBenchmark &&
                 m_BenchmarkTimer == 0) {
             m_BenchmarkTimer = timer;
@@ -484,18 +505,34 @@ private:
 
         checkTimeoutLocked(nowCounter);
 
-        if (m_BenchmarkStarting) {
-            if (!m_PhysicalAHeld) {
-                // If START was already issued, pair it with best-effort STOP.
-                requestStop = m_HelperRunning;
-                m_BenchmarkStarting = false;
-                m_StartRequestPending = false;
-                m_StartRequestAfterTick = 0;
-                m_BaselineSampleAfterTick = 0;
-                m_HelperRunning = false;
+        if (m_StopRequested) {
+            controllerId = m_BenchmarkControllerId;
+            requestStop = m_HelperRunning;
+            telemetryStop = m_AutoBenchmark;
+            if (m_AutoBenchmark) {
+                pruneAverageLocked(nowCounter);
             }
-            else if (m_StartRequestPending &&
-                     SDL_TICKS_PASSED(nowTick, m_StartRequestAfterTick)) {
+            m_StopRequested = false;
+            m_BenchmarkStarting = false;
+            m_StartRequestPending = false;
+            m_StartRequestAfterTick = 0;
+            m_BaselineSampleAfterTick = 0;
+            m_HelperRunning = false;
+            m_AutoBenchmark = false;
+            m_AutoButtonDown = false;
+            m_ValidationPending = false;
+            m_WaitingForTransition = false;
+            m_Baseline = VisualState::Unknown;
+            m_Expected = VisualState::Unknown;
+            m_InputTimestamp = 0;
+            action = m_PhysicalAHeld ? PulseAction::Press : PulseAction::Release;
+
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "Latency probe: automatic benchmark stopped");
+        }
+        else if (m_BenchmarkStarting) {
+            if (m_StartRequestPending &&
+                    SDL_TICKS_PASSED(nowTick, m_StartRequestAfterTick)) {
                 // START is fire-and-forget. From this point, readiness is governed
                 // only by the fixed startup delay and subsequent video validation.
                 m_StartRequestPending = false;
@@ -511,17 +548,7 @@ private:
         else if (m_HelperRunning && !m_AutoBenchmark) {
             controllerId = m_BenchmarkControllerId;
 
-            if (!m_PhysicalAHeld) {
-                m_HelperRunning = false;
-                m_Baseline = VisualState::Unknown;
-                m_Expected = VisualState::Unknown;
-                m_WaitingForTransition = false;
-                m_InputTimestamp = 0;
-                m_BaselineSampleAfterTick = 0;
-                m_ValidationPending = false;
-                requestStop = true;
-            }
-            else if (m_Baseline != VisualState::Unknown) {
+            if (m_Baseline != VisualState::Unknown) {
                 // A classified post-delay baseline is only a candidate helper.
                 // The first A-driven transition validates it and is discarded.
                 m_AutoBenchmark = true;
@@ -539,25 +566,7 @@ private:
         else if (m_AutoBenchmark) {
             controllerId = m_BenchmarkControllerId;
 
-            if (!m_PhysicalAHeld) {
-                pruneAverageLocked(nowCounter);
-                m_AutoBenchmark = false;
-                m_AutoButtonDown = false;
-                m_HelperRunning = false;
-                m_ValidationPending = false;
-                m_BaselineSampleAfterTick = 0;
-                m_WaitingForTransition = false;
-                m_Baseline = VisualState::Unknown;
-                m_Expected = VisualState::Unknown;
-                m_InputTimestamp = 0;
-                action = PulseAction::Release;
-                requestStop = true;
-                telemetryStop = true;
-
-                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                            "Latency probe: automatic benchmark stopped");
-            }
-            else if (m_AutoButtonDown) {
+            if (m_AutoButtonDown) {
                 if (SDL_TICKS_PASSED(nowTick, m_AutoDownTick + kBenchmarkPressMs)) {
                     m_AutoButtonDown = false;
                     action = PulseAction::Release;
@@ -776,6 +785,7 @@ private:
     SDL_TimerID m_HoldTimer = 0;
     SDL_TimerID m_BenchmarkTimer = 0;
     bool m_PhysicalAHeld = false;
+    bool m_StopRequested = false;
     SDL_JoystickID m_BenchmarkControllerId = 0;
     bool m_BenchmarkStarting = false;
     bool m_StartRequestPending = false;
