@@ -200,30 +200,14 @@ public:
                 std::snprintf(output, length,
                               "Input -> present: validating helper...");
             }
-            else if (hasAverage) {
+            else if (m_HasResult || hasAverage) {
                 std::snprintf(output, length,
-                              "Input -> present: AVG10s %.2f ms | MAX10s %.2f ms (n=%zu) | MAX %.2f ms",
-                              averageMs, maximumMs, averageCount, m_RunMaximumMs);
-            }
-            else if (m_HasResult) {
-                std::snprintf(output, length,
-                              "Input -> present: AVG10s N/A | MAX10s N/A (n=0) | MAX %.2f ms",
-                              m_RunMaximumMs);
+                              "Input -> present: benchmark running");
             }
             else {
                 std::snprintf(output, length,
                               "Input -> present: auto benchmark starting...");
             }
-        }
-        else if (hasAverage) {
-            std::snprintf(output, length,
-                          "Input -> present: AVG10s %.2f ms | MAX10s %.2f ms (n=%zu) | MAX %.2f ms",
-                          averageMs, maximumMs, averageCount, m_RunMaximumMs);
-        }
-        else if (m_HasResult) {
-            std::snprintf(output, length,
-                          "Input -> present: AVG10s N/A | MAX10s N/A (n=0) | MAX %.2f ms",
-                          m_RunMaximumMs);
         }
         else {
             std::snprintf(output, length,
@@ -232,6 +216,21 @@ public:
 
         if (m_BenchmarkStarting || m_HelperRunning || m_AutoBenchmark) {
             SDL_strlcat(output, " (B to stop)", length);
+        }
+
+        if (hasAverage) {
+            char result[128];
+            std::snprintf(result, sizeof(result),
+                          "\nAVG10s %.2f ms | MAX10s %.2f ms (n=%zu) | MAX %.2f ms",
+                          averageMs, maximumMs, averageCount, m_RunMaximumMs);
+            SDL_strlcat(output, result, length);
+        }
+        else if (m_HasResult) {
+            char result[96];
+            std::snprintf(result, sizeof(result),
+                          "\nAVG10s N/A | MAX10s N/A (n=0) | MAX %.2f ms",
+                          m_RunMaximumMs);
+            SDL_strlcat(output, result, length);
         }
 
         SDL_AtomicUnlock(&m_Lock);
