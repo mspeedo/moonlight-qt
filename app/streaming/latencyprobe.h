@@ -221,14 +221,14 @@ public:
         if (hasAverage) {
             char result[128];
             std::snprintf(result, sizeof(result),
-                          "\nAVG10s %.2f ms | MAX10s %.2f ms (n=%zu) | MAX %.2f ms",
+                          "\n  AVG10s %.2f ms | MAX10s %.2f ms (n=%zu) | MAX %.2f ms",
                           averageMs, maximumMs, averageCount, m_RunMaximumMs);
             SDL_strlcat(output, result, length);
         }
         else if (m_HasResult) {
             char result[96];
             std::snprintf(result, sizeof(result),
-                          "\nAVG10s N/A | MAX10s N/A (n=0) | MAX %.2f ms",
+                          "\n  AVG10s N/A | MAX10s N/A (n=0) | MAX %.2f ms",
                           m_RunMaximumMs);
             SDL_strlcat(output, result, length);
         }
