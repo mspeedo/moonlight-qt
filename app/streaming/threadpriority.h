@@ -5,31 +5,32 @@
 #if defined(Q_OS_LINUX)
 #include "../SDL_compat.h"
 
-#include <QDBusConnection>
-#include <QDBusInterface>
-#include <QDBusReply>
-#include <QDBusUnixFileDescriptor>
-#include <QVariant>
-
 #include <atomic>
 #include <cerrno>
+#include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <dirent.h>
+#include <fcntl.h>
 #include <memory>
-#include <mutex>
 #include <new>
 #include <sched.h>
+#include <spawn.h>
 #include <sys/resource.h>
 #include <sys/syscall.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 extern "C" {
 #include <VideoStreamExtensions.h>
 }
 
+extern char** environ;
+
 namespace ThreadPriority {
+
+constexpr int kHighPriorityNice = -10;
 
 enum class ThreadRole {
     VideoReceive,
@@ -44,30 +45,6 @@ struct PriorityRequestState
 
 inline PriorityRequestState g_VideoReceiveRequest;
 inline PriorityRequestState g_DecoderRequest;
-
-enum class GameModeState {
-    NotRequested,
-    ActivePortal,
-    ActivePortalPreRegistered,
-    ActiveNative,
-    ActiveNativePreRegistered,
-    RequestedPortalUnconfirmed,
-    RequestedNativeUnconfirmed,
-    Failed,
-    Released,
-};
-
-enum class GameModeTransport {
-    None,
-    Portal,
-    Native,
-};
-
-inline std::atomic<GameModeState> g_GameModeState {GameModeState::NotRequested};
-inline std::mutex g_GameModeMutex;
-inline int g_GameModeUsers = 0;
-inline bool g_GameModeRegisteredByUs = false;
-inline GameModeTransport g_GameModeTransport = GameModeTransport::None;
 
 inline PriorityRequestState& requestState(ThreadRole role)
 {
@@ -113,337 +90,291 @@ inline bool isEffectivelyElevated(int niceValue, int scheduler)
     return niceValue < 0;
 }
 
+inline bool readEffectivePriority(pid_t tid, int& niceValue, int& scheduler)
+{
+    errno = 0;
+    niceValue = getpriority(PRIO_PROCESS, static_cast<id_t>(tid));
+    if (errno != 0) {
+        return false;
+    }
+
+    scheduler = sched_getscheduler(tid);
+    return scheduler >= 0;
+}
+
+inline bool runningInFlatpak()
+{
+    const char* flatpakId = std::getenv("FLATPAK_ID");
+    return flatpakId != nullptr && flatpakId[0] != '\0';
+}
+
+// SteamOS Gaming Mode does not expose the XDG Realtime portal that normally
+// translates Flatpak PID/TID namespace values for RealtimeKit. Direct RTKit
+// calls from inside the sandbox therefore use unusable namespace-local IDs.
+//
+// For the three latency-sensitive stream threads, pass process/thread pidfds
+// to a short-lived host command. Reading pidfd fdinfo in the host PID namespace
+// yields the real host PID/TID, which can then be handed to RealtimeKit's
+// MakeThreadHighPriorityWithPID(). The host command exits immediately after
+// the single request; there is no persistent helper and no GameMode tuning.
+inline bool requestFlatpakHostPriority(pid_t tid, const char* threadName)
+{
+#if defined(SYS_pidfd_open)
+    const int processPidfd = static_cast<int>(syscall(SYS_pidfd_open, getpid(), 0));
+    if (processPidfd < 0) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "%s host priority fallback: pidfd_open(process) failed: %s",
+                    threadName, std::strerror(errno));
+        return false;
+    }
+
+    // PIDFD_THREAD was added in Linux 6.9 and is defined as O_EXCL. SteamOS
+    // kernels used by the current handheld builds are newer than that, while
+    // using O_EXCL here also avoids depending on newer libc headers.
+    const int threadPidfd = static_cast<int>(syscall(SYS_pidfd_open, tid, O_EXCL));
+    if (threadPidfd < 0) {
+        const int savedErrno = errno;
+        close(processPidfd);
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "%s host priority fallback: pidfd_open(thread) failed: %s",
+                    threadName, std::strerror(savedErrno));
+        return false;
+    }
+
+    // pidfd_open() returns CLOEXEC descriptors. flatpak-spawn needs the
+    // descriptors to survive exec so duplicate them with CLOEXEC cleared.
+    const int processForwardFd = fcntl(processPidfd, F_DUPFD, 64);
+    const int threadForwardFd = fcntl(threadPidfd, F_DUPFD, 65);
+    close(processPidfd);
+    close(threadPidfd);
+
+    if (processForwardFd < 0 || threadForwardFd < 0) {
+        const int savedErrno = errno;
+        if (processForwardFd >= 0) {
+            close(processForwardFd);
+        }
+        if (threadForwardFd >= 0) {
+            close(threadForwardFd);
+        }
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "%s host priority fallback: unable to duplicate pidfds: %s",
+                    threadName, std::strerror(savedErrno));
+        return false;
+    }
+
+    char processForwardArg[48];
+    char threadForwardArg[48];
+    char processFdArg[24];
+    char threadFdArg[24];
+    std::snprintf(processForwardArg, sizeof(processForwardArg),
+                  "--forward-fd=%d", processForwardFd);
+    std::snprintf(threadForwardArg, sizeof(threadForwardArg),
+                  "--forward-fd=%d", threadForwardFd);
+    std::snprintf(processFdArg, sizeof(processFdArg), "%d", processForwardFd);
+    std::snprintf(threadFdArg, sizeof(threadFdArg), "%d", threadForwardFd);
+
+    // fdinfo's Pid field is interpreted in the procfs reader's PID namespace.
+    // Because this script runs on the host, the two forwarded pidfds resolve to
+    // the host process PID and host kernel TID without any numeric PID guessing.
+    static const char hostScript[] =
+        "pid_from_fd() { "
+        "while read -r key value rest; do "
+        "if [ \"$key\" = \"Pid:\" ]; then printf '%s\\n' \"$value\"; return 0; fi; "
+        "done < \"/proc/self/fdinfo/$1\"; "
+        "return 1; "
+        "}; "
+        "process=$(pid_from_fd \"$1\") || exit 20; "
+        "thread=$(pid_from_fd \"$2\") || exit 21; "
+        "[ \"$process\" -gt 0 ] 2>/dev/null || exit 22; "
+        "[ \"$thread\" -gt 0 ] 2>/dev/null || exit 23; "
+        "exec /usr/bin/busctl --system --timeout=2s call "
+        "org.freedesktop.RealtimeKit1 /org/freedesktop/RealtimeKit1 "
+        "org.freedesktop.RealtimeKit1 MakeThreadHighPriorityWithPID "
+        "tti \"$process\" \"$thread\" -10 >/dev/null 2>&1";
+
+    char* const argv[] = {
+        const_cast<char*>("flatpak-spawn"),
+        const_cast<char*>("--host"),
+        const_cast<char*>("--watch-bus"),
+        processForwardArg,
+        threadForwardArg,
+        const_cast<char*>("/bin/sh"),
+        const_cast<char*>("-c"),
+        const_cast<char*>(hostScript),
+        const_cast<char*>("moonlight-priority"),
+        processFdArg,
+        threadFdArg,
+        nullptr,
+    };
+
+    pid_t childPid = -1;
+    const int spawnResult = posix_spawnp(&childPid,
+                                         "flatpak-spawn",
+                                         nullptr,
+                                         nullptr,
+                                         argv,
+                                         environ);
+
+    // posix_spawnp() has copied the descriptors into the child by this point.
+    close(processForwardFd);
+    close(threadForwardFd);
+
+    if (spawnResult != 0) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "%s host priority fallback: flatpak-spawn failed: %s",
+                    threadName, std::strerror(spawnResult));
+        return false;
+    }
+
+    int status = 0;
+    pid_t waited;
+    do {
+        waited = waitpid(childPid, &status, 0);
+    } while (waited < 0 && errno == EINTR);
+
+    if (waited < 0) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "%s host priority fallback: waitpid failed: %s",
+                    threadName, std::strerror(errno));
+        return false;
+    }
+
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+        const int exitCode = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "%s host priority fallback failed (exit=%d)",
+                    threadName, exitCode);
+        return false;
+    }
+
+    return true;
+#else
+    (void)tid;
+    SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                "%s host priority fallback unavailable: pidfd_open syscall missing",
+                threadName);
+    return false;
+#endif
+}
+
 inline int requestElevatedNormalPriority(ThreadRole role, const char* threadName)
 {
     PriorityRequestState& state = requestState(role);
-    const int priorityResult = SDL_SetThreadPriority(SDL_THREAD_PRIORITY_HIGH);
-    state.result.store(priorityResult, std::memory_order_relaxed);
+    const pid_t tid = static_cast<pid_t>(syscall(SYS_gettid));
+
+    int requestResult = -1;
+    if (runningInFlatpak()) {
+        // Skip SDL's native RTKit fallback in Flatpak. Without the XDG
+        // Realtime portal it sends sandbox-local numeric PID/TID values and
+        // cannot target this host thread correctly.
+        requestResult = requestFlatpakHostPriority(tid, threadName) ? 0 : -1;
+    }
+    else {
+        requestResult = SDL_SetThreadPriority(SDL_THREAD_PRIORITY_HIGH);
+    }
+
+    int niceValue = 0;
+    int scheduler = -1;
+    const bool verified = readEffectivePriority(tid, niceValue, scheduler);
+    const bool elevated = verified && isEffectivelyElevated(niceValue, scheduler);
+
+    state.result.store(elevated ? 0 : -1, std::memory_order_relaxed);
     state.attempted.store(1, std::memory_order_release);
 
-    errno = 0;
-    const pid_t tid = static_cast<pid_t>(syscall(SYS_gettid));
-    const int niceValue = getpriority(PRIO_PROCESS, tid);
-    const int niceError = errno;
-    const int scheduler = sched_getscheduler(0);
+    if (elevated) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "%s priority elevated (nice=%d, scheduler=%s)",
+                    threadName, niceValue, schedulerName(scheduler));
+        return 0;
+    }
 
-    if (priorityResult == 0) {
-        if (niceError == 0 && scheduler >= 0) {
-            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                        "%s priority request succeeded (nice=%d, scheduler=%s)",
-                        threadName, niceValue, schedulerName(scheduler));
-        }
-        else {
-            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                        "%s priority request succeeded (priority verification unavailable)",
-                        threadName);
-        }
+    if (verified) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "%s priority request failed (request=%d, nice=%d, scheduler=%s)",
+                    threadName, requestResult, niceValue, schedulerName(scheduler));
     }
     else {
-        if (niceError == 0 && scheduler >= 0) {
-            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                        "%s priority request denied: %s (nice=%d, scheduler=%s)",
-                        threadName, SDL_GetError(), niceValue, schedulerName(scheduler));
-        }
-        else {
-            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                        "%s priority request denied: %s",
-                        threadName, SDL_GetError());
-        }
-    }
-
-    return priorityResult;
-}
-
-inline QDBusInterface createGameModePortal()
-{
-    return QDBusInterface(QStringLiteral("org.freedesktop.portal.Desktop"),
-                          QStringLiteral("/org/freedesktop/portal/desktop"),
-                          QStringLiteral("org.freedesktop.portal.GameMode"),
-                          QDBusConnection::sessionBus());
-}
-
-inline QDBusInterface createNativeGameMode()
-{
-    return QDBusInterface(QStringLiteral("com.feralinteractive.GameMode"),
-                          QStringLiteral("/com/feralinteractive/GameMode"),
-                          QStringLiteral("com.feralinteractive.GameMode"),
-                          QDBusConnection::sessionBus());
-}
-
-inline int queryPortalGameMode(QDBusInterface& portal, bool& valid)
-{
-    QDBusReply<int> reply = portal.call(QStringLiteral("QueryStatus"),
-                                        static_cast<int>(getpid()));
-    valid = reply.isValid();
-    return valid ? reply.value() : -1;
-}
-
-struct SelfPidfds
-{
-    int game = -1;
-    int requester = -1;
-
-    ~SelfPidfds()
-    {
-        if (game >= 0) {
-            close(game);
-        }
-        if (requester >= 0) {
-            close(requester);
-        }
-    }
-
-    bool open()
-    {
-#ifdef SYS_pidfd_open
-        game = static_cast<int>(syscall(SYS_pidfd_open, getpid(), 0));
-        if (game < 0) {
-            return false;
-        }
-
-        requester = static_cast<int>(syscall(SYS_pidfd_open, getpid(), 0));
-        if (requester < 0) {
-            close(game);
-            game = -1;
-            return false;
-        }
-        return true;
-#else
-        errno = ENOSYS;
-        return false;
-#endif
-    }
-};
-
-inline int callNativeGameModePidfd(QDBusInterface& native,
-                                   const char* method,
-                                   bool& valid)
-{
-    valid = false;
-
-    const QDBusConnection bus = QDBusConnection::sessionBus();
-    if (!(bus.connectionCapabilities() & QDBusConnection::UnixFileDescriptorPassing)) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                    "GameMode native fallback unavailable: D-Bus FD passing is not supported");
+                    "%s priority request failed and effective priority could not be verified",
+                    threadName);
+    }
+    return -1;
+}
+
+inline pid_t findThreadTidByName(const char* threadName)
+{
+    DIR* tasks = opendir("/proc/self/task");
+    if (tasks == nullptr) {
         return -1;
     }
 
-    SelfPidfds pidfds;
-    if (!pidfds.open()) {
-        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                    "GameMode native fallback unable to open self pidfds: %s",
-                    std::strerror(errno));
-        return -1;
-    }
-
-    const QDBusUnixFileDescriptor gameFd(pidfds.game);
-    const QDBusUnixFileDescriptor requesterFd(pidfds.requester);
-    if (!gameFd.isValid() || !requesterFd.isValid()) {
-        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                    "GameMode native fallback unable to wrap self pidfds for D-Bus");
-        return -1;
-    }
-
-    QDBusReply<int> reply = native.call(QString::fromLatin1(method),
-                                        QVariant::fromValue(gameFd),
-                                        QVariant::fromValue(requesterFd));
-    valid = reply.isValid();
-    if (!valid) {
-        const QByteArray error = reply.error().message().toUtf8();
-        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                    "GameMode native %s failed: %s",
-                    method,
-                    error.constData());
-        return -1;
-    }
-
-    return reply.value();
-}
-
-inline bool tryAcquireGameModePortal()
-{
-    QDBusInterface portal = createGameModePortal();
-    if (!portal.isValid()) {
-        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                    "GameMode portal is unavailable; trying native pidfd fallback");
-        return false;
-    }
-
-    bool queryValid = false;
-    const int initialStatus = queryPortalGameMode(portal, queryValid);
-    if (queryValid && initialStatus == 2) {
-        g_GameModeRegisteredByUs = false;
-        g_GameModeTransport = GameModeTransport::Portal;
-        g_GameModeState.store(GameModeState::ActivePortalPreRegistered,
-                              std::memory_order_release);
-        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                    "GameMode is already active through the portal");
-        return true;
-    }
-
-    QDBusReply<int> registerReply = portal.call(QStringLiteral("RegisterGame"),
-                                                static_cast<int>(getpid()));
-    if (!registerReply.isValid()) {
-        const QByteArray error = registerReply.error().message().toUtf8();
-        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                    "GameMode portal registration unavailable (%s); trying native pidfd fallback",
-                    error.constData());
-        return false;
-    }
-
-    if (registerReply.value() != 0) {
-        bool retryValid = false;
-        const int retryStatus = queryPortalGameMode(portal, retryValid);
-        if (retryValid && retryStatus == 2) {
-            g_GameModeRegisteredByUs = false;
-            g_GameModeTransport = GameModeTransport::Portal;
-            g_GameModeState.store(GameModeState::ActivePortalPreRegistered,
-                                  std::memory_order_release);
-            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                        "GameMode is already active through the portal");
-            return true;
+    pid_t result = -1;
+    while (dirent* entry = readdir(tasks)) {
+        char* end = nullptr;
+        const long parsedTid = std::strtol(entry->d_name, &end, 10);
+        if (end == entry->d_name || *end != '\0' || parsedTid <= 0) {
+            continue;
         }
 
-        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                    "GameMode portal registration was rejected; trying native pidfd fallback");
-        return false;
-    }
-
-    g_GameModeRegisteredByUs = true;
-    g_GameModeTransport = GameModeTransport::Portal;
-
-    bool verifyValid = false;
-    const int verifiedStatus = queryPortalGameMode(portal, verifyValid);
-    if (verifyValid && verifiedStatus == 2) {
-        g_GameModeState.store(GameModeState::ActivePortal, std::memory_order_release);
-        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                    "GameMode registration succeeded through the portal");
-    }
-    else {
-        g_GameModeState.store(GameModeState::RequestedPortalUnconfirmed,
-                              std::memory_order_release);
-        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                    "GameMode portal registration succeeded but active state could not be confirmed");
-    }
-
-    return true;
-}
-
-inline bool tryAcquireGameModeNative()
-{
-    QDBusInterface native = createNativeGameMode();
-    if (!native.isValid()) {
-        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                    "Native GameMode D-Bus service is unavailable");
-        return false;
-    }
-
-    bool queryValid = false;
-    const int initialStatus = callNativeGameModePidfd(native,
-                                                      "QueryStatusByPIDFd",
-                                                      queryValid);
-    if (queryValid && initialStatus == 2) {
-        g_GameModeRegisteredByUs = false;
-        g_GameModeTransport = GameModeTransport::Native;
-        g_GameModeState.store(GameModeState::ActiveNativePreRegistered,
-                              std::memory_order_release);
-        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                    "GameMode is already active through native pidfd API");
-        return true;
-    }
-
-    bool registerValid = false;
-    const int registerStatus = callNativeGameModePidfd(native,
-                                                       "RegisterGameByPIDFd",
-                                                       registerValid);
-    if (!registerValid || registerStatus != 0) {
-        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                    "Native GameMode pidfd registration failed (status=%d)",
-                    registerStatus);
-        return false;
-    }
-
-    g_GameModeRegisteredByUs = true;
-    g_GameModeTransport = GameModeTransport::Native;
-
-    bool verifyValid = false;
-    const int verifiedStatus = callNativeGameModePidfd(native,
-                                                       "QueryStatusByPIDFd",
-                                                       verifyValid);
-    if (verifyValid && verifiedStatus == 2) {
-        g_GameModeState.store(GameModeState::ActiveNative, std::memory_order_release);
-        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                    "GameMode registration succeeded through native pidfd API");
-    }
-    else {
-        g_GameModeState.store(GameModeState::RequestedNativeUnconfirmed,
-                              std::memory_order_release);
-        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                    "Native GameMode registration succeeded but active state could not be confirmed");
-    }
-
-    return true;
-}
-
-inline void acquireGameMode()
-{
-    std::lock_guard<std::mutex> lock(g_GameModeMutex);
-    if (g_GameModeUsers++ != 0) {
-        return;
-    }
-
-    g_GameModeRegisteredByUs = false;
-    g_GameModeTransport = GameModeTransport::None;
-
-    if (tryAcquireGameModePortal()) {
-        return;
-    }
-
-    if (tryAcquireGameModeNative()) {
-        return;
-    }
-
-    g_GameModeState.store(GameModeState::Failed, std::memory_order_release);
-}
-
-inline void releaseGameMode()
-{
-    std::lock_guard<std::mutex> lock(g_GameModeMutex);
-    if (g_GameModeUsers == 0 || --g_GameModeUsers != 0) {
-        return;
-    }
-
-    if (g_GameModeRegisteredByUs) {
-        if (g_GameModeTransport == GameModeTransport::Portal) {
-            QDBusInterface portal = createGameModePortal();
-            if (portal.isValid()) {
-                QDBusReply<int> reply = portal.call(QStringLiteral("UnregisterGame"),
-                                                    static_cast<int>(getpid()));
-                if (!reply.isValid() || reply.value() != 0) {
-                    SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                                "GameMode portal unregister request failed");
-                }
-            }
+        char path[96];
+        std::snprintf(path, sizeof(path), "/proc/self/task/%ld/comm", parsedTid);
+        FILE* file = std::fopen(path, "r");
+        if (file == nullptr) {
+            continue;
         }
-        else if (g_GameModeTransport == GameModeTransport::Native) {
-            QDBusInterface native = createNativeGameMode();
-            if (native.isValid()) {
-                bool valid = false;
-                const int status = callNativeGameModePidfd(native,
-                                                           "UnregisterGameByPIDFd",
-                                                           valid);
-                if (!valid || status != 0) {
-                    SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                                "Native GameMode unregister request failed (status=%d)",
-                                status);
-                }
-            }
+
+        char name[32] = {};
+        const bool readName = std::fgets(name, sizeof(name), file) != nullptr;
+        std::fclose(file);
+        if (!readName) {
+            continue;
+        }
+
+        name[std::strcspn(name, "\r\n")] = '\0';
+        if (std::strcmp(name, threadName) == 0) {
+            result = static_cast<pid_t>(parsedTid);
+            break;
         }
     }
 
-    g_GameModeRegisteredByUs = false;
-    g_GameModeTransport = GameModeTransport::None;
-    g_GameModeState.store(GameModeState::Released, std::memory_order_release);
+    closedir(tasks);
+    return result;
+}
+
+inline void elevateNamedFlatpakThread(const char* threadName)
+{
+    if (!runningInFlatpak()) {
+        return;
+    }
+
+    const pid_t tid = findThreadTidByName(threadName);
+    if (tid <= 0) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "%s host priority fallback: thread not found",
+                    threadName);
+        return;
+    }
+
+    int niceValue = 0;
+    int scheduler = -1;
+    if (readEffectivePriority(tid, niceValue, scheduler) &&
+        isEffectivelyElevated(niceValue, scheduler)) {
+        return;
+    }
+
+    requestFlatpakHostPriority(tid, threadName);
+
+    if (readEffectivePriority(tid, niceValue, scheduler) &&
+        isEffectivelyElevated(niceValue, scheduler)) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "%s priority elevated (nice=%d, scheduler=%s)",
+                    threadName, niceValue, schedulerName(scheduler));
+    }
+    else if (scheduler >= 0) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "%s priority remains normal (nice=%d, scheduler=%s)",
+                    threadName, niceValue, schedulerName(scheduler));
+    }
 }
 
 inline void videoReceiveThreadInit()
@@ -478,9 +409,13 @@ inline int elevatedThreadStartThunk(void* opaque)
     const char* name = context->name;
 
     requestElevatedNormalPriority(ThreadRole::Decoder, name);
-    const int result = function(data);
-    releaseGameMode();
-    return result;
+
+    // Pacer::initialize() creates PacerRender before FFDecoder. Its stock SDL
+    // HIGH request cannot cross the Flatpak PID namespace when the Realtime
+    // portal is missing, so elevate that already-running thread here too.
+    elevateNamedFlatpakThread("PacerRender");
+
+    return function(data);
 }
 
 inline SDL_Thread* createElevatedNormalPriorityThread(SDL_ThreadFunction function,
@@ -493,11 +428,8 @@ inline SDL_Thread* createElevatedNormalPriorityThread(SDL_ThreadFunction functio
         return nullptr;
     }
 
-    acquireGameMode();
-
     SDL_Thread* thread = SDL_CreateThread(elevatedThreadStartThunk, name, context);
     if (thread == nullptr) {
-        releaseGameMode();
         delete context;
     }
     return thread;
@@ -556,13 +488,9 @@ inline void collectEffectivePriorities(EffectivePriority& videoReceive,
             continue;
         }
 
-        errno = 0;
-        const int niceValue = getpriority(PRIO_PROCESS, static_cast<id_t>(parsedTid));
-        if (errno != 0) {
-            continue;
-        }
-        const int scheduler = sched_getscheduler(static_cast<pid_t>(parsedTid));
-        if (scheduler < 0) {
+        int niceValue = 0;
+        int scheduler = -1;
+        if (!readEffectivePriority(static_cast<pid_t>(parsedTid), niceValue, scheduler)) {
             continue;
         }
 
@@ -574,37 +502,18 @@ inline void collectEffectivePriorities(EffectivePriority& videoReceive,
     closedir(tasks);
 }
 
-inline const char* gameModeStateText()
-{
-    switch (g_GameModeState.load(std::memory_order_acquire)) {
-    case GameModeState::NotRequested:
-        return "WAIT";
-    case GameModeState::ActivePortal:
-        return "ACTIVE(portal)";
-    case GameModeState::ActivePortalPreRegistered:
-        return "ACTIVE(portal-pre)";
-    case GameModeState::ActiveNative:
-        return "ACTIVE(native)";
-    case GameModeState::ActiveNativePreRegistered:
-        return "ACTIVE(native-pre)";
-    case GameModeState::RequestedPortalUnconfirmed:
-        return "UNCONFIRMED(portal)";
-    case GameModeState::RequestedNativeUnconfirmed:
-        return "UNCONFIRMED(native)";
-    case GameModeState::Failed:
-        return "FAILED";
-    case GameModeState::Released:
-        return "RELEASED";
-    default:
-        return "?";
-    }
-}
-
 inline const char* effectiveStateText(const EffectivePriority& effective,
                                       const PriorityRequestState* request)
 {
     if (!effective.found) {
         return "WAIT";
+    }
+
+    // Effective state wins over the stored request result. This matters for
+    // PacerRender and for any case where a later host RTKit fallback succeeds
+    // after an earlier in-sandbox request failed.
+    if (isEffectivelyElevated(effective.niceValue, effective.scheduler)) {
+        return "OK";
     }
 
     if (request != nullptr &&
@@ -613,7 +522,7 @@ inline const char* effectiveStateText(const EffectivePriority& effective,
         return "FAIL";
     }
 
-    return isEffectivelyElevated(effective.niceValue, effective.scheduler) ? "OK" : "NORMAL";
+    return "NORMAL";
 }
 
 inline void formatOverlayLines(char* output, std::size_t length)
@@ -660,11 +569,10 @@ inline void formatOverlayLines(char* output, std::size_t length)
 
     std::snprintf(output,
                   length,
-                  "GameMode: %s\n"
                   "VideoRecv: %s\n"
                   "FFDecoder: %s\n"
                   "PacerRender: %s",
-                  gameModeStateText(), videoLine, decoderLine, renderLine);
+                  videoLine, decoderLine, renderLine);
 }
 
 } // namespace ThreadPriority
