@@ -10,6 +10,7 @@
 #include "video/decoder.h"
 #include "audio/renderers/renderer.h"
 #include "video/overlaymanager.h"
+#include "threadpriority.h"
 
 class SupportedVideoFormatList : public QList<int>
 {
