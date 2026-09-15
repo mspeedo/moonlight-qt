@@ -13,8 +13,6 @@
 #include <cstring>
 #include <dirent.h>
 #include <fcntl.h>
-#include <memory>
-#include <new>
 #include <sched.h>
 #include <spawn.h>
 #include <sys/resource.h>
@@ -112,11 +110,6 @@ inline bool readEffectivePriority(pid_t tid, int& niceValue, int& scheduler)
 
     scheduler = sched_getscheduler(tid);
     return scheduler >= 0;
-}
-
-inline bool readNiceLimit(struct rlimit& limit)
-{
-    return getrlimit(RLIMIT_NICE, &limit) == 0;
 }
 
 inline bool runningInFlatpak()
@@ -380,47 +373,6 @@ public:
 
 inline VideoReceiveThreadPriorityRegistration videoReceiveThreadPriorityRegistration;
 
-struct ElevatedThreadStartContext
-{
-    SDL_ThreadFunction function;
-    void* data;
-    const char* name;
-};
-
-inline int elevatedThreadStartThunk(void* opaque)
-{
-    std::unique_ptr<ElevatedThreadStartContext> context(
-        static_cast<ElevatedThreadStartContext*>(opaque));
-    SDL_ThreadFunction function = context->function;
-    void* data = context->data;
-    const char* name = context->name;
-
-    requestElevatedNormalPriority(ThreadRole::Decoder, name);
-
-    // PacerRender is already running by the time FFDecoder starts. Elevate the
-    // existing render TID through the same host helper.
-    elevateNamedThread(ThreadRole::Render, "PacerRender");
-
-    return function(data);
-}
-
-inline SDL_Thread* createElevatedNormalPriorityThread(SDL_ThreadFunction function,
-                                                       const char* name,
-                                                       void* data)
-{
-    auto* context = new (std::nothrow) ElevatedThreadStartContext{function, data, name};
-    if (context == nullptr) {
-        SDL_OutOfMemory();
-        return nullptr;
-    }
-
-    SDL_Thread* thread = SDL_CreateThread(elevatedThreadStartThunk, name, context);
-    if (thread == nullptr) {
-        delete context;
-    }
-    return thread;
-}
-
 struct EffectivePriority
 {
     bool found = false;
@@ -508,17 +460,6 @@ inline const char* effectiveStateText(const EffectivePriority& effective,
     return "NORMAL";
 }
 
-inline void formatLimitValue(rlim_t value, char* output, std::size_t length)
-{
-    if (value == RLIM_INFINITY) {
-        std::snprintf(output, length, "inf");
-    }
-    else {
-        std::snprintf(output, length, "%llu",
-                      static_cast<unsigned long long>(value));
-    }
-}
-
 inline void formatOverlayLines(char* output, std::size_t length)
 {
     if (output == nullptr || length == 0) {
@@ -533,14 +474,6 @@ inline void formatOverlayLines(char* output, std::size_t length)
     char videoLine[64];
     char decoderLine[64];
     char renderLine[64];
-    char softLimit[24] = "?";
-    char hardLimit[24] = "?";
-
-    struct rlimit niceLimit;
-    if (readNiceLimit(niceLimit)) {
-        formatLimitValue(niceLimit.rlim_cur, softLimit, sizeof(softLimit));
-        formatLimitValue(niceLimit.rlim_max, hardLimit, sizeof(hardLimit));
-    }
 
     if (videoReceive.found) {
         std::snprintf(videoLine, sizeof(videoLine), "%s n=%d %s",
@@ -571,11 +504,9 @@ inline void formatOverlayLines(char* output, std::size_t length)
 
     std::snprintf(output,
                   length,
-                  "RLIMIT_NICE: s=%s h=%s\n"
                   "VideoRecv: %s\n"
                   "FFDecoder: %s\n"
                   "PacerRender: %s",
-                  softLimit, hardLimit,
                   videoLine, decoderLine, renderLine);
 }
 
