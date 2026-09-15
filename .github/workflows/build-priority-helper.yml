@@ -1,0 +1,61 @@
+---
+name: Build - SteamOS Priority Helper
+
+permissions:
+  contents: read
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: moonlight-priority-helper-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build priority helper
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout selected branch
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 1
+
+      - name: Install musl toolchain
+        shell: bash
+        run: |
+          sudo rm -f /etc/apt/sources.list.d/google-chrome.list \
+                     /etc/apt/sources.list.d/google-chrome.sources
+          sudo apt-get update
+          sudo apt-get install -y musl-tools file
+
+      - name: Build static priority helper
+        shell: bash
+        run: |
+          mkdir -p artifact
+          musl-gcc \
+            -std=c11 \
+            -O2 \
+            -Wall \
+            -Wextra \
+            -Werror \
+            -static \
+            tools/moonlight-priority-helper.c \
+            -o artifact/moonlight-priority-helper
+          strip artifact/moonlight-priority-helper
+          cp tools/install-moonlight-priority-helper.sh artifact/
+          chmod 0755 artifact/moonlight-priority-helper \
+                     artifact/install-moonlight-priority-helper.sh
+          file artifact/moonlight-priority-helper
+
+      - name: Upload priority helper artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: Moonlight-Priority-Helper-${{ github.sha }}
+          path: |
+            artifact/moonlight-priority-helper
+            artifact/install-moonlight-priority-helper.sh
+          compression-level: 0
+          if-no-files-found: error
