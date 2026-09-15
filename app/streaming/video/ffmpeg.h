@@ -5,6 +5,7 @@
 #include <set>
 
 #include "../bandwidth.h"
+#include "../threadpriority.h"
 #include "decoder.h"
 #include "ffmpeg-renderers/renderer.h"
 #include "ffmpeg-renderers/pacer/pacer.h"
@@ -148,3 +149,10 @@ private:
     static const uint8_t k_AV1High10_444TestFrame[];
 
 };
+
+#if defined(Q_OS_LINUX)
+// ffmpeg.cpp creates exactly one SDL thread: FFDecoder. Route that creation
+// through the Linux best-effort priority wrapper without changing other SDL
+// threads or non-Linux behavior.
+#define SDL_CreateThread(...) ThreadPriority::createElevatedNormalPriorityThread(__VA_ARGS__)
+#endif

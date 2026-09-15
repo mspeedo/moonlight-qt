@@ -6,6 +6,8 @@
 #include "../SDL_compat.h"
 
 #include <cerrno>
+#include <memory>
+#include <new>
 #include <sched.h>
 #include <sys/resource.h>
 #include <sys/syscall.h>
@@ -71,6 +73,42 @@ public:
 };
 
 inline VideoReceiveThreadPriorityRegistration videoReceiveThreadPriorityRegistration;
+
+struct ElevatedThreadStartContext
+{
+    SDL_ThreadFunction function;
+    void* data;
+    const char* name;
+};
+
+inline int elevatedThreadStartThunk(void* opaque)
+{
+    std::unique_ptr<ElevatedThreadStartContext> context(
+        static_cast<ElevatedThreadStartContext*>(opaque));
+    SDL_ThreadFunction function = context->function;
+    void* data = context->data;
+    const char* name = context->name;
+
+    requestElevatedNormalPriority(name);
+    return function(data);
+}
+
+inline SDL_Thread* createElevatedNormalPriorityThread(SDL_ThreadFunction function,
+                                                       const char* name,
+                                                       void* data)
+{
+    auto* context = new (std::nothrow) ElevatedThreadStartContext{function, data, name};
+    if (context == nullptr) {
+        SDL_OutOfMemory();
+        return nullptr;
+    }
+
+    SDL_Thread* thread = SDL_CreateThread(elevatedThreadStartThunk, name, context);
+    if (thread == nullptr) {
+        delete context;
+    }
+    return thread;
+}
 
 } // namespace ThreadPriority
 
