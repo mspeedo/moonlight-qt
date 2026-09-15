@@ -142,12 +142,19 @@ jobs:
             "Moonlight-${{ steps.source.outputs.safe_branch }}-${{ steps.source.outputs.short_sha }}.flatpak" \
             com.moonlight_stream.Moonlight
 
-      - name: Upload Flatpak and priority helper artifact
+      - name: Upload Flatpak artifact
         uses: actions/upload-artifact@v6
         with:
           name: Moonlight-${{ steps.source.outputs.safe_branch }}-${{ steps.source.outputs.short_sha }}
+          path: Moonlight-${{ steps.source.outputs.safe_branch }}-${{ steps.source.outputs.short_sha }}.flatpak
+          compression-level: 0
+          if-no-files-found: error
+
+      - name: Upload SteamOS priority helper artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: Moonlight-Priority-Helper-${{ steps.source.outputs.short_sha }}
           path: |
-            Moonlight-${{ steps.source.outputs.safe_branch }}-${{ steps.source.outputs.short_sha }}.flatpak
             host-helper/moonlight-priority-helper
             host-helper/install-moonlight-priority-helper.sh
           compression-level: 0
