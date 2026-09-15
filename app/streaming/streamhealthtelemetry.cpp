@@ -13,6 +13,7 @@ extern "C" {
 
 #include <atomic>
 #include <cstdio>
+#include <cstring>
 
 namespace StreamHealthTelemetry {
 namespace {
@@ -82,28 +83,6 @@ void formatOverlayLines(char* output, std::size_t length)
         std::snprintf(success, sizeof(success), "N/A");
     }
 
-#if defined(Q_OS_LINUX)
-    char priorityLines[160];
-    ThreadPriority::formatOverlayLines(priorityLines, sizeof(priorityLines));
-
-    std::snprintf(output,
-                  length,
-                  "Stream health\n"
-                  "  FEC frames: recovered %u | failed %u | success %s\n"
-                  "  Network frame drops: %llu\n"
-                  "  Pacer frame drops: %llu\n"
-                  "GameMode: %s\n"
-                  "%s",
-                  recoveredFrames,
-                  failedFrames,
-                  success,
-                  static_cast<unsigned long long>(
-                      g_NetworkFrameDrops.load(std::memory_order_relaxed)),
-                  static_cast<unsigned long long>(
-                      g_PacerFrameDrops.load(std::memory_order_relaxed)),
-                  GameModeControl::stateText(),
-                  priorityLines);
-#else
     std::snprintf(output,
                   length,
                   "Stream health\n"
@@ -117,6 +96,18 @@ void formatOverlayLines(char* output, std::size_t length)
                       g_NetworkFrameDrops.load(std::memory_order_relaxed)),
                   static_cast<unsigned long long>(
                       g_PacerFrameDrops.load(std::memory_order_relaxed)));
+#if defined(Q_OS_LINUX)
+    if (ThreadPriority::isEnabledFast()) {
+        char priorityLines[160];
+        ThreadPriority::formatOverlayLines(priorityLines, sizeof(priorityLines));
+
+        const std::size_t used = std::strlen(output);
+        std::snprintf(output + used,
+                      length - used,
+                      "\nGameMode: %s\n%s",
+                      GameModeControl::stateText(),
+                      priorityLines);
+    }
 #endif
 }
 
