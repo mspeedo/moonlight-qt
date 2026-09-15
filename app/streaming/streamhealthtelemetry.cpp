@@ -86,18 +86,6 @@ void formatOverlayLines(char* output, std::size_t length)
     char priorityLines[160];
     ThreadPriority::formatOverlayLines(priorityLines, sizeof(priorityLines));
 
-    // RLIMIT_NICE is known to be 0/0 in the Flatpak and is no longer relevant
-    // now that the three stream threads are elevated by the host CAP_SYS_NICE
-    // helper. Keep the priority formatter unchanged internally, but omit its
-    // first line from the OSD and replace it with the live GameMode state.
-    const char* priorityRows = priorityLines;
-    while (*priorityRows != '\0' && *priorityRows != '\n') {
-        ++priorityRows;
-    }
-    if (*priorityRows == '\n') {
-        ++priorityRows;
-    }
-
     std::snprintf(output,
                   length,
                   "Stream health\n"
@@ -114,7 +102,7 @@ void formatOverlayLines(char* output, std::size_t length)
                   static_cast<unsigned long long>(
                       g_PacerFrameDrops.load(std::memory_order_relaxed)),
                   GameModeControl::stateText(),
-                  priorityRows);
+                  priorityLines);
 #else
     std::snprintf(output,
                   length,
