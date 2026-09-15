@@ -12,21 +12,26 @@
 #include <cstdlib>
 #include <cstring>
 #include <dirent.h>
+#include <fcntl.h>
 #include <memory>
 #include <new>
 #include <sched.h>
+#include <spawn.h>
 #include <sys/resource.h>
 #include <sys/syscall.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 extern "C" {
 #include <VideoStreamExtensions.h>
 }
 
+extern char** environ;
+
 namespace ThreadPriority {
 
 constexpr int kHighPriorityNice = -10;
-constexpr rlim_t kRequiredNiceLimit = static_cast<rlim_t>(20 - kHighPriorityNice); // 30 permits nice -10
+constexpr const char* kHostHelperPath = "/opt/moonlight-priority/moonlight-priority-helper";
 
 enum class ThreadRole {
     VideoReceive,
@@ -114,44 +119,127 @@ inline bool readNiceLimit(struct rlimit& limit)
     return getrlimit(RLIMIT_NICE, &limit) == 0;
 }
 
-inline bool ensureNiceAllowance(const char* threadName)
+inline bool runningInFlatpak()
 {
-    struct rlimit limit;
-    if (!readNiceLimit(limit)) {
+    const char* flatpakId = std::getenv("FLATPAK_ID");
+    return flatpakId != nullptr && flatpakId[0] != '\0';
+}
+
+inline bool requestFlatpakHostPriority(pid_t tid, const char* threadName)
+{
+#if defined(SYS_pidfd_open)
+    const int processPidfd = static_cast<int>(syscall(SYS_pidfd_open, getpid(), 0));
+    if (processPidfd < 0) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                    "%s priority: getrlimit(RLIMIT_NICE) failed: %s",
+                    "%s host priority: pidfd_open(process) failed: %s",
                     threadName, std::strerror(errno));
         return false;
     }
 
-    if (limit.rlim_cur >= kRequiredNiceLimit || limit.rlim_cur == RLIM_INFINITY) {
-        return true;
-    }
-
-    if (limit.rlim_max != RLIM_INFINITY && limit.rlim_max < kRequiredNiceLimit) {
+    // Linux 6.9+ interprets O_EXCL as PIDFD_THREAD for pidfd_open(). This lets
+    // the host helper resolve the exact kernel TID rather than only the process.
+    const int threadPidfd = static_cast<int>(syscall(SYS_pidfd_open, tid, O_EXCL));
+    if (threadPidfd < 0) {
+        const int savedErrno = errno;
+        close(processPidfd);
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                    "%s priority: RLIMIT_NICE hard limit too low (soft=%llu hard=%llu need=%llu)",
-                    threadName,
-                    static_cast<unsigned long long>(limit.rlim_cur),
-                    static_cast<unsigned long long>(limit.rlim_max),
-                    static_cast<unsigned long long>(kRequiredNiceLimit));
+                    "%s host priority: pidfd_open(thread) failed: %s",
+                    threadName, std::strerror(savedErrno));
         return false;
     }
 
-    struct rlimit raised = limit;
-    raised.rlim_cur = kRequiredNiceLimit;
-    if (setrlimit(RLIMIT_NICE, &raised) != 0) {
+    // pidfd_open() returns CLOEXEC descriptors. Duplicate them without CLOEXEC
+    // so flatpak-spawn can forward the pidfds into the host helper process.
+    const int processForwardFd = fcntl(processPidfd, F_DUPFD, 64);
+    const int threadForwardFd = fcntl(threadPidfd, F_DUPFD, 65);
+    close(processPidfd);
+    close(threadPidfd);
+
+    if (processForwardFd < 0 || threadForwardFd < 0) {
+        const int savedErrno = errno;
+        if (processForwardFd >= 0) {
+            close(processForwardFd);
+        }
+        if (threadForwardFd >= 0) {
+            close(threadForwardFd);
+        }
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                    "%s priority: unable to raise RLIMIT_NICE soft limit: %s",
+                    "%s host priority: unable to duplicate pidfds: %s",
+                    threadName, std::strerror(savedErrno));
+        return false;
+    }
+
+    char processForwardArg[48];
+    char threadForwardArg[48];
+    char processFdArg[24];
+    char threadFdArg[24];
+    std::snprintf(processForwardArg, sizeof(processForwardArg),
+                  "--forward-fd=%d", processForwardFd);
+    std::snprintf(threadForwardArg, sizeof(threadForwardArg),
+                  "--forward-fd=%d", threadForwardFd);
+    std::snprintf(processFdArg, sizeof(processFdArg), "%d", processForwardFd);
+    std::snprintf(threadFdArg, sizeof(threadFdArg), "%d", threadForwardFd);
+
+    char* const argv[] = {
+        const_cast<char*>("flatpak-spawn"),
+        const_cast<char*>("--host"),
+        const_cast<char*>("--watch-bus"),
+        processForwardArg,
+        threadForwardArg,
+        const_cast<char*>(kHostHelperPath),
+        processFdArg,
+        threadFdArg,
+        const_cast<char*>(threadName),
+        nullptr,
+    };
+
+    pid_t childPid = -1;
+    const int spawnResult = posix_spawnp(&childPid,
+                                         "flatpak-spawn",
+                                         nullptr,
+                                         nullptr,
+                                         argv,
+                                         environ);
+
+    close(processForwardFd);
+    close(threadForwardFd);
+
+    if (spawnResult != 0) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "%s host priority: flatpak-spawn failed: %s",
+                    threadName, std::strerror(spawnResult));
+        return false;
+    }
+
+    int status = 0;
+    pid_t waited;
+    do {
+        waited = waitpid(childPid, &status, 0);
+    } while (waited < 0 && errno == EINTR);
+
+    if (waited < 0) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "%s host priority: waitpid failed: %s",
                     threadName, std::strerror(errno));
         return false;
     }
 
-    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                "%s priority: raised RLIMIT_NICE soft limit to %llu",
-                threadName,
-                static_cast<unsigned long long>(kRequiredNiceLimit));
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+        const int exitCode = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "%s host priority helper failed (exit=%d)",
+                    threadName, exitCode);
+        return false;
+    }
+
     return true;
+#else
+    (void)tid;
+    SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                "%s host priority unavailable: pidfd_open syscall missing",
+                threadName);
+    return false;
+#endif
 }
 
 inline int requestPriorityForTid(pid_t tid, ThreadRole role, const char* threadName)
@@ -159,7 +247,10 @@ inline int requestPriorityForTid(pid_t tid, ThreadRole role, const char* threadN
     PriorityRequestState& state = requestState(role);
 
     bool requestSucceeded = false;
-    if (ensureNiceAllowance(threadName)) {
+    if (runningInFlatpak()) {
+        requestSucceeded = requestFlatpakHostPriority(tid, threadName);
+    }
+    else {
         errno = 0;
         requestSucceeded = setpriority(PRIO_PROCESS,
                                        static_cast<id_t>(tid),
@@ -306,9 +397,8 @@ inline int elevatedThreadStartThunk(void* opaque)
 
     requestElevatedNormalPriority(ThreadRole::Decoder, name);
 
-    // PacerRender is already running by the time FFDecoder starts. Apply the
-    // same direct nice request to that specific TID, without changing the rest
-    // of Moonlight's threads.
+    // PacerRender is already running by the time FFDecoder starts. Elevate the
+    // existing render TID through the same host helper.
     elevateNamedThread(ThreadRole::Render, "PacerRender");
 
     return function(data);
