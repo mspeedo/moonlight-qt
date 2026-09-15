@@ -1,5 +1,9 @@
 #include "streamhealthtelemetry.h"
 
+#if defined(Q_OS_LINUX)
+#include "threadpriority.h"
+#endif
+
 extern "C" {
 #include <FecFrameStats.h>
 }
@@ -75,6 +79,26 @@ void formatOverlayLines(char* output, std::size_t length)
         std::snprintf(success, sizeof(success), "N/A");
     }
 
+#if defined(Q_OS_LINUX)
+    char priorityLines[160];
+    ThreadPriority::formatOverlayLines(priorityLines, sizeof(priorityLines));
+
+    std::snprintf(output,
+                  length,
+                  "Stream health\n"
+                  "  FEC frames: recovered %u | failed %u | success %s\n"
+                  "  Network frame drops: %llu\n"
+                  "  Pacer frame drops: %llu\n"
+                  "%s",
+                  recoveredFrames,
+                  failedFrames,
+                  success,
+                  static_cast<unsigned long long>(
+                      g_NetworkFrameDrops.load(std::memory_order_relaxed)),
+                  static_cast<unsigned long long>(
+                      g_PacerFrameDrops.load(std::memory_order_relaxed)),
+                  priorityLines);
+#else
     std::snprintf(output,
                   length,
                   "Stream health\n"
@@ -88,6 +112,7 @@ void formatOverlayLines(char* output, std::size_t length)
                       g_NetworkFrameDrops.load(std::memory_order_relaxed)),
                   static_cast<unsigned long long>(
                       g_PacerFrameDrops.load(std::memory_order_relaxed)));
+#endif
 }
 
 } // namespace StreamHealthTelemetry
