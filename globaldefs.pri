@@ -33,12 +33,6 @@ QMAKE_CFLAGS   += $$(CFLAGS)
 QMAKE_CXXFLAGS += $$(CXXFLAGS)
 QMAKE_LFLAGS   += $$(LDFLAGS)
 
-# The Flatpak-safe GameMode integration uses the XDG desktop portal over Qt DBus.
-# Keep the dependency app-local and Linux-only.
-unix:!macx:exists($$_PRO_FILE_PWD_/streaming/threadpriority.h) {
-    QT += dbus
-}
-
 # Keep the Moonlight latency-probe renderer hooks out of upstream plvk.cpp.
 # This only activates for the app project on Linux; the header itself is inert
 # unless HAVE_LIBPLACEBO_VULKAN is defined.
