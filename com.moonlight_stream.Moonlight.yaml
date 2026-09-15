@@ -12,9 +12,6 @@ finish-args:
   - --socket=pulseaudio
   - --device=all
   - --talk-name=org.freedesktop.ScreenSaver
-  # Needed only for the short-lived host RTKit helper used to translate
-  # Flatpak PID-namespace pidfds into host PID/TID values.
-  - --talk-name=org.freedesktop.Flatpak
   - --env=IGNORE_RFI_LATENCY_BUG=1
   - --env=QT_QUICK_CONTROLS_STYLE=Material
   # - --env=LIBVA_DRIVER_NAME=
