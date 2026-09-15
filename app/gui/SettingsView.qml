@@ -1794,6 +1794,23 @@ Flickable {
                 }
 
                 CheckBox {
+                    id: gameModeAndThreadPriorityCheck
+                    visible: Qt.platform.os === "linux"
+                    width: parent.width
+                    text: qsTr("Enable GameMode and high-priority streaming threads")
+                    font.pointSize: 12
+                    checked: StreamingPreferences.enableGameModeAndThreadPriority
+                    onCheckedChanged: {
+                        StreamingPreferences.enableGameModeAndThreadPriority = checked
+                    }
+
+                    ToolTip.delay: 1000
+                    ToolTip.timeout: 5000
+                    ToolTip.visible: hovered
+                    ToolTip.text: qsTr("Requests Linux GameMode and raises the VideoRecv, FFDecoder, and PacerRender thread priorities while streaming. This setting takes effect on the next stream.")
+                }
+
+                CheckBox {
                     id: showPerformanceOverlay
                     width: parent.width
                     text: qsTr("Show performance stats while streaming")

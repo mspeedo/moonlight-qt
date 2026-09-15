@@ -10,6 +10,7 @@ extern "C" {
 #include <cstdio>
 #include <cstdint>
 #include <string>
+#include <mutex>
 
 namespace StreamPipelineTelemetry {
 namespace {
@@ -18,6 +19,20 @@ constexpr std::uint64_t kWindowUs = 10'000'000;
 constexpr std::size_t kRingCapacity = 2048;
 constexpr std::size_t kDecodeQueueCapacity = 64;
 constexpr int kMetricLabelWidth = 34;
+std::mutex g_StateChangeMutex;
+std::mutex g_StateCallbackMutex;
+std::atomic<std::uint64_t> g_DisplayRevision {0};
+StateChangedCallback g_StateCallback = nullptr;
+void* g_StateCallbackContext = nullptr;
+
+void notifyStateChanged()
+{
+    g_DisplayRevision.fetch_add(1, std::memory_order_release);
+    std::lock_guard<std::mutex> lock(g_StateCallbackMutex);
+    if (g_StateCallback != nullptr) {
+        g_StateCallback(g_StateCallbackContext);
+    }
+}
 
 struct SampleSlot {
     std::atomic<std::uint64_t> serial {0};
@@ -336,30 +351,61 @@ void appendMetric(char* output,
 std::atomic<bool> g_Active {false};
 thread_local RenderContextState g_RenderContext;
 
-void clear()
+void setStateChangedCallback(StateChangedCallback callback, void* context)
+{
+    std::lock_guard<std::mutex> lock(g_StateCallbackMutex);
+    g_StateCallback = callback;
+    g_StateCallbackContext = context;
+}
+
+std::uint64_t displayRevision()
+{
+    return g_DisplayRevision.load(std::memory_order_acquire);
+}
+
+std::uint64_t snapshotTimeUs()
+{
+    return g_Active.load(std::memory_order_acquire) ? LiGetMicroseconds() :
+            g_FrozenNowUs.load(std::memory_order_acquire);
+}
+
+static void resetTelemetry()
 {
     g_Active.store(false, std::memory_order_release);
-    // Invalidate decoder-thread TLS from any previous run. The decoder thread
-    // observes this lazily on its next active telemetry hook, avoiding locks or
-    // cross-thread queue manipulation at benchmark start/stop.
+    // Invalidate decoder-thread TLS lazily, without involving sample writers
+    // in OSD synchronization.
     g_Generation.fetch_add(1, std::memory_order_acq_rel);
     resetClientState();
 }
 
+void clear()
+{
+    std::lock_guard<std::mutex> lock(g_StateChangeMutex);
+    g_DisplayRevision.fetch_add(1, std::memory_order_acq_rel);
+    resetTelemetry();
+    notifyStateChanged();
+}
+
 void start()
 {
-    clear();
+    std::lock_guard<std::mutex> lock(g_StateChangeMutex);
+    g_DisplayRevision.fetch_add(1, std::memory_order_acq_rel);
+    resetTelemetry();
     g_Active.store(true, std::memory_order_release);
+    notifyStateChanged();
 }
 
 void stop()
 {
+    std::lock_guard<std::mutex> lock(g_StateChangeMutex);
+    g_DisplayRevision.fetch_add(1, std::memory_order_acq_rel);
     if (g_Active.exchange(false, std::memory_order_acq_rel)) {
         g_FrozenNowUs.store(LiGetMicroseconds(), std::memory_order_release);
     }
     g_CurrentDecodeUnit = {};
     g_DecodeQueue.clear();
     g_RenderContext = {};
+    notifyStateChanged();
 }
 
 void noteDecodeUnit(PDECODE_UNIT du)
@@ -590,13 +636,14 @@ void presentSuccess(std::uint64_t presentUs)
     g_RenderContext = {};
 }
 
-Snapshot snapshot()
+Snapshot snapshot(std::uint64_t nowUs)
 {
     Snapshot result;
-    const bool active = g_Active.load(std::memory_order_acquire);
-    std::uint64_t nowUs = active ? LiGetMicroseconds() : g_FrozenNowUs.load(std::memory_order_acquire);
     if (nowUs == 0) {
-        nowUs = LiGetMicroseconds();
+        nowUs = snapshotTimeUs();
+        if (nowUs == 0) {
+            nowUs = LiGetMicroseconds();
+        }
     }
 
     result.hostFrameInterval = g_HostFrameInterval.snapshot(nowUs);
@@ -624,7 +671,7 @@ Snapshot snapshot()
     return result;
 }
 
-GraphSnapshot graphSnapshot()
+GraphSnapshot graphSnapshot(std::uint64_t nowUs)
 {
     GraphSnapshot result;
     const bool active = g_Active.load(std::memory_order_acquire);
@@ -633,9 +680,8 @@ GraphSnapshot graphSnapshot()
         return result;
     }
 
-    std::uint64_t nowUs = active ? LiGetMicroseconds() : frozenNowUs;
     if (nowUs == 0) {
-        nowUs = LiGetMicroseconds();
+        nowUs = active ? LiGetMicroseconds() : frozenNowUs;
     }
 
     result.hasData |= g_HostFrameInterval.fillGraph(nowUs, result.hostFrameInterval);
@@ -652,7 +698,7 @@ GraphSnapshot graphSnapshot()
     return result;
 }
 
-void formatOverlayLines(char* output, std::size_t length)
+void formatOverlayLines(char* output, std::size_t length, std::uint64_t nowUs)
 {
     if (length == 0) {
         return;
@@ -667,7 +713,7 @@ void formatOverlayLines(char* output, std::size_t length)
         return;
     }
 
-    const Snapshot stats = snapshot();
+    const Snapshot stats = snapshot(nowUs);
     if (!g_Active.load(std::memory_order_acquire) && !stats.hasData) {
         return;
     }

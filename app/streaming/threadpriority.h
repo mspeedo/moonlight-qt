@@ -43,9 +43,23 @@ struct PriorityRequestState
     std::atomic<int> result {0};
 };
 
+inline std::atomic<bool> g_Enabled {false};
 inline PriorityRequestState g_VideoReceiveRequest;
 inline PriorityRequestState g_DecoderRequest;
 inline PriorityRequestState g_RenderRequest;
+
+inline void videoReceiveThreadInit();
+
+inline void setEnabled(bool enabled)
+{
+    g_Enabled.store(enabled, std::memory_order_release);
+    LiSetVideoReceiveThreadInitCallback(enabled ? videoReceiveThreadInit : nullptr);
+}
+
+inline bool isEnabledFast()
+{
+    return g_Enabled.load(std::memory_order_relaxed);
+}
 
 inline PriorityRequestState& requestState(ThreadRole role)
 {
@@ -237,6 +251,10 @@ inline bool requestFlatpakHostPriority(pid_t tid, const char* threadName)
 
 inline int requestPriorityForTid(pid_t tid, ThreadRole role, const char* threadName)
 {
+    if (!isEnabledFast()) {
+        return 0;
+    }
+
     PriorityRequestState& state = requestState(role);
 
     bool requestSucceeded = false;
@@ -333,6 +351,10 @@ inline pid_t findThreadTidByName(const char* threadName)
 
 inline void elevateNamedThread(ThreadRole role, const char* threadName)
 {
+    if (!isEnabledFast()) {
+        return;
+    }
+
     const pid_t tid = findThreadTidByName(threadName);
     if (tid <= 0) {
         PriorityRequestState& state = requestState(role);
@@ -361,17 +383,6 @@ inline void videoReceiveThreadInit()
 {
     requestElevatedNormalPriority(ThreadRole::VideoReceive, "VideoRecv");
 }
-
-class VideoReceiveThreadPriorityRegistration
-{
-public:
-    VideoReceiveThreadPriorityRegistration()
-    {
-        LiSetVideoReceiveThreadInitCallback(videoReceiveThreadInit);
-    }
-};
-
-inline VideoReceiveThreadPriorityRegistration videoReceiveThreadPriorityRegistration;
 
 struct EffectivePriority
 {
@@ -463,6 +474,15 @@ inline const char* effectiveStateText(const EffectivePriority& effective,
 inline void formatOverlayLines(char* output, std::size_t length)
 {
     if (output == nullptr || length == 0) {
+        return;
+    }
+
+    if (!isEnabledFast()) {
+        std::snprintf(output,
+                      length,
+                      "VideoRecv: OFF\n"
+                      "FFDecoder: OFF\n"
+                      "PacerRender: OFF");
         return;
     }
 

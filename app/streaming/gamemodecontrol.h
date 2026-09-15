@@ -214,6 +214,10 @@ inline void release()
 
 inline const char* stateText()
 {
+    if (!ThreadPriority::isEnabledFast()) {
+        return "OFF";
+    }
+
     switch (g_State.load(std::memory_order_acquire)) {
     case State::NotRequested:
         return "OFF";
@@ -258,6 +262,10 @@ inline SDL_Thread* createStreamingThread(SDL_ThreadFunction function,
                                          const char* name,
                                          void* data)
 {
+    if (!ThreadPriority::isEnabledFast()) {
+        return SDL_CreateThread(function, name, data);
+    }
+
     auto* context = new (std::nothrow) ThreadStartContext{function, data, name};
     if (context == nullptr) {
         SDL_OutOfMemory();
