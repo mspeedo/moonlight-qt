@@ -3,6 +3,7 @@
 #include <QtGlobal>
 
 #if defined(Q_OS_LINUX)
+#include "gamemodecontrol.h"
 #include "threadpriority.h"
 #endif
 
@@ -85,12 +86,25 @@ void formatOverlayLines(char* output, std::size_t length)
     char priorityLines[160];
     ThreadPriority::formatOverlayLines(priorityLines, sizeof(priorityLines));
 
+    // RLIMIT_NICE is known to be 0/0 in the Flatpak and is no longer relevant
+    // now that the three stream threads are elevated by the host CAP_SYS_NICE
+    // helper. Keep the priority formatter unchanged internally, but omit its
+    // first line from the OSD and replace it with the live GameMode state.
+    const char* priorityRows = priorityLines;
+    while (*priorityRows != '\0' && *priorityRows != '\n') {
+        ++priorityRows;
+    }
+    if (*priorityRows == '\n') {
+        ++priorityRows;
+    }
+
     std::snprintf(output,
                   length,
                   "Stream health\n"
                   "  FEC frames: recovered %u | failed %u | success %s\n"
                   "  Network frame drops: %llu\n"
                   "  Pacer frame drops: %llu\n"
+                  "GameMode: %s\n"
                   "%s",
                   recoveredFrames,
                   failedFrames,
@@ -99,7 +113,8 @@ void formatOverlayLines(char* output, std::size_t length)
                       g_NetworkFrameDrops.load(std::memory_order_relaxed)),
                   static_cast<unsigned long long>(
                       g_PacerFrameDrops.load(std::memory_order_relaxed)),
-                  priorityLines);
+                  GameModeControl::stateText(),
+                  priorityRows);
 #else
     std::snprintf(output,
                   length,
