@@ -6,6 +6,7 @@
 
 #include "../bandwidth.h"
 #include "../threadpriority.h"
+#include "../gamemodecontrol.h"
 #include "decoder.h"
 #include "ffmpeg-renderers/renderer.h"
 #include "ffmpeg-renderers/pacer/pacer.h"
@@ -152,7 +153,7 @@ private:
 
 #if defined(Q_OS_LINUX)
 // ffmpeg.cpp creates exactly one SDL thread: FFDecoder. Route that creation
-// through the Linux best-effort priority wrapper without changing other SDL
-// threads or non-Linux behavior.
-#define SDL_CreateThread(...) ThreadPriority::createElevatedNormalPriorityThread(__VA_ARGS__)
+// through the stream-scoped GameMode wrapper. The wrapper keeps the working
+// CAP_SYS_NICE host-helper priority path for FFDecoder and PacerRender.
+#define SDL_CreateThread(...) GameModeControl::createStreamingThread(__VA_ARGS__)
 #endif
