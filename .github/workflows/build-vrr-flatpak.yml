@@ -44,8 +44,27 @@ jobs:
           sudo rm -f /etc/apt/sources.list.d/google-chrome.list \
                      /etc/apt/sources.list.d/google-chrome.sources
           sudo apt-get update
-          sudo apt-get install -y flatpak flatpak-builder
+          sudo apt-get install -y flatpak flatpak-builder musl-tools
           flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+
+      - name: Build static SteamOS priority helper
+        shell: bash
+        run: |
+          mkdir -p host-helper
+          musl-gcc \
+            -std=c11 \
+            -O2 \
+            -Wall \
+            -Wextra \
+            -Werror \
+            -static \
+            tools/moonlight-priority-helper.c \
+            -o host-helper/moonlight-priority-helper
+          strip host-helper/moonlight-priority-helper
+          cp tools/install-moonlight-priority-helper.sh host-helper/
+          chmod 0755 host-helper/moonlight-priority-helper \
+                     host-helper/install-moonlight-priority-helper.sh
+          file host-helper/moonlight-priority-helper
 
       - name: Pin Moonlight and Common C source revisions
         shell: bash
@@ -123,10 +142,13 @@ jobs:
             "Moonlight-${{ steps.source.outputs.safe_branch }}-${{ steps.source.outputs.short_sha }}.flatpak" \
             com.moonlight_stream.Moonlight
 
-      - name: Upload Flatpak artifact
+      - name: Upload Flatpak and priority helper artifact
         uses: actions/upload-artifact@v6
         with:
           name: Moonlight-${{ steps.source.outputs.safe_branch }}-${{ steps.source.outputs.short_sha }}
-          path: Moonlight-${{ steps.source.outputs.safe_branch }}-${{ steps.source.outputs.short_sha }}.flatpak
+          path: |
+            Moonlight-${{ steps.source.outputs.safe_branch }}-${{ steps.source.outputs.short_sha }}.flatpak
+            host-helper/moonlight-priority-helper
+            host-helper/install-moonlight-priority-helper.sh
           compression-level: 0
           if-no-files-found: error
