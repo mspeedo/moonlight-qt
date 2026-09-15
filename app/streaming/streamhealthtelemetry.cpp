@@ -1,5 +1,7 @@
 #include "streamhealthtelemetry.h"
 
+#include <QtGlobal>
+
 #if defined(Q_OS_LINUX)
 #include "threadpriority.h"
 #endif
