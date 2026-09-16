@@ -502,29 +502,29 @@ bool PlVkRenderer::initialize(PDECODER_PARAMETERS params)
         m_VkPresentMode = VK_PRESENT_MODE_FIFO_KHR;
     }
     else {
-        // Mailbox is non-blocking and latest-frame-wins, which maps best to VRR.
-        if (isPresentModeSupportedByPhysicalDevice(m_Vulkan->phys_device, VK_PRESENT_MODE_MAILBOX_KHR)) {
-            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                        "Using Mailbox present mode with V-Sync disabled");
-            m_VkPresentMode = VK_PRESENT_MODE_MAILBOX_KHR;
+        // Use the upstream preference order unless Mailbox is explicitly preferred.
+        struct {
+            VkPresentModeKHR mode;
+            const char* name;
+        } presentModes[] = {
+            { VK_PRESENT_MODE_IMMEDIATE_KHR, "Immediate" },
+            { VK_PRESENT_MODE_FIFO_RELAXED_KHR, "FIFO Relaxed" },
+            { VK_PRESENT_MODE_MAILBOX_KHR, "Mailbox" },
+            { VK_PRESENT_MODE_FIFO_KHR, "FIFO" },
+        };
+        if (params->preferMailbox) {
+            std::swap(presentModes[0], presentModes[2]);
         }
-        // FIFO Relaxed can tear if the frame is running late.
-        else if (isPresentModeSupportedByPhysicalDevice(m_Vulkan->phys_device, VK_PRESENT_MODE_FIFO_RELAXED_KHR)) {
-            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                        "Using FIFO Relaxed present mode with V-Sync disabled");
-            m_VkPresentMode = VK_PRESENT_MODE_FIFO_RELAXED_KHR;
-        }
-        // Immediate is non-blocking but can tear when VRR is unavailable.
-        else if (isPresentModeSupportedByPhysicalDevice(m_Vulkan->phys_device, VK_PRESENT_MODE_IMMEDIATE_KHR)) {
-            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                        "Using Immediate present mode with V-Sync disabled");
-            m_VkPresentMode = VK_PRESENT_MODE_IMMEDIATE_KHR;
-        }
-        // FIFO is always supported.
-        else {
-            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                        "Using FIFO present mode with V-Sync disabled");
-            m_VkPresentMode = VK_PRESENT_MODE_FIFO_KHR;
+
+        for (const auto& presentMode : presentModes) {
+            // FIFO is always supported.
+            if (presentMode.mode == VK_PRESENT_MODE_FIFO_KHR ||
+                    isPresentModeSupportedByPhysicalDevice(m_Vulkan->phys_device, presentMode.mode)) {
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                            "Using %s present mode with V-Sync disabled", presentMode.name);
+                m_VkPresentMode = presentMode.mode;
+                break;
+            }
         }
     }
 

@@ -1713,6 +1713,24 @@ Flickable {
                 }
 
                 CheckBox {
+                    id: preferMailboxCheck
+                    hoverEnabled: true
+                    width: parent.width
+                    text: qsTr("Prefer Mailbox presentation (Vulkan)")
+                    font.pointSize: 12
+                    enabled: !StreamingPreferences.enableVsync
+                    checked: StreamingPreferences.preferMailbox
+                    onCheckedChanged: {
+                        StreamingPreferences.preferMailbox = checked
+                    }
+
+                    ToolTip.delay: 1000
+                    ToolTip.timeout: 5000
+                    ToolTip.visible: hovered
+                    ToolTip.text: qsTr("Prefers Mailbox instead of Immediate presentation when using the Vulkan renderer with V-Sync disabled. Leave unchecked for the standard presentation mode. This setting takes effect on the next stream.")
+                }
+
+                CheckBox {
                     id: enableYUV444
                     width: parent.width
                     text: qsTr("Enable YUV 4:4:4")

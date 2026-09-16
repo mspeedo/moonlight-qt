@@ -278,7 +278,8 @@ void Session::clSetAdaptiveTriggers(uint16_t controllerNumber, uint8_t eventFlag
 bool Session::chooseDecoder(StreamingPreferences::VideoDecoderSelection vds,
                             StreamingPreferences::RendererSelection renderer,
                             SDL_Window* window, int videoFormat, int width, int height,
-                            int frameRate, bool enableVsync, bool enableFramePacing, bool testOnly, IVideoDecoder*& chosenDecoder)
+                            int frameRate, bool enableVsync, bool enableFramePacing, bool testOnly, IVideoDecoder*& chosenDecoder,
+                            bool preferMailbox)
 {
     DECODER_PARAMETERS params;
 
@@ -293,6 +294,7 @@ bool Session::chooseDecoder(StreamingPreferences::VideoDecoderSelection vds,
     params.videoFormat = videoFormat;
     params.window = window;
     params.enableVsync = enableVsync;
+    params.preferMailbox = preferMailbox;
     params.enableFramePacing = enableFramePacing;
     params.testOnly = testOnly;
     params.vds = vds;
@@ -2215,7 +2217,8 @@ void Session::exec()
                                    enableVsync,
                                    enableVsync && m_Preferences->framePacing,
                                    false,
-                                   s_ActiveSession->m_VideoDecoder)) {
+                                   s_ActiveSession->m_VideoDecoder,
+                                   m_Preferences->preferMailbox)) {
                     SDL_UnlockMutex(m_DecoderLock);
                     SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                                  "Failed to recreate decoder after reset");
