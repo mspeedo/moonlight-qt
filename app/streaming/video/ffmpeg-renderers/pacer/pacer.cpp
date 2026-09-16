@@ -35,6 +35,7 @@ Pacer::Pacer(IFFmpegRenderer* renderer, PVIDEO_STATS videoStats) :
     m_VsyncThread(nullptr),
     m_DeferredFreeFrame(nullptr),
     m_Stopping(false),
+    m_RenderLatestFrame(false),
     m_VsyncSource(nullptr),
     m_VsyncRenderer(renderer),
     m_MaxVideoFps(0),
@@ -158,6 +159,18 @@ int Pacer::renderThread(void* context)
             me->m_RenderQueueNotEmpty.wait(&me->m_FrameQueueLock);
         }
 
+        // Select the newest decoded output only after the renderer is ready.
+        // Free one stale frame at a time outside the lock, retaining the existing
+        // frame-pool bound even if the decoder enqueues more frames meanwhile.
+        while (me->m_RenderLatestFrame && !me->m_Stopping && me->m_RenderQueue.count() > 1) {
+            AVFrame* staleFrame = me->m_RenderQueue.dequeue();
+            me->m_FrameQueueLock.unlock();
+            av_frame_free(&staleFrame);
+            me->m_VideoStats->pacerDroppedFrames++;
+            StreamPipelineTelemetry::pacerDrop();
+            me->m_FrameQueueLock.lock();
+        }
+
         if (me->m_Stopping) {
             // Exit this thread
             me->m_FrameQueueLock.unlock();
@@ -261,11 +274,14 @@ void Pacer::handleVsync(int timeUntilNextVsyncMillis)
     enqueueFrameForRenderingAndUnlock(m_PacingQueue.dequeue());
 }
 
-bool Pacer::initialize(SDL_Window* window, int maxVideoFps, bool enablePacing)
+bool Pacer::initialize(SDL_Window* window, int maxVideoFps, bool enablePacing, bool enableVsync)
 {
     m_MaxVideoFps = maxVideoFps;
     m_DisplayFps = StreamUtils::getDisplayRefreshRate(window);
     m_RendererAttributes = m_VsyncRenderer->getRendererAttributes();
+    m_RenderLatestFrame = !enableVsync && !enablePacing &&
+            m_VsyncRenderer->getRendererType() == IFFmpegRenderer::RendererType::Vulkan &&
+            m_VsyncRenderer->isRenderThreadSupported();
 
     if (enablePacing) {
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
@@ -366,6 +382,12 @@ void Pacer::renderFrame(AVFrame* frame)
     // to the pool and the decoder tries to write a new frame into it
     std::swap(frame, m_DeferredFreeFrame);
     av_frame_free(&frame);
+
+    // The unpaced Vulkan path drops stale frames before the next render.
+    // Preserve frames that arrived during this render, including the only update.
+    if (m_RenderLatestFrame) {
+        return;
+    }
 
     // Drop frames if we have too many queued up for a while
     m_FrameQueueLock.lock();

@@ -597,8 +597,8 @@ void renderEnd()
 
 void pacerDrop()
 {
-    // Pacer calls this at the same two catch-up drop sites as its stock
-    // pacerDroppedFrames counter. Keep this session-lifetime and independent of
+    // Pacer calls this alongside its catch-up pacerDroppedFrames counter.
+    // Keep this session-lifetime and independent of
     // benchmark start/stop.
     StreamHealthTelemetry::pacerFrameDrop();
 }
