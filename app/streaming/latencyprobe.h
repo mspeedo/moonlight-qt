@@ -1,6 +1,7 @@
 #pragma once
 
 #include "SDL_compat.h"
+#include "displaypresentlatency.h"
 #include "latencybenchmarkcontrol.h"
 #include "streampipelinetelemetry.h"
 
@@ -154,6 +155,10 @@ public:
             if (requestStop) {
                 LatencyBenchmarkControl::stopAsync();
             }
+
+            if (benchmarkWasActive) {
+                DisplayPresentLatency::endRun(SDL_GetPerformanceCounter());
+            }
         }
 
         return benchmarkWasActive;
@@ -272,7 +277,16 @@ public:
             SDL_strlcat(output, result, length);
         }
 
+        const bool showDisplayPresent = m_AutoBenchmark || m_BenchmarkRan;
         SDL_AtomicUnlock(&m_Lock);
+
+        if (showDisplayPresent) {
+            char displayPresentLine[192];
+            DisplayPresentLatency::formatOverlayLine(displayPresentLine,
+                                                     sizeof(displayPresentLine));
+            SDL_strlcat(output, "\n", length);
+            SDL_strlcat(output, displayPresentLine, length);
+        }
     }
 
 private:
@@ -643,6 +657,9 @@ private:
         bool requestStop = false;
         bool telemetryStart = false;
         bool telemetryStop = false;
+        bool displayMeasurementStarted = false;
+        bool displayExpectedBright = false;
+        bool displayValidationMeasurement = false;
         const Uint32 nowTick = SDL_GetTicks();
         const uint64_t nowCounter = SDL_GetPerformanceCounter();
 
@@ -732,6 +749,9 @@ private:
                     m_AutoDownTick = nowTick;
                     m_AutoNextDownTick = nowTick + nextBenchmarkPeriodLocked();
                     action = PulseAction::Press;
+                    displayMeasurementStarted = true;
+                    displayExpectedBright = m_Expected == VisualState::Bright;
+                    displayValidationMeasurement = m_ValidationPending;
                 }
                 else {
                     m_AutoNextDownTick = nowTick + kBenchmarkTickMs;
@@ -749,6 +769,14 @@ private:
 
         if (action == PulseAction::Press) {
             pushSyntheticAEvent(controllerId, true);
+
+            // Publish the exact same t0 value only after the original synthetic
+            // input has been queued, so the additive metric cannot delay it.
+            if (displayMeasurementStarted) {
+                DisplayPresentLatency::measurementStarted(nowCounter,
+                                                          displayExpectedBright,
+                                                          displayValidationMeasurement);
+            }
         }
         else if (action == PulseAction::Release) {
             pushSyntheticAEvent(controllerId, false);
@@ -756,9 +784,11 @@ private:
 
         if (telemetryStart) {
             StreamPipelineTelemetry::start();
+            DisplayPresentLatency::beginRun();
         }
         if (telemetryStop) {
             StreamPipelineTelemetry::stop();
+            DisplayPresentLatency::endRun(nowCounter);
         }
 
         if (requestStart) {
@@ -819,11 +849,6 @@ private:
                 if (m_AutoBenchmark) {
                     addAverageSampleLocked(submitTimestamp, m_LastLatencyMs);
                 }
-
-                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                            "Latency probe: frame=%llu input-to-present=%.3f ms",
-                            (unsigned long long)serial,
-                            m_LastLatencyMs);
             }
         }
 

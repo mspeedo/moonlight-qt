@@ -442,7 +442,7 @@ void OverlayManager::appendDebugTelemetry(char* text, std::size_t length, std::u
     }
     SDL_strlcat(text, healthLines, length);
 
-    char latencyLine[192];
+    char latencyLine[512];
     LatencyProbe::instance().formatOverlayLine(latencyLine, sizeof(latencyLine));
 
     // Keep the input-latency block contiguous. The probe owns the detailed
