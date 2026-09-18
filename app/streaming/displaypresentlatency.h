@@ -249,13 +249,15 @@ inline bool graphSnapshot(StreamPipelineTelemetry::GraphSeries& graph)
     graph = {};
 
     SDL_AtomicLock(&g_Lock);
-    if (!g_RunActive || g_AverageCount == 0) {
+    if (g_AverageCount == 0 ||
+            (!g_RunActive && g_FrozenStatsTimestamp == 0)) {
         SDL_AtomicUnlock(&g_Lock);
         return false;
     }
 
     const uint64_t frequency = SDL_GetPerformanceFrequency();
-    const uint64_t now = SDL_GetPerformanceCounter();
+    const uint64_t now = g_RunActive ?
+            SDL_GetPerformanceCounter() : g_FrozenStatsTimestamp;
     const uint64_t windowTicks =
             frequency == 0 ? 0 : frequency * kAverageWindowMs / 1000;
     if (windowTicks == 0) {
