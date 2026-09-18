@@ -16,6 +16,7 @@ namespace StreamPipelineTelemetry {
 namespace {
 
 constexpr std::uint64_t kWindowUs = 10'000'000;
+constexpr std::uint64_t kAverageWindowUs = 1'000'000;
 constexpr std::size_t kRingCapacity = 2048;
 constexpr std::size_t kDecodeQueueCapacity = 64;
 constexpr int kMetricLabelWidth = 34;
@@ -104,7 +105,6 @@ public:
     void reset()
     {
         m_NextSerial.store(0, std::memory_order_relaxed);
-        m_RunMaximumUs.store(0, std::memory_order_relaxed);
         for (auto& slot : m_Slots) {
             slot.serial.store(0, std::memory_order_relaxed);
             slot.completedUs.store(0, std::memory_order_relaxed);
@@ -114,17 +114,6 @@ public:
 
     void add(std::uint64_t completedUs, std::uint64_t durationUs)
     {
-        // Keep an independent maximum for the whole benchmark run. Most samples
-        // only pay the relaxed load; the CAS loop runs only when a new record is
-        // observed. This survives rolling-window expiry and ring wrap.
-        std::uint64_t runMaximumUs = m_RunMaximumUs.load(std::memory_order_relaxed);
-        while (durationUs > runMaximumUs &&
-               !m_RunMaximumUs.compare_exchange_weak(runMaximumUs,
-                                                      durationUs,
-                                                      std::memory_order_relaxed,
-                                                      std::memory_order_relaxed)) {
-        }
-
         const std::uint64_t serial = m_NextSerial.fetch_add(1, std::memory_order_relaxed) + 1;
         SampleSlot& slot = m_Slots[(serial - 1) % kRingCapacity];
 
@@ -140,9 +129,11 @@ public:
     MetricSnapshot snapshot(std::uint64_t nowUs) const
     {
         MetricSnapshot result;
-        long double totalUs = 0.0;
-        std::uint64_t maxUs = 0;
-        std::uint64_t count = 0;
+        long double totalAverageUs = 0.0;
+        long double total10sUs = 0.0;
+        std::uint64_t maximum10sUs = 0;
+        std::uint64_t averageCount = 0;
+        std::uint64_t count10s = 0;
 
         for (const auto& slot : m_Slots) {
             const std::uint64_t serialBefore = slot.serial.load(std::memory_order_acquire);
@@ -154,30 +145,33 @@ public:
             const std::uint64_t durationUs = slot.durationUs.load(std::memory_order_relaxed);
             const std::uint64_t serialAfter = slot.serial.load(std::memory_order_acquire);
 
-            if (serialBefore != serialAfter || serialAfter == 0) {
+            if (serialBefore != serialAfter || serialAfter == 0 ||
+                    completedUs > nowUs || nowUs - completedUs > kWindowUs) {
                 continue;
             }
-            if (completedUs > nowUs || nowUs - completedUs > kWindowUs) {
-                continue;
+
+            total10sUs += durationUs;
+            count10s++;
+            if (count10s == 1 || durationUs > maximum10sUs) {
+                maximum10sUs = durationUs;
             }
 
-            totalUs += durationUs;
-            count++;
-            if (!result.valid || durationUs > maxUs) {
-                maxUs = durationUs;
+            if (nowUs - completedUs <= kAverageWindowUs) {
+                totalAverageUs += durationUs;
+                averageCount++;
             }
-            result.valid = true;
         }
 
-        if (result.valid) {
-            result.averageMs = static_cast<double>(totalUs / count) / 1000.0;
-            result.maximumMs = static_cast<double>(maxUs) / 1000.0;
+        if (averageCount != 0) {
+            result.averageValid = true;
+            result.averageMs =
+                    static_cast<double>(totalAverageUs / averageCount) / 1000.0;
         }
-
-        result.runValid = m_NextSerial.load(std::memory_order_relaxed) != 0;
-        if (result.runValid) {
-            result.runMaximumMs =
-                    static_cast<double>(m_RunMaximumUs.load(std::memory_order_relaxed)) / 1000.0;
+        if (count10s != 0) {
+            result.windowValid = true;
+            result.average10sMs =
+                    static_cast<double>(total10sUs / count10s) / 1000.0;
+            result.maximum10sMs = static_cast<double>(maximum10sUs) / 1000.0;
         }
 
         return result;
@@ -256,7 +250,6 @@ public:
 private:
     std::array<SampleSlot, kRingCapacity> m_Slots;
     std::atomic<std::uint64_t> m_NextSerial {0};
-    std::atomic<std::uint64_t> m_RunMaximumUs {0};
 };
 
 struct EventSlot {
@@ -477,17 +470,23 @@ void appendMetric(char* output,
         return;
     }
 
-    if (metric.valid && metric.runValid) {
-        std::snprintf(output + used, length - used,
-                      "%-*s %7.2f %7.2f %7.2f ms\n",
-                      kMetricLabelWidth, label,
-                      metric.averageMs, metric.maximumMs, metric.runMaximumMs);
-    }
-    else if (metric.runValid) {
-        std::snprintf(output + used, length - used,
-                      "%-*s %7s %7s %7.2f ms\n",
-                      kMetricLabelWidth, label,
-                      "N/A", "N/A", metric.runMaximumMs);
+    if (metric.windowValid) {
+        if (metric.averageValid) {
+            std::snprintf(output + used, length - used,
+                          "%-*s %7.2f %7.2f %7.2f ms\n",
+                          kMetricLabelWidth, label,
+                          metric.averageMs,
+                          metric.average10sMs,
+                          metric.maximum10sMs);
+        }
+        else {
+            std::snprintf(output + used, length - used,
+                          "%-*s %7s %7.2f %7.2f ms\n",
+                          kMetricLabelWidth, label,
+                          "N/A",
+                          metric.average10sMs,
+                          metric.maximum10sMs);
+        }
     }
     else {
         std::snprintf(output + used, length - used,
@@ -810,16 +809,16 @@ Snapshot snapshot(std::uint64_t nowUs)
     result.decodedToRenderStart = g_DecodedToRenderStart.snapshot(nowUs);
     result.renderStartToPresent = g_RenderStartToPresent.snapshot(nowUs);
     result.presentInterval = g_PresentInterval.snapshot(nowUs);
-    result.hasData = result.hostFrameInterval.valid || result.hostFrameInterval.runValid ||
-                     result.hostProcessing.valid || result.hostProcessing.runValid ||
-                     result.firstPacketInterval.valid || result.firstPacketInterval.runValid ||
-                     result.completeFrameInterval.valid || result.completeFrameInterval.runValid ||
-                     result.firstPacketToComplete.valid || result.firstPacketToComplete.runValid ||
-                     result.completeToDecodeStart.valid || result.completeToDecodeStart.runValid ||
-                     result.decodeStartToDecoded.valid || result.decodeStartToDecoded.runValid ||
-                     result.decodedToRenderStart.valid || result.decodedToRenderStart.runValid ||
-                     result.renderStartToPresent.valid || result.renderStartToPresent.runValid ||
-                     result.presentInterval.valid || result.presentInterval.runValid;
+    result.hasData = result.hostFrameInterval.windowValid ||
+                     result.hostProcessing.windowValid ||
+                     result.firstPacketInterval.windowValid ||
+                     result.completeFrameInterval.windowValid ||
+                     result.firstPacketToComplete.windowValid ||
+                     result.completeToDecodeStart.windowValid ||
+                     result.decodeStartToDecoded.windowValid ||
+                     result.decodedToRenderStart.windowValid ||
+                     result.renderStartToPresent.windowValid ||
+                     result.presentInterval.windowValid;
 
     result.frames = g_Frames.load(std::memory_order_relaxed);
     return result;
@@ -848,8 +847,8 @@ GraphSnapshot graphSnapshot(std::uint64_t nowUs)
     result.hasData |= g_PresentInterval.fillGraph(nowUs, result.presentInterval);
 
     const MetricSnapshot hostCadence = g_HostFrameInterval.snapshot(nowUs);
-    if (hostCadence.valid) {
-        result.framePeriodMs = hostCadence.averageMs;
+    if (hostCadence.windowValid) {
+        result.framePeriodMs = hostCadence.average10sMs;
     }
 
     return result;
@@ -879,7 +878,7 @@ void formatOverlayLines(char* output, std::size_t length, std::uint64_t nowUs)
                   "%-*s %7s %7s %7s\n"
                   "\nHOST\n",
                   kMetricLabelWidth, "Stream pipeline",
-                  "AVG10s", "MAX10s", "MAX");
+                  "AVG", "AVG10s", "MAX10s");
     appendMetric(output, length, "  Host frame interval", stats.hostFrameInterval);
     appendMetric(output, length, "  Host processing latency", stats.hostProcessing);
 

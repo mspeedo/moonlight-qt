@@ -14,11 +14,11 @@ namespace StreamPipelineTelemetry {
 constexpr std::size_t kGraphColumns = 480;
 
 struct MetricSnapshot {
-    bool valid = false;
+    bool averageValid = false;
     double averageMs = 0.0;
-    double maximumMs = 0.0;
-    bool runValid = false;
-    double runMaximumMs = 0.0;
+    bool windowValid = false;
+    double average10sMs = 0.0;
+    double maximum10sMs = 0.0;
 };
 
 struct Snapshot {
