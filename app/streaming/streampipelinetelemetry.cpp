@@ -177,7 +177,10 @@ public:
         return result;
     }
 
-    bool fillGraph(std::uint64_t nowUs, GraphSeries& graph, bool fillDurationSpan = true) const
+    bool fillGraph(std::uint64_t nowUs,
+                   GraphSeries& graph,
+                   bool fillDurationSpan = true,
+                   bool keepMinimum = false) const
     {
         graph = {};
         const GraphWindow window = graphWindowForTime(nowUs);
@@ -236,7 +239,9 @@ public:
 
             const float durationMs = static_cast<float>(durationUs) / 1000.0f;
             for (std::size_t column = firstColumn; column <= lastColumn; ++column) {
-                if (!graph.valid[column] || durationMs > graph.maximumMs[column]) {
+                if (!graph.valid[column] ||
+                        (keepMinimum ? durationMs < graph.maximumMs[column] :
+                                       durationMs > graph.maximumMs[column])) {
                     graph.maximumMs[column] = durationMs;
                     graph.valid[column] = 1;
                 }
@@ -885,7 +890,7 @@ GraphSnapshot graphSnapshot(std::uint64_t nowUs)
     result.hasData |= g_FirstPacketToComplete.fillGraph(nowUs, result.firstPacketToComplete);
     result.hasData |= g_PresentInterval.fillGraph(nowUs, result.presentInterval);
     result.hasData |= g_NetworkBufferReserve.fillGraph(
-            nowUs, result.networkBufferReserve, false);
+            nowUs, result.networkBufferReserve, false, true);
     result.networkBufferReserveMs =
             static_cast<double>(g_NetworkBufferReserveUs.load(std::memory_order_relaxed)) / 1000.0;
     result.networkBufferConfiguredMs =
