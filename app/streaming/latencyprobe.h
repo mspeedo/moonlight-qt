@@ -800,7 +800,7 @@ private:
         // OSD worker to snapshot the new or frozen run.
         if (telemetryStart) {
             DisplayPresentLatency::beginRun();
-            StreamPipelineTelemetry::start();
+            StreamPipelineTelemetry::resume();
         }
         if (telemetryStop) {
             DisplayPresentLatency::endRun(nowCounter);

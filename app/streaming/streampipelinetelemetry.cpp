@@ -393,6 +393,7 @@ thread_local bool g_HaveLastRealPresentationTime = false;
 thread_local bool g_HostFrameSequenceContinuous = true;
 thread_local std::uint64_t g_DecodeGeneration = 0;
 thread_local std::uint64_t g_LastPresentUs = 0;
+thread_local std::uint64_t g_PresentGeneration = 0;
 
 std::atomic<std::uint64_t> g_Generation {1};
 std::atomic<std::uint64_t> g_FrozenNowUs {0};
@@ -425,6 +426,22 @@ std::uint32_t frameNumberFromAvFrame(const AVFrame* frame)
     return encoded == 0 ? 0 : static_cast<std::uint32_t>(encoded - 1);
 }
 
+void resetTimingState()
+{
+    for (auto& slot : g_DecodeStarts) {
+        slot.frameNumber.store(0, std::memory_order_relaxed);
+        slot.startUs.store(0, std::memory_order_relaxed);
+    }
+    for (auto& slot : g_DecodedTimestamps) {
+        slot.frameNumber.store(0, std::memory_order_relaxed);
+        slot.decodedUs.store(0, std::memory_order_relaxed);
+    }
+
+    g_CurrentDecodeUnit = {};
+    g_DecodeQueue.clear();
+    g_RenderContext = {};
+}
+
 void resetClientState()
 {
     g_HostFrameInterval.reset();
@@ -438,22 +455,9 @@ void resetClientState()
     g_RenderStartToPresent.reset();
     g_PresentInterval.reset();
     g_HostFrameDiscontinuities.reset();
-
-    for (auto& slot : g_DecodeStarts) {
-        slot.frameNumber.store(0, std::memory_order_relaxed);
-        slot.startUs.store(0, std::memory_order_relaxed);
-    }
-    for (auto& slot : g_DecodedTimestamps) {
-        slot.frameNumber.store(0, std::memory_order_relaxed);
-        slot.decodedUs.store(0, std::memory_order_relaxed);
-    }
-
     g_FrozenNowUs.store(0, std::memory_order_relaxed);
     g_Frames.store(0, std::memory_order_relaxed);
-
-    g_CurrentDecodeUnit = {};
-    g_DecodeQueue.clear();
-    g_RenderContext = {};
+    resetTimingState();
 }
 
 void appendMetric(char* output,
@@ -542,6 +546,21 @@ void start()
     g_DisplayRevision.fetch_add(1, std::memory_order_acq_rel);
     resetTelemetry();
     g_Active.store(true, std::memory_order_release);
+    notifyStateChanged();
+}
+
+void resume()
+{
+    std::lock_guard<std::mutex> lock(g_StateChangeMutex);
+    g_DisplayRevision.fetch_add(1, std::memory_order_acq_rel);
+    if (!g_Active.load(std::memory_order_acquire)) {
+        // Preserve samples and counters, but don't measure intervals across the
+        // frozen pause or reuse pending frame timings from before it.
+        g_Generation.fetch_add(1, std::memory_order_acq_rel);
+        resetTimingState();
+        g_FrozenNowUs.store(0, std::memory_order_relaxed);
+        g_Active.store(true, std::memory_order_release);
+    }
     notifyStateChanged();
 }
 
@@ -770,14 +789,15 @@ void presentSuccess(std::uint64_t presentUs)
                                presentUs,
                                presentUs - g_RenderContext.renderStartUs);
 
-    // Present interval is entirely client-side: consecutive successful real
-    // swapchain-submit return timestamps. The first present of each benchmark
-    // run is deliberately used only as the baseline, so a stopped/restarted run
-    // can never bridge to the previous run's last presentation.
-    const std::uint64_t previousFrameCount =
-            g_Frames.fetch_add(1, std::memory_order_relaxed);
-    if (previousFrameCount != 0 &&
-            g_LastPresentUs != 0 &&
+    // Rebase on the render thread after a reset or resume from frozen telemetry.
+    // An already-live benchmark start preserves the interval baseline too.
+    const std::uint64_t generation = g_Generation.load(std::memory_order_acquire);
+    if (g_PresentGeneration != generation) {
+        g_LastPresentUs = 0;
+        g_PresentGeneration = generation;
+    }
+    g_Frames.fetch_add(1, std::memory_order_relaxed);
+    if (g_LastPresentUs != 0 &&
             presentUs > g_LastPresentUs) {
         g_PresentInterval.add(presentUs, presentUs - g_LastPresentUs);
     }

@@ -121,6 +121,9 @@ void pacerDrop();
 
 void clear();
 void start();
+// Resume collection without clearing history or counters. Also refresh the OSD
+// when already active, so benchmark-only statistics can restart independently.
+void resume();
 void stop();
 
 // Decoder wrappers use this to associate the DECODE_UNIT returned by Common C
