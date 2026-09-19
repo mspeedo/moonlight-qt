@@ -147,6 +147,7 @@ private:
     };
 
     static constexpr std::uint64_t kTransportBaselineWindowUs = 2'000'000;
+    static constexpr std::uint64_t kTransportBaselineRiseUsPerSecond = 5'000;
     static constexpr std::size_t kTransportTransitCapacity = 1024;
 
     bool m_TransportBufferEnabled;
@@ -154,6 +155,9 @@ private:
     bool m_TransportClockInitialized;
     std::uint32_t m_TransportLastRtpTimestamp;
     std::uint64_t m_TransportSourceTicks;
+    bool m_TransportBaselineInitialized;
+    std::int64_t m_TransportBaselineOffsetUs;
+    std::uint64_t m_TransportBaselineUpdateUs;
     std::array<TransportTransitSample, kTransportTransitCapacity> m_TransportTransitSamples;
     std::size_t m_TransportTransitNext;
     std::size_t m_TransportTransitCount;
