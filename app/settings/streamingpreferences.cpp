@@ -39,6 +39,8 @@
 #define SER_ABSTOUCHMODE "abstouchmode"
 #define SER_STARTWINDOWED "startwindowed"
 #define SER_FRAMEPACING "framepacing"
+#define SER_ENABLE_TRANSPORT_BUFFER "enabletransportbuffer"
+#define SER_TRANSPORT_BUFFER_MS "transportbufferms"
 #define SER_CONNWARNINGS "connwarnings"
 #define SER_CONFWARNINGS "confwarnings"
 #define SER_UIDISPLAYMODE "uidisplaymode"
@@ -145,6 +147,8 @@ void StreamingPreferences::reload()
     absoluteMouseMode = settings.value(SER_ABSMOUSEMODE, false).toBool();
     absoluteTouchMode = settings.value(SER_ABSTOUCHMODE, true).toBool();
     framePacing = settings.value(SER_FRAMEPACING, false).toBool();
+    enableTransportBuffer = settings.value(SER_ENABLE_TRANSPORT_BUFFER, false).toBool();
+    transportBufferMs = qBound(0, settings.value(SER_TRANSPORT_BUFFER_MS, 5).toInt(), 30);
     connectionWarnings = settings.value(SER_CONNWARNINGS, true).toBool();
     configurationWarnings = settings.value(SER_CONFWARNINGS, true).toBool();
     richPresence = settings.value(SER_RICHPRESENCE, true).toBool();
@@ -351,6 +355,8 @@ void StreamingPreferences::save()
     settings.setValue(SER_ABSMOUSEMODE, absoluteMouseMode);
     settings.setValue(SER_ABSTOUCHMODE, absoluteTouchMode);
     settings.setValue(SER_FRAMEPACING, framePacing);
+    settings.setValue(SER_ENABLE_TRANSPORT_BUFFER, enableTransportBuffer);
+    settings.setValue(SER_TRANSPORT_BUFFER_MS, qBound(0, transportBufferMs, 30));
     settings.setValue(SER_CONNWARNINGS, connectionWarnings);
     settings.setValue(SER_CONFWARNINGS, configurationWarnings);
     settings.setValue(SER_RICHPRESENCE, richPresence);
