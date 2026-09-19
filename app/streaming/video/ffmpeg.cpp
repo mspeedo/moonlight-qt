@@ -2,6 +2,7 @@
 #include "ffmpeg.h"
 #include "utils.h"
 #include "streaming/session.h"
+#include "streaming/streampipelinetelemetry.h"
 
 #include <chrono>
 #include <thread>
@@ -607,6 +608,11 @@ bool FFmpegVideoDecoder::waitForTransportBuffer(PDECODE_UNIT du)
     if (targetUs > latestTargetUs) {
         targetUs = latestTargetUs;
     }
+
+    const std::uint64_t reserveUs =
+            targetUs > completedUs ? targetUs - completedUs : 0;
+    StreamPipelineTelemetry::recordNetworkBufferReserve(
+            completedUs, reserveUs, m_TransportBufferUs);
 
     std::unique_lock<std::mutex> lock(m_TransportWaitMutex);
     for (;;) {
