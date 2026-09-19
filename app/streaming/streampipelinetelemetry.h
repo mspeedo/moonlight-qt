@@ -47,7 +47,10 @@ struct GraphSnapshot {
     GraphSeries completeFrameInterval;
     GraphSeries firstPacketToComplete;
     GraphSeries presentInterval;
+    GraphSeries networkBufferReserve;
     double framePeriodMs = 0.0;
+    double networkBufferReserveMs = 0.0;
+    double networkBufferConfiguredMs = 0.0;
     bool hasData = false;
 };
 
@@ -79,6 +82,10 @@ inline void renderEnd()
 }
 
 inline void pacerDrop()
+{
+}
+
+inline void recordNetworkBufferReserve(std::uint64_t, std::uint64_t, std::uint64_t)
 {
 }
 
@@ -116,6 +123,12 @@ void renderEnd();
 // Existing Pacer call sites use this bridge so stream-health accounting remains
 // aligned with Moonlight's stock pacerDroppedFrames semantics.
 void pacerDrop();
+
+// Record remaining timestamp-buffer headroom at frame completion. This is kept
+// in the same telemetry lifecycle as the other stream graphs.
+void recordNetworkBufferReserve(std::uint64_t completedUs,
+                                std::uint64_t reserveUs,
+                                std::uint64_t configuredUs);
 
 #endif
 
