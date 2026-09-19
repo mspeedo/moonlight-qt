@@ -194,7 +194,9 @@ private:
                        SDL_Window* window, int videoFormat, int width, int height,
                        int frameRate, bool enableVsync, bool enableFramePacing,
                        bool testOnly,
-                       IVideoDecoder*& chosenDecoder, bool preferMailbox = false);
+                       IVideoDecoder*& chosenDecoder, bool preferMailbox = false,
+                       bool enableTransportBuffer = false,
+                       int transportBufferMs = 0);
 
     static
     void clStageStarting(int stage);
