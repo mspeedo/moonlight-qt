@@ -850,6 +850,52 @@ Flickable {
                 }
 
                 CheckBox {
+                    id: transportBufferCheck
+                    width: parent.width
+                    hoverEnabled: true
+                    text: qsTr("Transport jitter buffer")
+                    font.pointSize: 12
+                    checked: StreamingPreferences.enableTransportBuffer
+                    onCheckedChanged: {
+                        StreamingPreferences.enableTransportBuffer = checked
+                    }
+
+                    ToolTip.delay: 1000
+                    ToolTip.timeout: 5000
+                    ToolTip.visible: hovered
+                    ToolTip.text: qsTr("Delays completed video frames before decoding to absorb transport jitter while preserving the host's variable frame cadence.")
+                }
+
+                Row {
+                    width: parent.width
+                    spacing: 5
+                    enabled: transportBufferCheck.checked
+
+                    Label {
+                        id: transportBufferLabel
+                        width: 150
+                        text: qsTr("Buffer: %1 ms").arg(Math.round(transportBufferSlider.value))
+                        font.pointSize: 10
+                    }
+
+                    Slider {
+                        id: transportBufferSlider
+                        width: parent.width - transportBufferLabel.width - parent.spacing
+                        from: 0
+                        to: 30
+                        stepSize: 1
+                        snapMode: "SnapAlways"
+                        value: StreamingPreferences.transportBufferMs
+                        onValueChanged: {
+                            var milliseconds = Math.round(value)
+                            if (StreamingPreferences.transportBufferMs !== milliseconds) {
+                                StreamingPreferences.transportBufferMs = milliseconds
+                            }
+                        }
+                    }
+                }
+
+                CheckBox {
                     id: enableHdr
                     width: parent.width
                     text: qsTr("Enable HDR")
