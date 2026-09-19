@@ -296,6 +296,8 @@ bool Session::chooseDecoder(StreamingPreferences::VideoDecoderSelection vds,
     params.enableVsync = enableVsync;
     params.preferMailbox = preferMailbox;
     params.enableFramePacing = enableFramePacing;
+    params.enableTransportBuffer = !testOnly && m_Preferences->enableTransportBuffer;
+    params.transportBufferMs = qBound(0, m_Preferences->transportBufferMs, 30);
     params.testOnly = testOnly;
     params.vds = vds;
     params.renderer = renderer;
