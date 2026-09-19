@@ -203,8 +203,8 @@ SDL_Surface* renderTelemetryGraphs(TTF_Font* font, SDL_Color color,
 
     char networkBufferLabel[128];
     SDL_snprintf(networkBufferLabel, sizeof(networkBufferLabel),
-                 "Network buffer — %.1f ms | Queue %d/15",
-                 graphs.networkBufferReserveMs, queuedFrames);
+                 "Network buffer (0-%.0f ms) || queue %d/15",
+                 graphs.networkBufferConfiguredMs, queuedFrames);
 
     const GraphRow rows[] = {
         {"Host frame interval", &graphs.hostFrameInterval, true, false},
@@ -274,10 +274,7 @@ SDL_Surface* renderTelemetryGraphs(TTF_Font* font, SDL_Color color,
     int y = kTelemetryGraphPanelPadding + titleHeight + labelHeight;
     for (std::size_t i = 0; i < rowCount; ++i) {
         if (rows[i].dynamicLabel) {
-            char label[160];
-            SDL_snprintf(label, sizeof(label), "%s (0-%.0f ms)",
-                         rows[i].label, static_cast<double>(scales[i]));
-            blitGraphLabel(surface, font, label,
+            blitGraphLabel(surface, font, rows[i].label,
                            kTelemetryGraphPanelPadding, y - labelHeight, color);
         }
 
