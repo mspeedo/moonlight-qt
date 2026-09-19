@@ -658,7 +658,7 @@ bool FFmpegVideoDecoder::completeInitialization(const AVCodec* decoder, enum AVP
     resetTransportBufferState();
     if (m_TransportBufferEnabled) {
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                    "Transport jitter buffer enabled: %llu ms",
+                    "Network buffer enabled: %llu ms",
                     static_cast<unsigned long long>(m_TransportBufferUs / 1000ULL));
     }
 
