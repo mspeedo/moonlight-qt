@@ -245,6 +245,9 @@ FFmpegVideoDecoder::FFmpegVideoDecoder(bool testOnly)
       m_TransportClockInitialized(false),
       m_TransportLastRtpTimestamp(0),
       m_TransportSourceTicks(0),
+      m_TransportBaselineInitialized(false),
+      m_TransportBaselineOffsetUs(0),
+      m_TransportBaselineUpdateUs(0),
       m_TransportTransitNext(0),
       m_TransportTransitCount(0)
 {
@@ -494,6 +497,9 @@ void FFmpegVideoDecoder::resetTransportBufferState()
     m_TransportClockInitialized = false;
     m_TransportLastRtpTimestamp = 0;
     m_TransportSourceTicks = 0;
+    m_TransportBaselineInitialized = false;
+    m_TransportBaselineOffsetUs = 0;
+    m_TransportBaselineUpdateUs = 0;
     m_TransportTransitSamples.fill(TransportTransitSample {});
     m_TransportTransitNext = 0;
     m_TransportTransitCount = 0;
@@ -546,19 +552,47 @@ bool FFmpegVideoDecoder::waitForTransportBuffer(PDECODE_UNIT du)
     const std::uint64_t cutoffUs =
             completedUs > kTransportBaselineWindowUs ?
             completedUs - kTransportBaselineWindowUs : 0;
-    std::int64_t baselineOffsetUs = transitOffsetUs;
+    std::int64_t windowBaselineOffsetUs = transitOffsetUs;
     for (std::size_t i = 0; i < m_TransportTransitCount; ++i) {
         const TransportTransitSample& candidate = m_TransportTransitSamples[i];
         if (candidate.completedUs >= cutoffUs &&
                 candidate.completedUs <= completedUs &&
-                candidate.offsetUs < baselineOffsetUs) {
-            baselineOffsetUs = candidate.offsetUs;
+                candidate.offsetUs < windowBaselineOffsetUs) {
+            windowBaselineOffsetUs = candidate.offsetUs;
         }
     }
 
+    if (!m_TransportBaselineInitialized) {
+        m_TransportBaselineInitialized = true;
+        m_TransportBaselineOffsetUs = windowBaselineOffsetUs;
+    }
+    else if (windowBaselineOffsetUs < m_TransportBaselineOffsetUs) {
+        // A newly observed lower path delay is safe to adopt immediately. This
+        // reduces latency rather than adding a visible playout pause.
+        m_TransportBaselineOffsetUs = windowBaselineOffsetUs;
+    }
+    else if (completedUs > m_TransportBaselineUpdateUs) {
+        // When the lower envelope moves later (clock drift or a persistent path
+        // delay increase), restore buffer headroom gradually. A hard baseline
+        // jump would manufacture a one-frame hitch even though transport is now
+        // stable at the new delay.
+        const std::uint64_t elapsedUs = completedUs - m_TransportBaselineUpdateUs;
+        const std::int64_t allowedRiseUs = static_cast<std::int64_t>(
+                (elapsedUs * kTransportBaselineRiseUsPerSecond) / 1'000'000ULL);
+        const std::int64_t neededRiseUs =
+                windowBaselineOffsetUs - m_TransportBaselineOffsetUs;
+        if (allowedRiseUs >= neededRiseUs) {
+            m_TransportBaselineOffsetUs = windowBaselineOffsetUs;
+        }
+        else if (allowedRiseUs > 0) {
+            m_TransportBaselineOffsetUs += allowedRiseUs;
+        }
+    }
+    m_TransportBaselineUpdateUs = completedUs;
+
     std::int64_t targetSignedUs =
             static_cast<std::int64_t>(sourceUs) +
-            baselineOffsetUs +
+            m_TransportBaselineOffsetUs +
             static_cast<std::int64_t>(m_TransportBufferUs);
     if (targetSignedUs <= 0) {
         return true;
