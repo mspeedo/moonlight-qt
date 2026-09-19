@@ -135,6 +135,8 @@ public:
     Q_PROPERTY(bool absoluteMouseMode MEMBER absoluteMouseMode NOTIFY absoluteMouseModeChanged)
     Q_PROPERTY(bool absoluteTouchMode MEMBER absoluteTouchMode NOTIFY absoluteTouchModeChanged)
     Q_PROPERTY(bool framePacing MEMBER framePacing NOTIFY framePacingChanged)
+    Q_PROPERTY(bool enableTransportBuffer MEMBER enableTransportBuffer NOTIFY enableTransportBufferChanged)
+    Q_PROPERTY(int transportBufferMs MEMBER transportBufferMs NOTIFY transportBufferMsChanged)
     Q_PROPERTY(bool connectionWarnings MEMBER connectionWarnings NOTIFY connectionWarningsChanged)
     Q_PROPERTY(bool configurationWarnings MEMBER configurationWarnings NOTIFY configurationWarningsChanged)
     Q_PROPERTY(bool richPresence MEMBER richPresence NOTIFY richPresenceChanged)
@@ -179,6 +181,8 @@ public:
     bool absoluteMouseMode;
     bool absoluteTouchMode;
     bool framePacing;
+    bool enableTransportBuffer;
+    int transportBufferMs;
     bool connectionWarnings;
     bool configurationWarnings;
     bool richPresence;
@@ -228,6 +232,8 @@ signals:
     void uiDisplayModeChanged();
     void windowModeChanged();
     void framePacingChanged();
+    void enableTransportBufferChanged();
+    void transportBufferMsChanged();
     void connectionWarningsChanged();
     void configurationWarningsChanged();
     void richPresenceChanged();
