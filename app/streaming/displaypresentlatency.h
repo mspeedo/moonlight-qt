@@ -163,6 +163,19 @@ inline void beginRun()
     SDL_AtomicUnlock(&g_Lock);
 }
 
+inline void reset()
+{
+    SDL_AtomicLock(&g_Lock);
+    g_RunActive = false;
+    g_WaitingForTransition = false;
+    g_ValidationMeasurement = false;
+    g_Expected = VisualState::Unknown;
+    g_InputTimestamp = 0;
+    g_FrozenStatsTimestamp = 0;
+    resetAverageLocked();
+    SDL_AtomicUnlock(&g_Lock);
+}
+
 inline void endRun(uint64_t now)
 {
     SDL_AtomicLock(&g_Lock);
@@ -244,7 +257,7 @@ inline void onVideoSample(uint64_t presentTimestamp, float luma)
     SDL_AtomicUnlock(&g_Lock);
 }
 
-inline bool graphSnapshot(StreamPipelineTelemetry::GraphSeries& graph)
+inline void graphSnapshot(StreamPipelineTelemetry::GraphSeries& graph)
 {
     graph = {};
 
@@ -252,7 +265,7 @@ inline bool graphSnapshot(StreamPipelineTelemetry::GraphSeries& graph)
     if (g_AverageCount == 0 ||
             (!g_RunActive && g_FrozenStatsTimestamp == 0)) {
         SDL_AtomicUnlock(&g_Lock);
-        return false;
+        return;
     }
 
     const uint64_t frequency = SDL_GetPerformanceFrequency();
@@ -262,10 +275,9 @@ inline bool graphSnapshot(StreamPipelineTelemetry::GraphSeries& graph)
             frequency == 0 ? 0 : frequency * kAverageWindowMs / 1000;
     if (windowTicks == 0) {
         SDL_AtomicUnlock(&g_Lock);
-        return false;
+        return;
     }
 
-    bool hasData = false;
     for (size_t i = 0; i < g_AverageCount; ++i) {
         const size_t index = (g_AverageStart + i) % kAverageCapacity;
         const LatencySample& sample = g_AverageSamples[index];
@@ -291,11 +303,9 @@ inline bool graphSnapshot(StreamPipelineTelemetry::GraphSeries& graph)
             graph.maximumMs[column] = latencyMs;
             graph.valid[column] = 1;
         }
-        hasData = true;
     }
 
     SDL_AtomicUnlock(&g_Lock);
-    return hasData;
 }
 
 inline void formatOverlayLine(char* output, size_t length)

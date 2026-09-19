@@ -156,9 +156,9 @@ public:
                 LatencyBenchmarkControl::stopAsync();
             }
 
-            if (benchmarkWasActive) {
-                DisplayPresentLatency::endRun(SDL_GetPerformanceCounter());
-            }
+            // A completed run is discarded when its OSD is hidden. Active runs
+            // survive ordinary hiding via the early return above.
+            DisplayPresentLatency::reset();
         }
 
         return benchmarkWasActive;
@@ -796,13 +796,15 @@ private:
             pushSyntheticAEvent(controllerId, false);
         }
 
+        // Prepare display-present data before pipeline telemetry notifies the
+        // OSD worker to snapshot the new or frozen run.
         if (telemetryStart) {
-            StreamPipelineTelemetry::start();
             DisplayPresentLatency::beginRun();
+            StreamPipelineTelemetry::start();
         }
         if (telemetryStop) {
-            StreamPipelineTelemetry::stop();
             DisplayPresentLatency::endRun(nowCounter);
+            StreamPipelineTelemetry::stop();
         }
 
         if (requestStart) {

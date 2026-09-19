@@ -173,7 +173,6 @@ using SurfacePtr = std::unique_ptr<SDL_Surface, decltype(&SDL_FreeSurface)>;
 struct GraphCache {
     SurfacePtr background {nullptr, SDL_FreeSurface};
     std::array<float, 6> scales {};
-    bool showDisplayPresent = false;
 };
 
 SDL_Surface* renderTelemetryGraphs(TTF_Font* font, SDL_Color color,
@@ -191,7 +190,7 @@ SDL_Surface* renderTelemetryGraphs(TTF_Font* font, SDL_Color color,
     };
 
     StreamPipelineTelemetry::GraphSeries displayPresent;
-    const bool showDisplayPresent = DisplayPresentLatency::graphSnapshot(displayPresent);
+    DisplayPresentLatency::graphSnapshot(displayPresent);
     const GraphRow rows[] = {
         {"Host frame interval", &graphs.hostFrameInterval, true},
         {"First packet interval", &graphs.firstPacketInterval, true},
@@ -200,7 +199,7 @@ SDL_Surface* renderTelemetryGraphs(TTF_Font* font, SDL_Color color,
         {"First packet -> complete", &graphs.firstPacketToComplete, false},
         {"Input -> display present", &displayPresent, false},
     };
-    const std::size_t rowCount = showDisplayPresent ? 6 : 5;
+    const std::size_t rowCount = sizeof(rows) / sizeof(rows[0]);
 
     const int fontHeight = TTF_FontHeight(font);
     const int titleHeight = fontHeight + 6;
@@ -215,15 +214,13 @@ SDL_Surface* renderTelemetryGraphs(TTF_Font* font, SDL_Color color,
     for (std::size_t i = 0; i < rowCount; ++i) {
         scales[i] = graphScaleMaxMs(*rows[i].series);
     }
-    if (!cache.background || cache.scales != scales ||
-            cache.showDisplayPresent != showDisplayPresent) {
+    if (!cache.background || cache.scales != scales) {
         cache.background.reset(SDL_CreateRGBSurfaceWithFormat(
                 0, width, height, 32, SDL_PIXELFORMAT_ARGB8888));
         if (!cache.background) {
             return nullptr;
         }
         cache.scales = scales;
-        cache.showDisplayPresent = showDisplayPresent;
         SDL_Surface* background = cache.background.get();
         // Copy pixels exactly, including alpha, into each upload-owned surface.
         SDL_SetSurfaceBlendMode(background, SDL_BLENDMODE_NONE);
