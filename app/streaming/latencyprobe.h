@@ -577,7 +577,7 @@ private:
                         "Pipeline telemetry manually frozen");
         }
         else if (resumeTelemetry) {
-            StreamPipelineTelemetry::start();
+            StreamPipelineTelemetry::resume();
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                         "Pipeline telemetry manually resumed");
         }
