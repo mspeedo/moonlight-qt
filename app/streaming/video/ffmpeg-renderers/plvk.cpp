@@ -133,7 +133,13 @@ void PlVkRenderer::unlockQueue(struct AVHWDeviceContext *dev_ctx, uint32_t queue
 
 void PlVkRenderer::overlayUploadComplete(void* opaque)
 {
-    SDL_FreeSurface((SDL_Surface*)opaque);
+    SDL_Surface* surface = static_cast<SDL_Surface*>(opaque);
+#if defined(HAVE_LIBPLACEBO_VULKAN) && defined(Q_OS_LINUX)
+    if (Overlay::recycleDebugGraphSurface(surface)) {
+        return;
+    }
+#endif
+    SDL_FreeSurface(surface);
 }
 
 PlVkRenderer::PlVkRenderer(AVHWDeviceType hwDeviceType, IFFmpegRenderer *backendRenderer) :

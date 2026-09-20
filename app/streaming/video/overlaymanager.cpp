@@ -1,6 +1,7 @@
 #include "overlaymanager.h"
 #include "path.h"
 
+#include <array>
 #include <chrono>
 #include <memory>
 
@@ -23,6 +24,7 @@ constexpr int kTelemetryGraphPlotHeight = 88;
 constexpr int kTelemetryGraphRowGap = 8;
 constexpr int kTelemetryGraphPanelPadding = 8;
 constexpr int kTelemetryGraphSurfaceGap = 24;
+constexpr std::size_t kTelemetryGraphSurfacePoolSize = 3;
 constexpr float kTelemetryGraphScaleStepMs = 5.0f;
 constexpr float kTelemetryGraphMinScaleMs = 5.0f;
 void blitGraphLabel(SDL_Surface* destination,
@@ -170,6 +172,27 @@ void drawTelemetryGraph(SDL_Surface* surface,
 
 using SurfacePtr = std::unique_ptr<SDL_Surface, decltype(&SDL_FreeSurface)>;
 
+struct GraphSurfacePool {
+    std::mutex mutex;
+    std::array<SDL_Surface*, kTelemetryGraphSurfacePoolSize> freeSurfaces {};
+
+    ~GraphSurfacePool()
+    {
+        for (SDL_Surface* surface : freeSurfaces) {
+            if (surface != nullptr) {
+                surface->userdata = nullptr;
+                SDL_FreeSurface(surface);
+            }
+        }
+    }
+};
+
+GraphSurfacePool& graphSurfacePool()
+{
+    static GraphSurfacePool pool;
+    return pool;
+}
+
 struct GraphCache {
     SurfacePtr background {nullptr, SDL_FreeSurface};
     std::array<float, 7> scales {};
@@ -262,10 +285,9 @@ SDL_Surface* renderTelemetryGraphs(TTF_Font* font, SDL_Color color,
         }
     }
 
-    // Upload takes ownership asynchronously, so never overwrite a surface still
-    // being read by the GPU transfer. Only this small panel is allocated at 20 Hz.
-    SDL_Surface* surface = SDL_CreateRGBSurfaceWithFormat(
-            0, width, height, 32, SDL_PIXELFORMAT_ARGB8888);
+    // Upload takes ownership asynchronously, so a surface only becomes reusable
+    // after libplacebo invokes its transfer-completion callback.
+    SDL_Surface* surface = Overlay::acquireDebugGraphSurface(width, height);
     if (surface == nullptr) {
         return nullptr;
     }
@@ -324,6 +346,66 @@ SDL_Surface* combineDebugOverlaySurfaces(SDL_Surface* textSurface,
 }
 
 } // namespace
+
+SDL_Surface* Overlay::acquireDebugGraphSurface(int width, int height)
+{
+    GraphSurfacePool& pool = graphSurfacePool();
+    {
+        std::lock_guard<std::mutex> lock(pool.mutex);
+        for (SDL_Surface*& candidate : pool.freeSurfaces) {
+            if (candidate == nullptr) {
+                continue;
+            }
+
+            SDL_Surface* surface = candidate;
+            candidate = nullptr;
+            if (surface->w == width && surface->h == height &&
+                    surface->format->format == SDL_PIXELFORMAT_ARGB8888) {
+                return surface;
+            }
+
+            surface->userdata = nullptr;
+            SDL_FreeSurface(surface);
+        }
+    }
+
+    SDL_Surface* surface = SDL_CreateRGBSurfaceWithFormat(
+            0, width, height, 32, SDL_PIXELFORMAT_ARGB8888);
+    if (surface != nullptr) {
+        // Mark only graph-upload surfaces. Other overlay surfaces continue to
+        // use their existing free-on-upload-complete behavior.
+        surface->userdata = &pool;
+    }
+    return surface;
+}
+
+bool Overlay::recycleDebugGraphSurface(SDL_Surface* surface)
+{
+    if (surface == nullptr) {
+        return false;
+    }
+
+    GraphSurfacePool& pool = graphSurfacePool();
+    if (surface->userdata != &pool) {
+        return false;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(pool.mutex);
+        for (SDL_Surface*& candidate : pool.freeSurfaces) {
+            if (candidate == nullptr) {
+                candidate = surface;
+                return true;
+            }
+        }
+    }
+
+    // More than three transfers in flight is allowed; only the excess surface
+    // falls back to the old free behavior rather than growing the pool.
+    surface->userdata = nullptr;
+    SDL_FreeSurface(surface);
+    return true;
+}
 #endif
 
 OverlayManager::OverlayManager() :
