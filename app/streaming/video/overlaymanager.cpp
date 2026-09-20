@@ -805,8 +805,6 @@ void OverlayManager::setOverlayState(OverlayType type, bool enabled)
         if (enabled) {
             Session* session = Session::get();
             LatencyBenchmarkControl::configure(session != nullptr ? session->getComputer() : nullptr);
-            LatencyProbe::instance().setStreamFrameRate(
-                        session != nullptr ? session->getStreamFrameRate() : 0);
         }
         const bool benchmarkWasActive = LatencyProbe::instance().setEnabled(enabled);
 
