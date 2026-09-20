@@ -33,13 +33,24 @@ struct LatencySample {
     double latencyMs = 0.0;
 };
 
+struct PendingCorrection {
+    uint64_t sequence = 0;
+    uint64_t timestamp = 0;
+    double rawLatencyMs = 0.0;
+    double waitMs = 0.0;
+    bool rawValid = false;
+    bool waitValid = false;
+};
+
 inline SDL_SpinLock g_Lock = 0;
 inline bool g_RunActive = false;
 inline bool g_WaitingForTransition = false;
 inline bool g_ValidationMeasurement = false;
 inline VisualState g_Expected = VisualState::Unknown;
 inline uint64_t g_InputTimestamp = 0;
+inline uint64_t g_CurrentSequence = 0;
 inline uint64_t g_FrozenStatsTimestamp = 0;
+inline PendingCorrection g_PendingCorrections[kAverageCapacity] = {};
 inline LatencySample g_AverageSamples[kAverageCapacity] = {};
 inline size_t g_AverageStart = 0;
 inline size_t g_AverageCount = 0;
@@ -59,6 +70,13 @@ inline void resetAverageLocked()
 {
     g_AverageStart = 0;
     g_AverageCount = 0;
+}
+
+inline void resetCorrectionsLocked()
+{
+    for (auto& pending : g_PendingCorrections) {
+        pending = {};
+    }
 }
 
 inline void pruneAverageLocked(uint64_t now)
@@ -94,6 +112,20 @@ inline void addAverageSampleLocked(uint64_t timestamp, double latencyMs)
     g_AverageSamples[index].timestamp = timestamp;
     g_AverageSamples[index].latencyMs = latencyMs;
     g_AverageCount++;
+}
+
+inline void tryFinalizeCorrectionLocked(PendingCorrection& pending)
+{
+    if (!g_RunActive || !pending.rawValid || !pending.waitValid) {
+        return;
+    }
+
+    if (pending.rawLatencyMs >= pending.waitMs) {
+        addAverageSampleLocked(pending.timestamp,
+                               pending.rawLatencyMs - pending.waitMs);
+    }
+
+    pending = {};
 }
 
 inline bool getStatsLocked(uint64_t now,
@@ -158,7 +190,9 @@ inline void beginRun()
     g_ValidationMeasurement = false;
     g_Expected = VisualState::Unknown;
     g_InputTimestamp = 0;
+    g_CurrentSequence = 0;
     g_FrozenStatsTimestamp = 0;
+    resetCorrectionsLocked();
     resetAverageLocked();
     SDL_AtomicUnlock(&g_Lock);
 }
@@ -171,7 +205,9 @@ inline void reset()
     g_ValidationMeasurement = false;
     g_Expected = VisualState::Unknown;
     g_InputTimestamp = 0;
+    g_CurrentSequence = 0;
     g_FrozenStatsTimestamp = 0;
+    resetCorrectionsLocked();
     resetAverageLocked();
     SDL_AtomicUnlock(&g_Lock);
 }
@@ -188,19 +224,43 @@ inline void endRun(uint64_t now)
     g_ValidationMeasurement = false;
     g_Expected = VisualState::Unknown;
     g_InputTimestamp = 0;
+    g_CurrentSequence = 0;
     SDL_AtomicUnlock(&g_Lock);
 }
 
 inline void measurementStarted(uint64_t inputTimestamp,
                                bool expectedBright,
-                               bool validationMeasurement)
+                               bool validationMeasurement,
+                               uint64_t sequence)
 {
     SDL_AtomicLock(&g_Lock);
     if (g_RunActive) {
         g_InputTimestamp = inputTimestamp;
+        g_CurrentSequence = sequence;
         g_Expected = expectedBright ? VisualState::Bright : VisualState::Dark;
         g_ValidationMeasurement = validationMeasurement;
         g_WaitingForTransition = true;
+    }
+    SDL_AtomicUnlock(&g_Lock);
+}
+
+inline void cadenceWaitAvailable(uint64_t sequence, uint64_t waitUs)
+{
+    if (sequence == 0) {
+        return;
+    }
+
+    SDL_AtomicLock(&g_Lock);
+    if (g_RunActive) {
+        PendingCorrection& pending =
+                g_PendingCorrections[sequence % kAverageCapacity];
+        if (pending.sequence != sequence) {
+            pending = {};
+            pending.sequence = sequence;
+        }
+        pending.waitMs = static_cast<double>(waitUs) / 1000.0;
+        pending.waitValid = true;
+        tryFinalizeCorrectionLocked(pending);
     }
     SDL_AtomicUnlock(&g_Lock);
 }
@@ -215,6 +275,7 @@ inline void onVideoSample(uint64_t presentTimestamp, float luma)
     SDL_AtomicLock(&g_Lock);
 
     if (!g_RunActive || !g_WaitingForTransition || g_InputTimestamp == 0 ||
+            g_CurrentSequence == 0 ||
             presentTimestamp == 0 || presentTimestamp < g_InputTimestamp) {
         SDL_AtomicUnlock(&g_Lock);
         return;
@@ -232,6 +293,7 @@ inline void onVideoSample(uint64_t presentTimestamp, float luma)
         g_ValidationMeasurement = false;
         g_Expected = VisualState::Unknown;
         g_InputTimestamp = 0;
+        g_CurrentSequence = 0;
         SDL_AtomicUnlock(&g_Lock);
         return;
     }
@@ -246,13 +308,23 @@ inline void onVideoSample(uint64_t presentTimestamp, float luma)
             static_cast<double>(frequency);
 
     if (!g_ValidationMeasurement) {
-        addAverageSampleLocked(presentTimestamp, latencyMs);
+        PendingCorrection& pending =
+                g_PendingCorrections[g_CurrentSequence % kAverageCapacity];
+        if (pending.sequence != g_CurrentSequence) {
+            pending = {};
+            pending.sequence = g_CurrentSequence;
+        }
+        pending.timestamp = presentTimestamp;
+        pending.rawLatencyMs = latencyMs;
+        pending.rawValid = true;
+        tryFinalizeCorrectionLocked(pending);
     }
 
     g_WaitingForTransition = false;
     g_ValidationMeasurement = false;
     g_Expected = VisualState::Unknown;
     g_InputTimestamp = 0;
+    g_CurrentSequence = 0;
 
     SDL_AtomicUnlock(&g_Lock);
 }

@@ -2,10 +2,12 @@
 
 #include "backend/nvcomputer.h"
 #include "backend/nvhttp.h"
+#include "latencyprobe.h"
 
 #include <QDebug>
 #include <QReadWriteLock>
 #include <QThread>
+#include <QXmlStreamReader>
 
 #include <mutex>
 #include <thread>
@@ -82,6 +84,77 @@ void performRequest(const HostConfig& config, const char* action)
     delete worker;
 }
 
+void performSampleRequest(const HostConfig& config, std::uint64_t sequence)
+{
+    QThread* worker = QThread::create([config, sequence]() {
+        try {
+            NvHTTP http(config.address,
+                        config.httpsPort,
+                        config.serverCert,
+                        config.useTrueUid);
+
+            const QString response = http.openConnectionToString(
+                        http.m_BaseUrlHttps,
+                        QStringLiteral("latencybenchmark"),
+                        QStringLiteral("action=sample&sequence=") +
+                            QString::number(static_cast<qulonglong>(sequence)),
+                        kControlTimeoutMs,
+                        NvHTTP::NVLL_ERROR);
+            NvHTTP::verifyResponseStatus(response);
+
+            bool sampleReady = false;
+            std::uint64_t responseSequence = 0;
+            std::uint64_t waitUs = 0;
+            bool sequenceValid = false;
+            bool waitValid = false;
+
+            QXmlStreamReader xml(response);
+            while (!xml.atEnd()) {
+                xml.readNext();
+                if (!xml.isStartElement()) {
+                    continue;
+                }
+
+                if (xml.name() == QStringLiteral("latencybenchmark")) {
+                    sampleReady = xml.readElementText() == QStringLiteral("sample");
+                }
+                else if (xml.name() == QStringLiteral("sequence")) {
+                    bool ok = false;
+                    const qulonglong value = xml.readElementText().toULongLong(&ok);
+                    if (ok) {
+                        responseSequence = static_cast<std::uint64_t>(value);
+                        sequenceValid = true;
+                    }
+                }
+                else if (xml.name() == QStringLiteral("wait_us")) {
+                    bool ok = false;
+                    const qulonglong value = xml.readElementText().toULongLong(&ok);
+                    if (ok) {
+                        waitUs = static_cast<std::uint64_t>(value);
+                        waitValid = true;
+                    }
+                }
+            }
+
+            if (!xml.hasError() && sampleReady && sequenceValid && waitValid &&
+                    responseSequence == sequence) {
+                LatencyProbe::instance().onCadenceWait(sequence, waitUs);
+            }
+            else {
+                qDebug() << "Latency benchmark cadence wait unavailable for sequence"
+                         << static_cast<qulonglong>(sequence);
+            }
+        }
+        catch (const std::exception& e) {
+            qDebug() << "Latency benchmark sample request unavailable:" << e.what();
+        }
+    });
+
+    worker->start();
+    worker->wait();
+    delete worker;
+}
+
 void perform(const char* action)
 {
     const HostConfig config = copyHostConfig();
@@ -126,6 +199,16 @@ void configure(NvComputer* computer)
 void startAsync()
 {
     requestAsync("start");
+}
+
+void sampleAsync(std::uint64_t sequence)
+{
+    std::thread([sequence]() {
+        const HostConfig config = copyHostConfig();
+        if (config.valid) {
+            performSampleRequest(config, sequence);
+        }
+    }).detach();
 }
 
 void stopAsync()

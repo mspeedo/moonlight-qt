@@ -47,6 +47,33 @@ public:
         return m_NeedsVideoSampleFast.load(std::memory_order_relaxed);
     }
 
+    void onCadenceWait(uint64_t sequence, uint64_t waitUs)
+    {
+        const double waitMs = static_cast<double>(waitUs) / 1000.0;
+
+        SDL_AtomicLock(&m_Lock);
+        if (m_Enabled && m_AutoBenchmark && sequence != 0) {
+            PendingCorrection& pending =
+                    m_PendingCorrections[sequence % kCorrectionCapacity];
+            if (pending.valid && pending.sequence == sequence) {
+                if (pending.rawLatencyMs >= waitMs) {
+                    m_LastLatencyMs = pending.rawLatencyMs - waitMs;
+                    m_HasResult = true;
+                    addAverageSampleLocked(pending.timestamp, m_LastLatencyMs);
+                }
+                else {
+                    SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                                "Latency probe: cadence wait exceeds raw latency for sequence=%llu",
+                                (unsigned long long)sequence);
+                }
+                pending = {};
+            }
+        }
+        SDL_AtomicUnlock(&m_Lock);
+
+        DisplayPresentLatency::cadenceWaitAvailable(sequence, waitUs);
+    }
+
     bool setEnabled(bool enabled, bool forceDisable = false)
     {
         bool stateChanged = false;
@@ -120,6 +147,9 @@ public:
             m_AutoDownTick = 0;
             m_AutoNextDownTick = 0;
             m_PulseJitterState = 0;
+            m_NextPulseSequence = 0;
+            m_CurrentPulseSequence = 0;
+            resetCorrectionsLocked();
             resetAverageLocked();
             refreshVideoSamplingFastLocked();
         }
@@ -174,6 +204,8 @@ public:
             return;
         }
 
+        uint64_t cadenceQuerySequence = 0;
+
         SDL_AtomicLock(&m_Lock);
 
         if (!m_Enabled || !m_HelperRunning || m_BenchmarkStarting) {
@@ -194,10 +226,14 @@ public:
 
         if (m_WaitingForTransition && state == m_Expected) {
             m_Baseline = state;
-            completeLocked(serial, submitTimestamp);
+            cadenceQuerySequence = completeLocked(serial, submitTimestamp);
         }
 
         SDL_AtomicUnlock(&m_Lock);
+
+        if (cadenceQuerySequence != 0) {
+            LatencyBenchmarkControl::sampleAsync(cadenceQuerySequence);
+        }
     }
 
     void formatOverlayLine(char* output, size_t length)
@@ -318,6 +354,7 @@ private:
     static constexpr uint64_t kAverageWindowMs = 10000;
     static constexpr uint64_t kShortAverageWindowMs = 1000;
     static constexpr size_t kAverageCapacity = 64;
+    static constexpr size_t kCorrectionCapacity = 64;
 
     // Synthetic events use a timestamp ordinary SDL controller events will not
     // practically produce, so the event watch never mistakes benchmark pulses
@@ -327,6 +364,13 @@ private:
     struct LatencySample {
         uint64_t timestamp = 0;
         double latencyMs = 0.0;
+    };
+
+    struct PendingCorrection {
+        uint64_t sequence = 0;
+        uint64_t timestamp = 0;
+        double rawLatencyMs = 0.0;
+        bool valid = false;
     };
 
     LatencyProbe() = default;
@@ -650,6 +694,7 @@ private:
         }
 
         m_InputTimestamp = timestamp;
+        m_CurrentPulseSequence = ++m_NextPulseSequence;
         m_Expected = m_Baseline == VisualState::Dark ? VisualState::Bright : VisualState::Dark;
         m_WaitingForTransition = true;
         refreshVideoSamplingFastLocked();
@@ -673,6 +718,7 @@ private:
         bool displayMeasurementStarted = false;
         bool displayExpectedBright = false;
         bool displayValidationMeasurement = false;
+        uint64_t displayPulseSequence = 0;
         const Uint32 nowTick = SDL_GetTicks();
         const uint64_t nowCounter = SDL_GetPerformanceCounter();
 
@@ -708,6 +754,7 @@ private:
             m_Baseline = VisualState::Unknown;
             m_Expected = VisualState::Unknown;
             m_InputTimestamp = 0;
+            m_CurrentPulseSequence = 0;
             action = m_PhysicalAHeld ? PulseAction::Press : PulseAction::Release;
 
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
@@ -742,6 +789,9 @@ private:
                 m_AutoDownTick = 0;
                 m_AutoNextDownTick = nowTick + kBenchmarkPressMs;
                 m_PulseJitterState = static_cast<uint32_t>(nowCounter);
+                m_NextPulseSequence = 0;
+                m_CurrentPulseSequence = 0;
+                resetCorrectionsLocked();
                 telemetryStart = true;
 
                 SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
@@ -766,6 +816,7 @@ private:
                     displayMeasurementStarted = true;
                     displayExpectedBright = m_Expected == VisualState::Bright;
                     displayValidationMeasurement = m_ValidationPending;
+                    displayPulseSequence = m_CurrentPulseSequence;
                 }
                 else {
                     m_AutoNextDownTick = nowTick + kBenchmarkTickMs;
@@ -789,7 +840,8 @@ private:
             if (displayMeasurementStarted) {
                 DisplayPresentLatency::measurementStarted(nowCounter,
                                                           displayExpectedBright,
-                                                          displayValidationMeasurement);
+                                                          displayValidationMeasurement,
+                                                          displayPulseSequence);
             }
         }
         else if (action == PulseAction::Release) {
@@ -834,12 +886,15 @@ private:
         }
     }
 
-    void completeLocked(uint64_t serial, uint64_t submitTimestamp)
+    uint64_t completeLocked(uint64_t serial, uint64_t submitTimestamp)
     {
-        if (!m_WaitingForTransition || submitTimestamp == 0 || submitTimestamp < m_InputTimestamp) {
-            return;
+        if (!m_WaitingForTransition || submitTimestamp == 0 ||
+                submitTimestamp < m_InputTimestamp || m_CurrentPulseSequence == 0) {
+            return 0;
         }
 
+        uint64_t cadenceQuerySequence = 0;
+        const uint64_t sequence = m_CurrentPulseSequence;
         const uint64_t frequency = SDL_GetPerformanceFrequency();
         if (frequency != 0) {
             const double latencyMs =
@@ -856,18 +911,22 @@ private:
                             (unsigned long long)serial);
             }
             else {
-                m_LastLatencyMs = latencyMs;
-                m_HasResult = true;
-
-                if (m_AutoBenchmark) {
-                    addAverageSampleLocked(submitTimestamp, m_LastLatencyMs);
-                }
+                PendingCorrection& pending =
+                        m_PendingCorrections[sequence % kCorrectionCapacity];
+                pending.sequence = sequence;
+                pending.timestamp = submitTimestamp;
+                pending.rawLatencyMs = latencyMs;
+                pending.valid = true;
+                cadenceQuerySequence = sequence;
             }
         }
 
         m_WaitingForTransition = false;
         m_Expected = VisualState::Unknown;
+        m_InputTimestamp = 0;
+        m_CurrentPulseSequence = 0;
         refreshVideoSamplingFastLocked();
+        return cadenceQuerySequence;
     }
 
     void checkTimeoutLocked(uint64_t now)
@@ -889,7 +948,15 @@ private:
             m_Baseline = VisualState::Unknown;
             m_Expected = VisualState::Unknown;
             m_InputTimestamp = 0;
+            m_CurrentPulseSequence = 0;
             refreshVideoSamplingFastLocked();
+        }
+    }
+
+    void resetCorrectionsLocked()
+    {
+        for (auto& pending : m_PendingCorrections) {
+            pending = {};
         }
     }
 
@@ -1021,7 +1088,10 @@ private:
     Uint32 m_AutoDownTick = 0;
     Uint32 m_AutoNextDownTick = 0;
     uint32_t m_PulseJitterState = 0;
+    uint64_t m_NextPulseSequence = 0;
+    uint64_t m_CurrentPulseSequence = 0;
 
+    PendingCorrection m_PendingCorrections[kCorrectionCapacity] = {};
     LatencySample m_AverageSamples[kAverageCapacity] = {};
     size_t m_AverageStart = 0;
     size_t m_AverageCount = 0;

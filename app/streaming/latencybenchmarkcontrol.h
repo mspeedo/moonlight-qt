@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstdint>
+
 class NvComputer;
 
 namespace LatencyBenchmarkControl {
@@ -12,6 +14,7 @@ void configure(NvComputer* computer);
 // Sunshine simply rejects the unknown endpoint. Benchmark readiness never waits
 // for or depends on either response.
 void startAsync();
+void sampleAsync(std::uint64_t sequence);
 void stopAsync();
 
 } // namespace LatencyBenchmarkControl
