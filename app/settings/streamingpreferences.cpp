@@ -50,6 +50,7 @@
 #define SER_PACKETSIZE "packetsize"
 #define SER_DETECTNETBLOCKING "detectnetblocking"
 #define SER_SHOWPERFOVERLAY "showperfoverlay"
+#define SER_PIPELINE_TELEMETRY_HIDDEN "pipelineTelemetryWhileOsdHidden"
 #define SER_GAMEMODE_THREAD_PRIORITY "gamemodeandthreadpriority"
 #define SER_SWAPMOUSEBUTTONS "swapmousebuttons"
 #define SER_MUTEONFOCUSLOSS "muteonfocusloss"
@@ -155,6 +156,7 @@ void StreamingPreferences::reload()
     gamepadMouse = settings.value(SER_GAMEPADMOUSE, true).toBool();
     detectNetworkBlocking = settings.value(SER_DETECTNETBLOCKING, true).toBool();
     showPerformanceOverlay = settings.value(SER_SHOWPERFOVERLAY, false).toBool();
+    enablePipelineTelemetryWhileOsdHidden = settings.value(SER_PIPELINE_TELEMETRY_HIDDEN, false).toBool();
     enableGameModeAndThreadPriority = settings.value(SER_GAMEMODE_THREAD_PRIORITY, false).toBool();
     packetSize = settings.value(SER_PACKETSIZE, 0).toInt();
     swapMouseButtons = settings.value(SER_SWAPMOUSEBUTTONS, false).toBool();
@@ -364,6 +366,7 @@ void StreamingPreferences::save()
     settings.setValue(SER_PACKETSIZE, packetSize);
     settings.setValue(SER_DETECTNETBLOCKING, detectNetworkBlocking);
     settings.setValue(SER_SHOWPERFOVERLAY, showPerformanceOverlay);
+    settings.setValue(SER_PIPELINE_TELEMETRY_HIDDEN, enablePipelineTelemetryWhileOsdHidden);
     settings.setValue(SER_GAMEMODE_THREAD_PRIORITY, enableGameModeAndThreadPriority);
     settings.setValue(SER_AUDIOCFG, static_cast<int>(audioConfig));
     settings.setValue(SER_HDR, enableHdr);

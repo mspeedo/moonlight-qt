@@ -993,85 +993,100 @@ void PlVkRenderer::renderFrame(AVFrame *frame)
     }
 
     // Fixed storage: displaying a second debug texture adds no per-frame allocation.
-    pl_overlay_part overlayParts[kOverlayCount] = {};
-    pl_tex texturesToDestroy[kOverlayCount * 2] = {};
-    pl_overlay overlays[kOverlayCount] = {};
+    // Leave it uninitialized on the common no-overlay path; it is zeroed only
+    // when an active or pending overlay actually requires processing.
+    pl_overlay_part overlayParts[kOverlayCount];
+    pl_tex texturesToDestroy[kOverlayCount * 2];
+    pl_overlay overlays[kOverlayCount];
     int textureCount = 0;
     int overlayCount = 0;
 
     pl_frame_from_swapchain(&targetFrame, &m_SwapchainFrame);
 
-    // We perform minimal processing under the overlay lock to avoid blocking threads updating the overlay
-    SDL_AtomicLock(&m_OverlayLock);
-    for (int i = 0; i < kOverlayCount; i++) {
-        // Transfer only handles under the existing spin lock. Keep the previous
-        // texture in staging for worker-side reuse; never upload under this lock.
-        if (m_Overlays[i].hasStagingOverlay) {
+    if (m_HasActiveOverlayState.load(std::memory_order_acquire)) {
+        SDL_memset(overlayParts, 0, sizeof(overlayParts));
+        SDL_memset(texturesToDestroy, 0, sizeof(texturesToDestroy));
+        SDL_memset(overlays, 0, sizeof(overlays));
+
+        // We perform minimal processing under the overlay lock to avoid blocking
+        // threads updating the overlay. Producers set the atomic flag under this
+        // same lock, so clearing it here cannot lose a concurrent update.
+        SDL_AtomicLock(&m_OverlayLock);
+        bool overlayStateRemains = false;
+        for (int i = 0; i < kOverlayCount; i++) {
+            // Transfer only handles under the existing spin lock. Keep the previous
+            // texture in staging for worker-side reuse; never upload under this lock.
+            if (m_Overlays[i].hasStagingOverlay) {
+#if defined(HAVE_LIBPLACEBO_VULKAN) && defined(Q_OS_LINUX)
+                if (i == Overlay::OverlayDebug || i == kGraphOverlay) {
+                    std::swap(m_Overlays[i].overlay, m_Overlays[i].stagingOverlay);
+                }
+                else
+#endif
+                {
+                    if (m_Overlays[i].hasOverlay) {
+                        texturesToDestroy[textureCount++] = m_Overlays[i].overlay.tex;
+                    }
+                    m_Overlays[i].overlay = m_Overlays[i].stagingOverlay;
+                    SDL_zero(m_Overlays[i].stagingOverlay);
+                }
+                m_Overlays[i].hasStagingOverlay = false;
+                m_Overlays[i].hasOverlay = m_Overlays[i].overlay.tex != nullptr;
+            }
+
+            bool enabled;
 #if defined(HAVE_LIBPLACEBO_VULKAN) && defined(Q_OS_LINUX)
             if (i == Overlay::OverlayDebug || i == kGraphOverlay) {
-                std::swap(m_Overlays[i].overlay, m_Overlays[i].stagingOverlay);
+                enabled = m_DebugOverlayVisible;
             }
             else
 #endif
             {
-                if (m_Overlays[i].hasOverlay) {
-                    texturesToDestroy[textureCount++] = m_Overlays[i].overlay.tex;
+                enabled = Session::get()->getOverlayManager().isOverlayEnabled((Overlay::OverlayType)i);
+            }
+            if (m_Overlays[i].hasOverlay && !enabled) {
+                texturesToDestroy[textureCount++] = m_Overlays[i].overlay.tex;
+                SDL_zero(m_Overlays[i].overlay);
+                m_Overlays[i].hasOverlay = false;
+            }
+
+            // We have an overlay to draw
+            if (m_Overlays[i].hasOverlay) {
+                // Position the overlay
+                overlayParts[i].src = { 0, 0, (float)m_Overlays[i].overlay.tex->params.w, (float)m_Overlays[i].overlay.tex->params.h };
+                if (i == Overlay::OverlayStatusUpdate) {
+                    // Bottom Left
+                    overlayParts[i].dst.x0 = 0;
+                    overlayParts[i].dst.y0 = SDL_max(0, targetFrame.crop.y1 - overlayParts[i].src.y1);
                 }
-                m_Overlays[i].overlay = m_Overlays[i].stagingOverlay;
-                SDL_zero(m_Overlays[i].stagingOverlay);
-            }
-            m_Overlays[i].hasStagingOverlay = false;
-            m_Overlays[i].hasOverlay = m_Overlays[i].overlay.tex != nullptr;
-        }
-
-        bool enabled;
+                else if (i == Overlay::OverlayDebug) {
+                    // Top left
+                    overlayParts[i].dst.x0 = 0;
+                    overlayParts[i].dst.y0 = 0;
+                }
 #if defined(HAVE_LIBPLACEBO_VULKAN) && defined(Q_OS_LINUX)
-        if (i == Overlay::OverlayDebug || i == kGraphOverlay) {
-            enabled = m_DebugOverlayVisible;
-        }
-        else
+                else if (i == kGraphOverlay) {
+                    // Text is promoted first under this same lock. Its actual width
+                    // also positions the graph correctly after any text-width change.
+                    overlayParts[i].dst.x0 = m_Overlays[Overlay::OverlayDebug].overlay.tex->params.w + 24;
+                    overlayParts[i].dst.y0 = 0;
+                }
 #endif
-        {
-            enabled = Session::get()->getOverlayManager().isOverlayEnabled((Overlay::OverlayType)i);
-        }
-        if (m_Overlays[i].hasOverlay && !enabled) {
-            texturesToDestroy[textureCount++] = m_Overlays[i].overlay.tex;
-            SDL_zero(m_Overlays[i].overlay);
-            m_Overlays[i].hasOverlay = false;
-        }
+                overlayParts[i].dst.x1 = overlayParts[i].dst.x0 + overlayParts[i].src.x1;
+                overlayParts[i].dst.y1 = overlayParts[i].dst.y0 + overlayParts[i].src.y1;
 
-        // We have an overlay to draw
-        if (m_Overlays[i].hasOverlay) {
-            // Position the overlay
-            overlayParts[i].src = { 0, 0, (float)m_Overlays[i].overlay.tex->params.w, (float)m_Overlays[i].overlay.tex->params.h };
-            if (i == Overlay::OverlayStatusUpdate) {
-                // Bottom Left
-                overlayParts[i].dst.x0 = 0;
-                overlayParts[i].dst.y0 = SDL_max(0, targetFrame.crop.y1 - overlayParts[i].src.y1);
-            }
-            else if (i == Overlay::OverlayDebug) {
-                // Top left
-                overlayParts[i].dst.x0 = 0;
-                overlayParts[i].dst.y0 = 0;
-            }
-#if defined(HAVE_LIBPLACEBO_VULKAN) && defined(Q_OS_LINUX)
-            else if (i == kGraphOverlay) {
-                // Text is promoted first under this same lock. Its actual width
-                // also positions the graph correctly after any text-width change.
-                overlayParts[i].dst.x0 = m_Overlays[Overlay::OverlayDebug].overlay.tex->params.w + 24;
-                overlayParts[i].dst.y0 = 0;
-            }
-#endif
-            overlayParts[i].dst.x1 = overlayParts[i].dst.x0 + overlayParts[i].src.x1;
-            overlayParts[i].dst.y1 = overlayParts[i].dst.y0 + overlayParts[i].src.y1;
+                m_Overlays[i].overlay.parts = &overlayParts[i];
+                m_Overlays[i].overlay.num_parts = 1;
 
-            m_Overlays[i].overlay.parts = &overlayParts[i];
-            m_Overlays[i].overlay.num_parts = 1;
+                overlays[overlayCount++] = m_Overlays[i].overlay;
+            }
 
-            overlays[overlayCount++] = m_Overlays[i].overlay;
+            overlayStateRemains |= m_Overlays[i].hasOverlay ||
+                    m_Overlays[i].hasStagingOverlay;
         }
+        m_HasActiveOverlayState.store(overlayStateRemains, std::memory_order_release);
+        SDL_AtomicUnlock(&m_OverlayLock);
     }
-    SDL_AtomicUnlock(&m_OverlayLock);
 
     SDL_Rect src;
     src.x = mappedFrame.crop.x0;
@@ -1100,7 +1115,7 @@ void PlVkRenderer::renderFrame(AVFrame *frame)
 
     // Render the video image and overlays into the swapchain buffer
     targetFrame.num_overlays = overlayCount;
-    targetFrame.overlays = overlays;
+    targetFrame.overlays = overlayCount != 0 ? overlays : nullptr;
     if (!pl_render_image(m_Renderer, &mappedFrame, &targetFrame, &pl_render_fast_params)) {
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                      "pl_render_image() failed");
@@ -1276,6 +1291,7 @@ void PlVkRenderer::notifyOverlayUpdated(Overlay::OverlayType type)
     }
 
     SDL_AtomicLock(&m_OverlayLock);
+    m_HasActiveOverlayState.store(true, std::memory_order_release);
     // We want to clear the staging overlay flag even if a staging overlay is still present,
     // since this ensures the render thread will not read from a partially initialized pl_tex
     // as we modify or recreate the staging overlay texture outside the overlay lock.
@@ -1300,6 +1316,7 @@ void PlVkRenderer::notifyOverlayUpdated(Overlay::OverlayType type)
     SDL_AtomicLock(&m_OverlayLock);
     SDL_assert(!m_Overlays[type].hasStagingOverlay);
     m_Overlays[type].hasStagingOverlay = true;
+    m_HasActiveOverlayState.store(true, std::memory_order_release);
     SDL_AtomicUnlock(&m_OverlayLock);
 }
 
@@ -1312,6 +1329,7 @@ bool PlVkRenderer::updateDebugOverlay(SDL_Surface* text, SDL_Surface* graph)
     const bool updateText = text != nullptr;
     const bool updateGraph = graph != nullptr;
     SDL_AtomicLock(&m_OverlayLock);
+    m_HasActiveOverlayState.store(true, std::memory_order_release);
     if (hide) {
         m_DebugOverlayVisible = false;
     }
@@ -1340,6 +1358,7 @@ bool PlVkRenderer::updateDebugOverlay(SDL_Surface* text, SDL_Surface* graph)
     m_Overlays[Overlay::OverlayDebug].hasStagingOverlay = updateText || pendingText;
     m_Overlays[kGraphOverlay].hasStagingOverlay = updateGraph || pendingGraph;
     m_DebugOverlayVisible = true;
+    m_HasActiveOverlayState.store(true, std::memory_order_release);
     SDL_AtomicUnlock(&m_OverlayLock);
     return true;
 }

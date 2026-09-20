@@ -93,7 +93,8 @@ public:
                 m_BenchmarkStarting || m_HelperRunning || m_AutoBenchmark;
         if (!enabled && benchmarkInProgress && !forceDisable) {
             // Hiding the OSD must not perturb an already-started benchmark. Keep
-            // the event watch, timer, helper, video sampling, and telemetry alive.
+            // the event watch, timer, helper, and video sampling alive. Full
+            // pipeline-telemetry collection is managed separately by OverlayManager.
             // A/Y diagnostics are visibility-gated below; B remains available to
             // stop the hidden benchmark.
             m_PhysicalYHeld = false;
@@ -160,9 +161,8 @@ public:
         }
 
         if (enabled) {
-            // Pipeline telemetry runs for the whole stream. Enabling the OSD only
-            // enables benchmark controls and display work; it must not reset the
-            // already accumulated stream statistics.
+            // OverlayManager owns the pipeline-telemetry collection policy.
+            // Enabling the probe here only installs benchmark controls.
             SDL_AddEventWatch(controllerEventWatch, this);
         }
         else {

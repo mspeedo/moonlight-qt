@@ -1,5 +1,6 @@
 #include "overlaymanager.h"
 #include "path.h"
+#include "settings/streamingpreferences.h"
 
 #include <array>
 #include <chrono>
@@ -415,11 +416,16 @@ OverlayManager::OverlayManager() :
     memset(m_Overlays, 0, sizeof(m_Overlays));
 
 #ifdef HAVE_LATENCY_PROBE
-    // OverlayManager is per streaming Session. Stream-health counters and
-    // pipeline telemetry therefore begin fresh for every stream, independently
-    // of whether the debug OSD is visible.
+    // Stream-health counters remain session-wide. Full per-frame pipeline
+    // telemetry is opt-in while the OSD is hidden to avoid continuous timing
+    // and ring-buffer work on battery-powered clients.
     StreamHealthTelemetry::reset();
-    StreamPipelineTelemetry::start();
+    if (StreamingPreferences::get()->enablePipelineTelemetryWhileOsdHidden) {
+        StreamPipelineTelemetry::start();
+    }
+    else {
+        StreamPipelineTelemetry::clear();
+    }
     StreamPipelineTelemetry::setStateChangedCallback(telemetryStateChanged, this);
 #endif
 
@@ -882,6 +888,15 @@ void OverlayManager::setOverlayState(OverlayType type, bool enabled)
 
 #ifdef HAVE_LATENCY_PROBE
     if (type == OverlayType::OverlayDebug && stateChanged) {
+        const bool collectWhileHidden =
+                StreamingPreferences::get()->enablePipelineTelemetryWhileOsdHidden;
+
+        // With hidden collection disabled, showing the OSD begins a fresh
+        // telemetry window. Hidden collection preserves the existing history.
+        if (enabled && !StreamPipelineTelemetry::isActiveFast()) {
+            StreamPipelineTelemetry::start();
+        }
+
         setDebugOverlayWorkerEnabled(enabled);
 
         if (enabled) {
@@ -890,12 +905,19 @@ void OverlayManager::setOverlayState(OverlayType type, bool enabled)
         }
         const bool benchmarkWasActive = LatencyProbe::instance().setEnabled(enabled);
 
-        if (!enabled &&
-                (benchmarkWasActive || !StreamPipelineTelemetry::isActiveFast())) {
-            // Leave continuous stream telemetry untouched when the OSD was only
-            // viewed. Restart only after an active benchmark, or after B froze
-            // a completed benchmark run.
-            StreamPipelineTelemetry::start();
+        if (!enabled) {
+            if (collectWhileHidden) {
+                if (benchmarkWasActive || !StreamPipelineTelemetry::isActiveFast()) {
+                    // A stopped/frozen benchmark must not leave continuous hidden
+                    // telemetry disabled when the user explicitly requested it.
+                    StreamPipelineTelemetry::start();
+                }
+            }
+            else if (StreamPipelineTelemetry::isActiveFast()) {
+                // Benchmark sampling remains independent and can continue while
+                // hidden, but full per-frame pipeline collection stops here.
+                StreamPipelineTelemetry::stop();
+            }
         }
     }
 #endif

@@ -10,6 +10,8 @@
 #include <libplacebo/renderer.h>
 #include <libplacebo/vulkan.h>
 
+#include <atomic>
+
 #ifdef Q_OS_DARWIN
 class MetalVulkanTextureFactory {
 public:
@@ -129,7 +131,9 @@ private:
     static constexpr int kOverlayCount = Overlay::OverlayMax;
 #endif
 
-    // Overlay state
+    // Overlay state. False is the common hidden-OSD/status case and lets the
+    // render path skip the overlay lock, slot scan, and Session state queries.
+    std::atomic<bool> m_HasActiveOverlayState { false };
     SDL_SpinLock m_OverlayLock = 0;
     struct {
         // The staging overlay state is copied here under the overlay lock in the render thread.

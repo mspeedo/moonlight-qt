@@ -143,6 +143,7 @@ public:
     Q_PROPERTY(bool gamepadMouse MEMBER gamepadMouse NOTIFY gamepadMouseChanged)
     Q_PROPERTY(bool detectNetworkBlocking MEMBER detectNetworkBlocking NOTIFY detectNetworkBlockingChanged)
     Q_PROPERTY(bool showPerformanceOverlay MEMBER showPerformanceOverlay NOTIFY showPerformanceOverlayChanged)
+    Q_PROPERTY(bool enablePipelineTelemetryWhileOsdHidden MEMBER enablePipelineTelemetryWhileOsdHidden NOTIFY enablePipelineTelemetryWhileOsdHiddenChanged)
     Q_PROPERTY(bool enableGameModeAndThreadPriority MEMBER enableGameModeAndThreadPriority NOTIFY enableGameModeAndThreadPriorityChanged)
     Q_PROPERTY(AudioConfig audioConfig MEMBER audioConfig NOTIFY audioConfigChanged)
     Q_PROPERTY(VideoCodecConfig videoCodecConfig MEMBER videoCodecConfig NOTIFY videoCodecConfigChanged)
@@ -189,6 +190,7 @@ public:
     bool gamepadMouse;
     bool detectNetworkBlocking;
     bool showPerformanceOverlay;
+    bool enablePipelineTelemetryWhileOsdHidden;
     bool enableGameModeAndThreadPriority;
     bool swapMouseButtons;
     bool muteOnFocusLoss;
@@ -240,6 +242,7 @@ signals:
     void gamepadMouseChanged();
     void detectNetworkBlockingChanged();
     void showPerformanceOverlayChanged();
+    void enablePipelineTelemetryWhileOsdHiddenChanged();
     void enableGameModeAndThreadPriorityChanged();
     void mouseButtonsChanged();
     void muteOnFocusLossChanged();
