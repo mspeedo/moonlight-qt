@@ -47,6 +47,25 @@ public:
         return m_NeedsVideoSampleFast.load(std::memory_order_relaxed);
     }
 
+    bool benchmarkInProgress()
+    {
+        SDL_AtomicLock(&m_Lock);
+        const bool active =
+                m_BenchmarkStarting || m_HelperRunning || m_AutoBenchmark;
+        SDL_AtomicUnlock(&m_Lock);
+        return active;
+    }
+
+    bool hasFrozenBenchmarkResults()
+    {
+        SDL_AtomicLock(&m_Lock);
+        const bool frozen = m_BenchmarkRan &&
+                !m_BenchmarkStarting && !m_HelperRunning && !m_AutoBenchmark &&
+                m_FrozenStatsTimestamp != 0;
+        SDL_AtomicUnlock(&m_Lock);
+        return frozen;
+    }
+
     void onCadenceWait(uint64_t sequence, uint64_t waitUs)
     {
         const double waitMs = static_cast<double>(waitUs) / 1000.0;

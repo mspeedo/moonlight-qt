@@ -890,32 +890,60 @@ void OverlayManager::setOverlayState(OverlayType type, bool enabled)
     if (type == OverlayType::OverlayDebug && stateChanged) {
         const bool collectWhileHidden =
                 StreamingPreferences::get()->enablePipelineTelemetryWhileOsdHidden;
-
-        // With hidden collection disabled, showing the OSD begins a fresh
-        // telemetry window. Hidden collection preserves the existing history.
-        if (enabled && !StreamPipelineTelemetry::isActiveFast()) {
-            StreamPipelineTelemetry::start();
-        }
-
-        setDebugOverlayWorkerEnabled(enabled);
+        LatencyProbe& probe = LatencyProbe::instance();
 
         if (enabled) {
             Session* session = Session::get();
             LatencyBenchmarkControl::configure(session != nullptr ? session->getComputer() : nullptr);
-        }
-        const bool benchmarkWasActive = LatencyProbe::instance().setEnabled(enabled);
 
-        if (!enabled) {
-            if (collectWhileHidden) {
-                if (benchmarkWasActive || !StreamPipelineTelemetry::isActiveFast()) {
-                    // A stopped/frozen benchmark must not leave continuous hidden
-                    // telemetry disabled when the user explicitly requested it.
+            // Update OSD visibility first, then inspect benchmark state. A benchmark
+            // stopped while the OSD was hidden deliberately leaves both the input
+            // benchmark and pipeline telemetry frozen. Reopening the OSD must show
+            // that frozen snapshot rather than restarting collection.
+            probe.setEnabled(true);
+            const bool benchmarkInProgress = probe.benchmarkInProgress();
+            const bool frozenBenchmark = probe.hasFrozenBenchmarkResults();
+
+            if (benchmarkInProgress) {
+                // Benchmark collection has priority over the hidden-telemetry
+                // preference. It must remain live regardless of OSD visibility.
+                if (!StreamPipelineTelemetry::isActiveFast()) {
+                    StreamPipelineTelemetry::resume();
+                }
+            }
+            else if (!frozenBenchmark &&
+                     !StreamPipelineTelemetry::isActiveFast()) {
+                // Ordinary visible OSD telemetry starts a fresh window. Frozen
+                // benchmark results are intentionally preserved until OSD hide.
+                StreamPipelineTelemetry::start();
+            }
+
+            setDebugOverlayWorkerEnabled(true);
+        }
+        else {
+            setDebugOverlayWorkerEnabled(false);
+
+            // During a running benchmark, setEnabled(false) intentionally keeps
+            // the probe alive so B and video sampling continue while hidden.
+            // Do not let the ordinary hidden-telemetry preference stop collection.
+            probe.setEnabled(false);
+            const bool benchmarkInProgress = probe.benchmarkInProgress();
+
+            if (benchmarkInProgress) {
+                if (!StreamPipelineTelemetry::isActiveFast()) {
+                    StreamPipelineTelemetry::resume();
+                }
+            }
+            else if (collectWhileHidden) {
+                // Hiding the OSD dismisses any frozen benchmark/manual snapshot.
+                // With hidden collection enabled, this exactly preserves the old
+                // continuous-telemetry transition: restart only if currently frozen.
+                if (!StreamPipelineTelemetry::isActiveFast()) {
                     StreamPipelineTelemetry::start();
                 }
             }
             else if (StreamPipelineTelemetry::isActiveFast()) {
-                // Benchmark sampling remains independent and can continue while
-                // hidden, but full per-frame pipeline collection stops here.
+                // No benchmark is running and hidden collection is disabled.
                 StreamPipelineTelemetry::stop();
             }
         }
