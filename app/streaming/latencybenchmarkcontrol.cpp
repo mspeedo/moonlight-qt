@@ -10,6 +10,7 @@
 #include <QXmlStreamReader>
 
 #include <condition_variable>
+#include <cstddef>
 #include <deque>
 #include <mutex>
 #include <thread>
@@ -19,6 +20,7 @@ namespace LatencyBenchmarkControl {
 namespace {
 
 constexpr int kControlTimeoutMs = 5000;
+constexpr std::size_t kMaxPendingSampleRequests = 16;
 
 struct HostConfig {
     NvAddress address;
@@ -86,7 +88,43 @@ void performRequest(const HostConfig& config, const char* action)
     delete worker;
 }
 
-void performSampleRequest(const HostConfig& config, std::uint64_t sequence)
+std::mutex& sampleMutex()
+{
+    static auto* mutex = new std::mutex;
+    return *mutex;
+}
+
+std::uint64_t& sampleGeneration()
+{
+    static auto* generation = new std::uint64_t(0);
+    return *generation;
+}
+
+bool isSampleGenerationCurrent(std::uint64_t generation)
+{
+    std::scoped_lock lock(sampleMutex());
+    return generation == sampleGeneration();
+}
+
+bool deliverSampleIfCurrent(std::uint64_t generation,
+                            std::uint64_t sequence,
+                            std::uint64_t waitUs)
+{
+    // Keep generation validation and delivery atomic with respect to benchmark
+    // restart/stop. This prevents a response from an earlier run from being
+    // applied after sequence numbers restart at 1.
+    std::scoped_lock lock(sampleMutex());
+    if (generation != sampleGeneration()) {
+        return false;
+    }
+
+    LatencyProbe::instance().onCadenceWait(sequence, waitUs);
+    return true;
+}
+
+void performSampleRequest(const HostConfig& config,
+                          std::uint64_t sequence,
+                          std::uint64_t generation)
 {
     try {
         NvHTTP http(config.address,
@@ -139,7 +177,7 @@ void performSampleRequest(const HostConfig& config, std::uint64_t sequence)
 
         if (!xml.hasError() && sampleReady && sequenceValid && waitValid &&
                 responseSequence == sequence) {
-            LatencyProbe::instance().onCadenceWait(sequence, waitUs);
+            (void) deliverSampleIfCurrent(generation, sequence, waitUs);
         }
         else {
             qDebug() << "Latency benchmark cadence wait unavailable for sequence"
@@ -154,13 +192,8 @@ void performSampleRequest(const HostConfig& config, std::uint64_t sequence)
 struct SampleRequest {
     HostConfig config;
     std::uint64_t sequence = 0;
+    std::uint64_t generation = 0;
 };
-
-std::mutex& sampleMutex()
-{
-    static auto* mutex = new std::mutex;
-    return *mutex;
-}
 
 std::condition_variable& sampleCondition()
 {
@@ -189,7 +222,13 @@ QThread* sampleWorker()
                     sampleQueue().pop_front();
                 }
 
-                performSampleRequest(request.config, request.sequence);
+                if (!isSampleGenerationCurrent(request.generation)) {
+                    continue;
+                }
+
+                performSampleRequest(request.config,
+                                     request.sequence,
+                                     request.generation);
             }
         });
 
@@ -244,6 +283,11 @@ void configure(NvComputer* computer)
 
 void startAsync()
 {
+    {
+        std::scoped_lock lock(sampleMutex());
+        ++sampleGeneration();
+        sampleQueue().clear();
+    }
     requestAsync("start");
 }
 
@@ -257,13 +301,23 @@ void sampleAsync(std::uint64_t sequence)
     (void) sampleWorker();
     {
         std::scoped_lock lock(sampleMutex());
-        sampleQueue().push_back({config, sequence});
+        // Keep the worker bounded if the host endpoint stalls. The oldest
+        // correction is least useful once newer measurements are available.
+        if (sampleQueue().size() >= kMaxPendingSampleRequests) {
+            sampleQueue().pop_front();
+        }
+        sampleQueue().push_back({config, sequence, sampleGeneration()});
     }
     sampleCondition().notify_one();
 }
 
 void stopAsync()
 {
+    {
+        std::scoped_lock lock(sampleMutex());
+        ++sampleGeneration();
+        sampleQueue().clear();
+    }
     requestAsync("stop");
 }
 

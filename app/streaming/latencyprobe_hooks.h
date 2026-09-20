@@ -262,6 +262,16 @@ inline pl_renderer rendererCreate(pl_log log, pl_gpu gpu)
     context->gpu = gpu;
     context->mainRenderer = renderer;
 
+    // Prepare the detector while the renderer is being initialized instead of
+    // lazily on the first benchmark samples. This keeps renderer/format/texture
+    // creation out of the measured render path. Failure remains non-fatal and
+    // preserves the existing lazy retry behavior for per-slot texture creation.
+    for (auto& slot : context->slots) {
+        if (!ensureDetectorResources(context.get(), &slot)) {
+            break;
+        }
+    }
+
     std::lock_guard<std::mutex> lock(g_ContextLock);
     g_Contexts.emplace(renderer, std::move(context));
     return renderer;
