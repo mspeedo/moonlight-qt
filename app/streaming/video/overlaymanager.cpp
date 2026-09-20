@@ -203,7 +203,7 @@ SDL_Surface* renderTelemetryGraphs(TTF_Font* font, SDL_Color color,
 
     char networkBufferLabel[128];
     SDL_snprintf(networkBufferLabel, sizeof(networkBufferLabel),
-                 "Network buffer (0-%.0f ms) || queue %d/15",
+                 "Network buffer (0-%.0f ms) | queue %d/15",
                  graphs.networkBufferConfiguredMs, queuedFrames);
 
     const GraphRow rows[] = {
