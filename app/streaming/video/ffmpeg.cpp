@@ -506,8 +506,12 @@ void FFmpegVideoDecoder::resetTransportBufferState()
     m_TransportTransitCount = 0;
 }
 
-bool FFmpegVideoDecoder::waitForTransportBuffer(PDECODE_UNIT du)
+bool FFmpegVideoDecoder::waitForTransportBuffer(const DECODE_UNIT* du, DECODE_UNIT& decodeUnit)
 {
+    // Common C and the dequeue telemetry hooks retain the original timestamps.
+    // Only the decoder's metadata copy excludes the intentional buffer hold.
+    decodeUnit = du != nullptr ? *du : DECODE_UNIT {};
+
     if (!m_TransportBufferEnabled || m_TransportBufferUs == 0 || du == nullptr ||
             du->enqueueTimeUs == 0) {
         return true;
@@ -613,6 +617,13 @@ bool FFmpegVideoDecoder::waitForTransportBuffer(PDECODE_UNIT du)
             targetUs > completedUs ? targetUs - completedUs : 0;
     StreamPipelineTelemetry::recordNetworkBufferReserve(
             completedUs, reserveUs, m_TransportBufferUs);
+
+    // Exclude the full scheduled hold, including time already spent in Common
+    // C's queue. Time after eligibility (decoder backlog and wake-up overshoot)
+    // remains part of the decode statistic. Shift both endpoints equally so the
+    // reassembly duration is unchanged when submitDecodeUnit() accounts for it.
+    decodeUnit.enqueueTimeUs += reserveUs;
+    decodeUnit.receiveTimeUs += reserveUs;
 
     std::unique_lock<std::mutex> lock(m_TransportWaitMutex);
     for (;;) {
@@ -2051,12 +2062,13 @@ void FFmpegVideoDecoder::decoderThreadProc()
                 continue;
             }
 
-            if (!waitForTransportBuffer(du)) {
+            DECODE_UNIT decodeUnit;
+            if (!waitForTransportBuffer(du, decodeUnit)) {
                 LiCompleteVideoFrame(handle, DR_OK);
                 continue;
             }
 
-            LiCompleteVideoFrame(handle, submitDecodeUnit(du));
+            LiCompleteVideoFrame(handle, submitDecodeUnit(&decodeUnit));
         }
 
         if (m_FramesIn != m_FramesOut) {
@@ -2221,9 +2233,9 @@ void FFmpegVideoDecoder::decoderThreadProc()
                         // Data buffers in the DU are not valid here!
                         DECODE_UNIT du = m_FrameInfoQueue.dequeue();
 
-                        // Count time in avcodec_send_packet() and avcodec_receive_frame()
-                        // as time spent decoding. Also count time spent in the decode unit
-                        // queue because that's directly caused by decoder latency.
+                        // Count time in avcodec_send_packet(), avcodec_receive_frame(),
+                        // and decoder backlog. The metadata copy excludes intentional
+                        // network buffering while retaining post-deadline queue delay.
                         m_ActiveWndVideoStats.totalDecodeTimeUs += (LiGetMicroseconds() - du.enqueueTimeUs);
 
                         // Store the presentation time (90 kHz timebase)
@@ -2247,13 +2259,14 @@ void FFmpegVideoDecoder::decoderThreadProc()
                             LiWaitForNextVideoFrame(&handle, &du) :
                             LiPollNextVideoFrame(&handle, &du);
                     if (haveInput) {
-                        if (!waitForTransportBuffer(du)) {
+                        DECODE_UNIT decodeUnit;
+                        if (!waitForTransportBuffer(du, decodeUnit)) {
                             LiCompleteVideoFrame(handle, DR_OK);
                             break;
                         }
 
                         // FIXME: Handle EAGAIN on avcodec_send_packet() properly?
-                        LiCompleteVideoFrame(handle, submitDecodeUnit(du));
+                        LiCompleteVideoFrame(handle, submitDecodeUnit(&decodeUnit));
                     }
                     else if (waitForInputOnEagain) {
                         // Leave through the existing AVFrame cleanup below;

@@ -100,7 +100,7 @@ private:
 
     void reset();
     void resetTransportBufferState();
-    bool waitForTransportBuffer(PDECODE_UNIT du);
+    bool waitForTransportBuffer(const DECODE_UNIT* du, DECODE_UNIT& decodeUnit);
 
     void writeBuffer(PLENTRY entry, int& offset);
 
