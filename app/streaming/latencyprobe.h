@@ -6,6 +6,7 @@
 #include "streampipelinetelemetry.h"
 
 #include <atomic>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -42,6 +43,13 @@ public:
         return probe;
     }
 
+    void setStreamFrameRate(int frameRate)
+    {
+        SDL_AtomicLock(&m_Lock);
+        m_StreamFrameRate = frameRate;
+        SDL_AtomicUnlock(&m_Lock);
+    }
+
     bool needsVideoSampleFast() const
     {
         return m_NeedsVideoSampleFast.load(std::memory_order_relaxed);
@@ -58,6 +66,7 @@ public:
         SDL_TimerID holdTimerToRemove = 0;
         SDL_TimerID telemetryHoldTimerToRemove = 0;
         SDL_TimerID benchmarkTimerToRemove = 0;
+        SDL_TimerID pulseTimerToRemove = 0;
 
         SDL_AtomicLock(&m_Lock);
         m_OsdVisible = enabled;
@@ -90,9 +99,11 @@ public:
                 holdTimerToRemove = m_HoldTimer;
                 telemetryHoldTimerToRemove = m_TelemetryHoldTimer;
                 benchmarkTimerToRemove = m_BenchmarkTimer;
+                pulseTimerToRemove = m_PulseTimer;
                 m_HoldTimer = 0;
                 m_TelemetryHoldTimer = 0;
                 m_BenchmarkTimer = 0;
+                m_PulseTimer = 0;
             }
 
             m_Enabled = enabled;
@@ -118,8 +129,8 @@ public:
             m_ManualTelemetryFrozen = false;
             m_AutoButtonDown = false;
             m_AutoDownTick = 0;
-            m_AutoNextDownTick = 0;
-            m_PulseJitterState = 0;
+            m_AutoNextDownCounter = 0;
+            m_PulsePeriodCounterTicks = 0;
             resetAverageLocked();
             refreshVideoSamplingFastLocked();
         }
@@ -146,6 +157,9 @@ public:
             }
             if (benchmarkTimerToRemove != 0) {
                 SDL_RemoveTimer(benchmarkTimerToRemove);
+            }
+            if (pulseTimerToRemove != 0) {
+                SDL_RemoveTimer(pulseTimerToRemove);
             }
 
             if (restoreAState) {
@@ -305,16 +319,19 @@ private:
     static constexpr uint64_t kTimeoutMs = 500;
 
     // Hold A/Y long enough that ordinary gameplay taps never activate benchmark
-    // or telemetry-control behavior. Synthetic A-down intervals jitter by one
-    // 17 ms timer tick around a 272 ms mean (255/272/289 ms), preventing samples
-    // from locking to a repeating stream-cadence phase. The 51 ms release gap is
-    // three 17 ms timer ticks.
+    // or telemetry-control behavior. The first validation pulse establishes the
+    // helper render phase. Subsequent A-down pulses are separated by an integer
+    // number of helper frames near the historical 272 ms period. A dedicated
+    // high-resolution pulse timer handles A-down timing; the existing 17 ms timer
+    // remains responsible for control state and the 51 ms A-release interval.
     static constexpr Uint32 kBenchmarkHoldMs = 750;
     static constexpr Uint32 kTelemetryHoldMs = 750;
     static constexpr Uint32 kHelperStartupDelayMs = 2000;
     static constexpr Uint32 kBenchmarkPeriodMs = 272;
     static constexpr Uint32 kBenchmarkPressMs = 51;
     static constexpr Uint32 kBenchmarkTickMs = 17;
+    static constexpr double kHelperFpsScale = 0.975;
+    static constexpr uint64_t kPulseSpinUs = 1500;
     static constexpr uint64_t kAverageWindowMs = 10000;
     static constexpr uint64_t kShortAverageWindowMs = 1000;
     static constexpr size_t kAverageCapacity = 64;
@@ -331,20 +348,34 @@ private:
 
     LatencyProbe() = default;
 
-    Uint32 nextBenchmarkPeriodLocked()
+    bool configurePulseCadenceLocked(uint64_t nowCounter)
     {
-        // The benchmark timer itself ticks every 17 ms, so jitter in whole
-        // timer ticks avoids fake sub-tick precision while preserving a
-        // 272 ms mean interval. Seeded per run to vary the phase walk.
-        m_PulseJitterState = m_PulseJitterState * 1664525u + 1013904223u;
-        switch ((m_PulseJitterState >> 16) % 3u) {
-        case 0:
-            return kBenchmarkPeriodMs - kBenchmarkTickMs;
-        case 2:
-            return kBenchmarkPeriodMs + kBenchmarkTickMs;
-        default:
-            return kBenchmarkPeriodMs;
+        const uint64_t frequency = SDL_GetPerformanceFrequency();
+        if (frequency == 0 || m_StreamFrameRate <= 0) {
+            return false;
         }
+
+        const double helperFps = static_cast<double>(m_StreamFrameRate) * kHelperFpsScale;
+        if (helperFps <= 0.0) {
+            return false;
+        }
+
+        uint64_t framesPerPulse = static_cast<uint64_t>(
+                    std::llround(helperFps * static_cast<double>(kBenchmarkPeriodMs) / 1000.0));
+        if (framesPerPulse == 0) {
+            framesPerPulse = 1;
+        }
+
+        const double pulsePeriodSeconds = static_cast<double>(framesPerPulse) / helperFps;
+        m_PulsePeriodCounterTicks = static_cast<uint64_t>(
+                    std::llround(pulsePeriodSeconds * static_cast<double>(frequency)));
+        if (m_PulsePeriodCounterTicks == 0) {
+            return false;
+        }
+
+        m_AutoNextDownCounter =
+                nowCounter + frequency * static_cast<uint64_t>(kBenchmarkPressMs) / 1000;
+        return true;
     }
 
     static int SDLCALL controllerEventWatch(void* userdata, SDL_Event* event)
@@ -395,6 +426,11 @@ private:
                     kBenchmarkTickMs : 0;
     }
 
+    static Uint32 SDLCALL pulseTimerCallback(Uint32, void* userdata)
+    {
+        return static_cast<LatencyProbe*>(userdata)->pulseTimerTick();
+    }
+
     static VisualState classify(float luma)
     {
         if (luma < 0.45f) {
@@ -411,6 +447,130 @@ private:
         const bool needed = m_Enabled && m_HelperRunning && !m_BenchmarkStarting &&
                 (m_Baseline == VisualState::Unknown || m_WaitingForTransition);
         m_NeedsVideoSampleFast.store(needed, std::memory_order_release);
+    }
+
+    void startPulseTimer()
+    {
+        SDL_TimerID timer = SDL_AddTimer(1, pulseTimerCallback, this);
+        if (timer == 0) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "Latency probe: unable to start cadence pulse timer");
+            SDL_AtomicLock(&m_Lock);
+            if (m_AutoBenchmark) {
+                m_StopRequested = true;
+            }
+            SDL_AtomicUnlock(&m_Lock);
+            return;
+        }
+
+        bool keepTimer = false;
+        SDL_AtomicLock(&m_Lock);
+        if (m_Enabled && m_AutoBenchmark && !m_StopRequested && m_PulseTimer == 0) {
+            m_PulseTimer = timer;
+            keepTimer = true;
+        }
+        SDL_AtomicUnlock(&m_Lock);
+
+        if (!keepTimer) {
+            SDL_RemoveTimer(timer);
+        }
+    }
+
+    Uint32 pulseTimerTick()
+    {
+        const uint64_t frequency = SDL_GetPerformanceFrequency();
+        if (frequency == 0) {
+            SDL_AtomicLock(&m_Lock);
+            m_PulseTimer = 0;
+            if (m_AutoBenchmark) {
+                m_StopRequested = true;
+            }
+            SDL_AtomicUnlock(&m_Lock);
+            return 0;
+        }
+
+        uint64_t deadline = 0;
+        SDL_AtomicLock(&m_Lock);
+        if (!m_Enabled || !m_HelperRunning || !m_AutoBenchmark ||
+                m_StopRequested || m_AutoNextDownCounter == 0) {
+            m_PulseTimer = 0;
+            SDL_AtomicUnlock(&m_Lock);
+            return 0;
+        }
+        deadline = m_AutoNextDownCounter;
+        SDL_AtomicUnlock(&m_Lock);
+
+        uint64_t nowCounter = SDL_GetPerformanceCounter();
+        if (nowCounter < deadline) {
+            const uint64_t remainingUs =
+                    (deadline - nowCounter) * 1000000ULL / frequency;
+            if (remainingUs > kPulseSpinUs) {
+                const uint64_t sleepUs = remainingUs - kPulseSpinUs;
+                const Uint32 sleepMs = static_cast<Uint32>(sleepUs / 1000ULL);
+                return sleepMs > 0 ? sleepMs : 1;
+            }
+
+            do {
+                nowCounter = SDL_GetPerformanceCounter();
+            } while (nowCounter < deadline);
+        }
+
+        const uint64_t inputTimestamp = SDL_GetPerformanceCounter();
+        SDL_JoystickID controllerId = 0;
+        bool expectedBright = false;
+        bool validationMeasurement = false;
+
+        SDL_AtomicLock(&m_Lock);
+        if (!m_Enabled || !m_HelperRunning || !m_AutoBenchmark ||
+                m_StopRequested || m_AutoNextDownCounter != deadline) {
+            const bool keepTimer = m_Enabled && m_HelperRunning &&
+                    m_AutoBenchmark && !m_StopRequested;
+            if (!keepTimer) {
+                m_PulseTimer = 0;
+            }
+            SDL_AtomicUnlock(&m_Lock);
+            return keepTimer ? 1 : 0;
+        }
+
+        if (!startMeasurementLocked(inputTimestamp)) {
+            SDL_AtomicUnlock(&m_Lock);
+            return 1;
+        }
+
+        controllerId = m_BenchmarkControllerId;
+        m_AutoButtonDown = true;
+        m_AutoDownTick = SDL_GetTicks();
+        m_AutoNextDownCounter = inputTimestamp + m_PulsePeriodCounterTicks;
+        expectedBright = m_Expected == VisualState::Bright;
+        validationMeasurement = m_ValidationPending;
+        SDL_AtomicUnlock(&m_Lock);
+
+        pushSyntheticAEvent(controllerId, true);
+
+        // Publish the exact same t0 value only after the original synthetic
+        // input has been queued, matching the benchmark's existing ordering.
+        DisplayPresentLatency::measurementStarted(inputTimestamp,
+                                                  expectedBright,
+                                                  validationMeasurement);
+
+        nowCounter = SDL_GetPerformanceCounter();
+        if (m_PulsePeriodCounterTicks == 0) {
+            return 1;
+        }
+        const uint64_t nextDeadline = inputTimestamp + m_PulsePeriodCounterTicks;
+        if (nowCounter >= nextDeadline) {
+            return 1;
+        }
+
+        const uint64_t remainingUs =
+                (nextDeadline - nowCounter) * 1000000ULL / frequency;
+        if (remainingUs <= kPulseSpinUs) {
+            return 1;
+        }
+
+        const uint64_t sleepUs = remainingUs - kPulseSpinUs;
+        const Uint32 sleepMs = static_cast<Uint32>(sleepUs / 1000ULL);
+        return sleepMs > 0 ? sleepMs : 1;
     }
 
     void onPhysicalAEvent(bool pressed, SDL_JoystickID controllerId)
@@ -670,9 +830,9 @@ private:
         bool requestStop = false;
         bool telemetryStart = false;
         bool telemetryStop = false;
-        bool displayMeasurementStarted = false;
-        bool displayExpectedBright = false;
-        bool displayValidationMeasurement = false;
+        bool armPulseTimer = false;
+        bool pulseCadenceFailed = false;
+        SDL_TimerID pulseTimerToRemove = 0;
         const Uint32 nowTick = SDL_GetTicks();
         const uint64_t nowCounter = SDL_GetPerformanceCounter();
 
@@ -703,6 +863,10 @@ private:
             m_HelperRunning = false;
             m_AutoBenchmark = false;
             m_AutoButtonDown = false;
+            pulseTimerToRemove = m_PulseTimer;
+            m_PulseTimer = 0;
+            m_AutoNextDownCounter = 0;
+            m_PulsePeriodCounterTicks = 0;
             m_ValidationPending = false;
             m_WaitingForTransition = false;
             m_Baseline = VisualState::Unknown;
@@ -740,36 +904,29 @@ private:
                 m_ValidationPending = true;
                 m_AutoButtonDown = false;
                 m_AutoDownTick = 0;
-                m_AutoNextDownTick = nowTick + kBenchmarkPressMs;
-                m_PulseJitterState = static_cast<uint32_t>(nowCounter);
-                telemetryStart = true;
+                m_AutoNextDownCounter = 0;
+                m_PulsePeriodCounterTicks = 0;
 
-                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                            "Latency probe: automatic benchmark started");
+                if (configurePulseCadenceLocked(nowCounter)) {
+                    telemetryStart = true;
+                    armPulseTimer = true;
+
+                    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                                "Latency probe: automatic benchmark started");
+                }
+                else {
+                    m_StopRequested = true;
+                    pulseCadenceFailed = true;
+                }
             }
         }
         else if (m_AutoBenchmark) {
             controllerId = m_BenchmarkControllerId;
 
-            if (m_AutoButtonDown) {
-                if (SDL_TICKS_PASSED(nowTick, m_AutoDownTick + kBenchmarkPressMs)) {
-                    m_AutoButtonDown = false;
-                    action = PulseAction::Release;
-                }
-            }
-            else if (SDL_TICKS_PASSED(nowTick, m_AutoNextDownTick)) {
-                if (startMeasurementLocked(nowCounter)) {
-                    m_AutoButtonDown = true;
-                    m_AutoDownTick = nowTick;
-                    m_AutoNextDownTick = nowTick + nextBenchmarkPeriodLocked();
-                    action = PulseAction::Press;
-                    displayMeasurementStarted = true;
-                    displayExpectedBright = m_Expected == VisualState::Bright;
-                    displayValidationMeasurement = m_ValidationPending;
-                }
-                else {
-                    m_AutoNextDownTick = nowTick + kBenchmarkTickMs;
-                }
+            if (m_AutoButtonDown &&
+                    SDL_TICKS_PASSED(nowTick, m_AutoDownTick + kBenchmarkPressMs)) {
+                m_AutoButtonDown = false;
+                action = PulseAction::Release;
             }
         }
 
@@ -783,17 +940,13 @@ private:
 
         if (action == PulseAction::Press) {
             pushSyntheticAEvent(controllerId, true);
-
-            // Publish the exact same t0 value only after the original synthetic
-            // input has been queued, so the additive metric cannot delay it.
-            if (displayMeasurementStarted) {
-                DisplayPresentLatency::measurementStarted(nowCounter,
-                                                          displayExpectedBright,
-                                                          displayValidationMeasurement);
-            }
         }
         else if (action == PulseAction::Release) {
             pushSyntheticAEvent(controllerId, false);
+        }
+
+        if (pulseTimerToRemove != 0) {
+            SDL_RemoveTimer(pulseTimerToRemove);
         }
 
         // Prepare display-present data before pipeline telemetry notifies the
@@ -805,6 +958,14 @@ private:
         if (telemetryStop) {
             DisplayPresentLatency::endRun(nowCounter);
             StreamPipelineTelemetry::stop();
+        }
+
+        if (armPulseTimer) {
+            startPulseTimer();
+        }
+        if (pulseCadenceFailed) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "Latency probe: unable to derive helper cadence from stream FPS");
         }
 
         if (requestStart) {
@@ -1003,6 +1164,7 @@ private:
     SDL_TimerID m_HoldTimer = 0;
     SDL_TimerID m_TelemetryHoldTimer = 0;
     SDL_TimerID m_BenchmarkTimer = 0;
+    SDL_TimerID m_PulseTimer = 0;
     bool m_PhysicalAHeld = false;
     bool m_PhysicalYHeld = false;
     bool m_StopRequested = false;
@@ -1019,8 +1181,9 @@ private:
     bool m_ManualTelemetryFrozen = false;
     bool m_AutoButtonDown = false;
     Uint32 m_AutoDownTick = 0;
-    Uint32 m_AutoNextDownTick = 0;
-    uint32_t m_PulseJitterState = 0;
+    int m_StreamFrameRate = 0;
+    uint64_t m_AutoNextDownCounter = 0;
+    uint64_t m_PulsePeriodCounterTicks = 0;
 
     LatencySample m_AverageSamples[kAverageCapacity] = {};
     size_t m_AverageStart = 0;

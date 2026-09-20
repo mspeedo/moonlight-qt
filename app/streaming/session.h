@@ -127,6 +127,11 @@ public:
         return m_Computer;
     }
 
+    int getStreamFrameRate() const
+    {
+        return m_StreamConfig.fps;
+    }
+
     void flushWindowEvents();
 
     void setShouldExit(bool quitHostApp = false);
