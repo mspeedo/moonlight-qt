@@ -519,6 +519,7 @@ private:
         SDL_JoystickID controllerId = 0;
         bool expectedBright = false;
         bool validationMeasurement = false;
+        uint64_t nextDeadline = 0;
 
         SDL_AtomicLock(&m_Lock);
         if (!m_Enabled || !m_HelperRunning || !m_AutoBenchmark ||
@@ -541,6 +542,7 @@ private:
         m_AutoButtonDown = true;
         m_AutoDownTick = SDL_GetTicks();
         m_AutoNextDownCounter = inputTimestamp + m_PulsePeriodCounterTicks;
+        nextDeadline = m_AutoNextDownCounter;
         expectedBright = m_Expected == VisualState::Bright;
         validationMeasurement = m_ValidationPending;
         SDL_AtomicUnlock(&m_Lock);
@@ -554,10 +556,6 @@ private:
                                                   validationMeasurement);
 
         nowCounter = SDL_GetPerformanceCounter();
-        if (m_PulsePeriodCounterTicks == 0) {
-            return 1;
-        }
-        const uint64_t nextDeadline = inputTimestamp + m_PulsePeriodCounterTicks;
         if (nowCounter >= nextDeadline) {
             return 1;
         }
