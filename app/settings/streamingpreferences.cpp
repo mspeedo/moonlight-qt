@@ -2,6 +2,7 @@
 #include "utils.h"
 
 #if defined(Q_OS_LINUX)
+#include "streaming/gamemodecontrol.h"
 #include "streaming/threadpriority.h"
 #endif
 
@@ -51,7 +52,8 @@
 #define SER_DETECTNETBLOCKING "detectnetblocking"
 #define SER_SHOWPERFOVERLAY "showperfoverlay"
 #define SER_PIPELINE_TELEMETRY_HIDDEN "pipelineTelemetryWhileOsdHidden"
-#define SER_GAMEMODE_THREAD_PRIORITY "gamemodeandthreadpriority"
+#define SER_GAMEMODE "gamemode"
+#define SER_HIGH_PRIORITY_STREAMING_THREADS "highprioritystreamingthreads"
 #define SER_SWAPMOUSEBUTTONS "swapmousebuttons"
 #define SER_MUTEONFOCUSLOSS "muteonfocusloss"
 #define SER_BACKGROUNDGAMEPAD "backgroundgamepad"
@@ -157,7 +159,8 @@ void StreamingPreferences::reload()
     detectNetworkBlocking = settings.value(SER_DETECTNETBLOCKING, true).toBool();
     showPerformanceOverlay = settings.value(SER_SHOWPERFOVERLAY, false).toBool();
     enablePipelineTelemetryWhileOsdHidden = settings.value(SER_PIPELINE_TELEMETRY_HIDDEN, false).toBool();
-    enableGameModeAndThreadPriority = settings.value(SER_GAMEMODE_THREAD_PRIORITY, false).toBool();
+    enableGameMode = settings.value(SER_GAMEMODE, false).toBool();
+    enableHighPriorityStreamingThreads = settings.value(SER_HIGH_PRIORITY_STREAMING_THREADS, false).toBool();
     packetSize = settings.value(SER_PACKETSIZE, 0).toInt();
     swapMouseButtons = settings.value(SER_SWAPMOUSEBUTTONS, false).toBool();
     muteOnFocusLoss = settings.value(SER_MUTEONFOCUSLOSS, false).toBool();
@@ -209,7 +212,8 @@ void StreamingPreferences::reload()
     }
 
 #if defined(Q_OS_LINUX)
-    ThreadPriority::setEnabled(enableGameModeAndThreadPriority);
+    GameModeControl::setEnabled(enableGameMode);
+    ThreadPriority::setEnabled(enableHighPriorityStreamingThreads);
 #endif
 }
 
@@ -367,7 +371,8 @@ void StreamingPreferences::save()
     settings.setValue(SER_DETECTNETBLOCKING, detectNetworkBlocking);
     settings.setValue(SER_SHOWPERFOVERLAY, showPerformanceOverlay);
     settings.setValue(SER_PIPELINE_TELEMETRY_HIDDEN, enablePipelineTelemetryWhileOsdHidden);
-    settings.setValue(SER_GAMEMODE_THREAD_PRIORITY, enableGameModeAndThreadPriority);
+    settings.setValue(SER_GAMEMODE, enableGameMode);
+    settings.setValue(SER_HIGH_PRIORITY_STREAMING_THREADS, enableHighPriorityStreamingThreads);
     settings.setValue(SER_AUDIOCFG, static_cast<int>(audioConfig));
     settings.setValue(SER_HDR, enableHdr);
     settings.setValue(SER_YUV444, enableYUV444);
@@ -387,7 +392,8 @@ void StreamingPreferences::save()
     settings.setValue(SER_KEEPAWAKE, keepAwake);
 
 #if defined(Q_OS_LINUX)
-    ThreadPriority::setEnabled(enableGameModeAndThreadPriority);
+    GameModeControl::setEnabled(enableGameMode);
+    ThreadPriority::setEnabled(enableHighPriorityStreamingThreads);
 #endif
 }
 

@@ -1847,20 +1847,37 @@ Flickable {
                 }
 
                 CheckBox {
-                    id: gameModeAndThreadPriorityCheck
+                    id: gameModeCheck
                     visible: Qt.platform.os === "linux"
                     width: parent.width
-                    text: qsTr("Enable GameMode and high-priority streaming threads")
+                    text: qsTr("Enable GameMode")
                     font.pointSize: 12
-                    checked: StreamingPreferences.enableGameModeAndThreadPriority
+                    checked: StreamingPreferences.enableGameMode
                     onCheckedChanged: {
-                        StreamingPreferences.enableGameModeAndThreadPriority = checked
+                        StreamingPreferences.enableGameMode = checked
                     }
 
                     ToolTip.delay: 1000
                     ToolTip.timeout: 5000
                     ToolTip.visible: hovered
-                    ToolTip.text: qsTr("Requests Linux GameMode and raises the VideoRecv, FFDecoder, and PacerRender thread priorities while streaming. This setting takes effect on the next stream.")
+                    ToolTip.text: qsTr("Requests Linux GameMode while streaming. This setting takes effect on the next stream.")
+                }
+
+                CheckBox {
+                    id: highPriorityStreamingThreadsCheck
+                    visible: Qt.platform.os === "linux"
+                    width: parent.width
+                    text: qsTr("Enable high-priority streaming threads")
+                    font.pointSize: 12
+                    checked: StreamingPreferences.enableHighPriorityStreamingThreads
+                    onCheckedChanged: {
+                        StreamingPreferences.enableHighPriorityStreamingThreads = checked
+                    }
+
+                    ToolTip.delay: 1000
+                    ToolTip.timeout: 5000
+                    ToolTip.visible: hovered
+                    ToolTip.text: qsTr("Raises the VideoRecv, FFDecoder, and PacerRender thread priorities while streaming. This setting takes effect on the next stream.")
                 }
 
                 CheckBox {

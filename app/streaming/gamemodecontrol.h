@@ -33,10 +33,21 @@ enum class State {
     Released,
 };
 
+inline std::atomic<bool> g_Enabled {false};
 inline std::atomic<State> g_State {State::NotRequested};
 inline std::mutex g_Mutex;
 inline int g_Users = 0;
 inline bool g_RegisteredByUs = false;
+
+inline void setEnabled(bool enabled)
+{
+    g_Enabled.store(enabled, std::memory_order_release);
+}
+
+inline bool isEnabledFast()
+{
+    return g_Enabled.load(std::memory_order_relaxed);
+}
 
 inline QDBusInterface createNativeGameMode()
 {
@@ -214,7 +225,7 @@ inline void release()
 
 inline const char* stateText()
 {
-    if (!ThreadPriority::isEnabledFast()) {
+    if (!isEnabledFast()) {
         return "OFF";
     }
 
@@ -240,6 +251,7 @@ struct ThreadStartContext
     SDL_ThreadFunction function;
     void* data;
     const char* name;
+    bool releaseGameMode;
 };
 
 inline int threadStartThunk(void* opaque)
@@ -250,11 +262,15 @@ inline int threadStartThunk(void* opaque)
     void* data = context->data;
     const char* name = context->name;
 
-    ThreadPriority::requestElevatedNormalPriority(ThreadPriority::ThreadRole::Decoder, name);
-    ThreadPriority::elevateNamedThread(ThreadPriority::ThreadRole::Render, "PacerRender");
+    if (ThreadPriority::isEnabledFast()) {
+        ThreadPriority::requestElevatedNormalPriority(ThreadPriority::ThreadRole::Decoder, name);
+        ThreadPriority::elevateNamedThread(ThreadPriority::ThreadRole::Render, "PacerRender");
+    }
 
     const int result = function(data);
-    release();
+    if (context->releaseGameMode) {
+        release();
+    }
     return result;
 }
 
@@ -262,21 +278,29 @@ inline SDL_Thread* createStreamingThread(SDL_ThreadFunction function,
                                          const char* name,
                                          void* data)
 {
-    if (!ThreadPriority::isEnabledFast()) {
+    const bool useGameMode = isEnabledFast();
+    const bool useThreadPriority = ThreadPriority::isEnabledFast();
+    if (!useGameMode && !useThreadPriority) {
         return SDL_CreateThread(function, name, data);
     }
 
-    auto* context = new (std::nothrow) ThreadStartContext{function, data, name};
+    auto* context = new (std::nothrow) ThreadStartContext{
+        function, data, name, useGameMode
+    };
     if (context == nullptr) {
         SDL_OutOfMemory();
         return nullptr;
     }
 
-    acquire();
+    if (useGameMode) {
+        acquire();
+    }
 
     SDL_Thread* thread = SDL_CreateThread(threadStartThunk, name, context);
     if (thread == nullptr) {
-        release();
+        if (useGameMode) {
+            release();
+        }
         delete context;
     }
     return thread;
