@@ -97,16 +97,39 @@ void formatOverlayLines(char* output, std::size_t length)
                   static_cast<unsigned long long>(
                       g_PacerFrameDrops.load(std::memory_order_relaxed)));
 #if defined(Q_OS_LINUX)
+    if (GameModeControl::isEnabledFast()) {
+        const std::size_t used = std::strlen(output);
+        std::snprintf(output + used,
+                      length - used,
+                      "\nGameMode: %s",
+                      GameModeControl::stateText());
+    }
+
     if (ThreadPriority::isEnabledFast()) {
         char priorityLines[160];
         ThreadPriority::formatOverlayLines(priorityLines, sizeof(priorityLines));
 
+        // Indent the existing per-thread status lines under a compact section
+        // heading without changing their status formatting.
+        char indentedPriorityLines[192] = {};
+        std::size_t sourceOffset = 0;
+        std::size_t destOffset = 0;
+        while (priorityLines[sourceOffset] != '\0' &&
+               destOffset + 1 < sizeof(indentedPriorityLines)) {
+            if ((sourceOffset == 0 || priorityLines[sourceOffset - 1] == '\n') &&
+                destOffset + 2 < sizeof(indentedPriorityLines)) {
+                indentedPriorityLines[destOffset++] = ' ';
+                indentedPriorityLines[destOffset++] = ' ';
+            }
+            indentedPriorityLines[destOffset++] = priorityLines[sourceOffset++];
+        }
+        indentedPriorityLines[destOffset] = '\0';
+
         const std::size_t used = std::strlen(output);
         std::snprintf(output + used,
                       length - used,
-                      "\nGameMode: %s\n%s",
-                      GameModeControl::stateText(),
-                      priorityLines);
+                      "\nThread priorities\n%s",
+                      indentedPriorityLines);
     }
 #endif
 }
