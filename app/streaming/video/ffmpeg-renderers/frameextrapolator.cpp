@@ -77,6 +77,7 @@ void FrameExtrapolator::destroyResources()
     m_ResourcesReady = false;
     m_HasHistory = false;
     m_HasMotion = false;
+    m_MotionAgeFrames = 0;
 }
 
 bool FrameExtrapolator::ensureResources(const pl_frame& frame)
@@ -93,6 +94,7 @@ bool FrameExtrapolator::ensureResources(const pl_frame& frame)
         if (sourceWidth != m_SourceWidth || sourceHeight != m_SourceHeight ||
                 frame.num_planes != m_PlaneCount) {
             m_HasMotion = false;
+            m_MotionAgeFrames = 0;
             return false;
         }
 
@@ -105,6 +107,7 @@ bool FrameExtrapolator::ensureResources(const pl_frame& frame)
                     source->params.format == nullptr ||
                     source->params.format->signature != m_PlaneFormatSignatures[i]) {
                 m_HasMotion = false;
+                m_MotionAgeFrames = 0;
                 return false;
             }
         }
@@ -477,10 +480,13 @@ bool FrameExtrapolator::submitRealFrame(const AVFrame* frame,
 
     const int currentIndex = m_HasHistory ? 1 - m_HistoryIndex : 0;
 
-    // Never build a queue of analysis work behind presentation. If any of the
-    // reusable analysis resources are still busy, skip this frame's analysis
-    // completely. This preserves the latest real AVFrame for future use but
-    // deliberately invalidates motion until a fresh pair has completed.
+    // Never build a queue of analysis work behind presentation. If the previous
+    // analysis is still using the reusable textures, skip analysis for this real
+    // frame. Keep a valid motion field for at most one skipped frame: applying
+    // the immediately preceding motion estimate to the newest real image is a
+    // useful constant-velocity fallback, while allowing it to age further would
+    // make extrapolation increasingly speculative. The zero-time readiness poll
+    // in canExtrapolate() still guarantees that unfinished GPU work is never used.
     if (m_HasHistory &&
             (pl_tex_poll(m_Gpu, m_FineLuma[m_HistoryIndex], 0) ||
              pl_tex_poll(m_Gpu, m_CoarseLuma[m_HistoryIndex], 0) ||
@@ -490,19 +496,39 @@ bool FrameExtrapolator::submitRealFrame(const AVFrame* frame,
              pl_tex_poll(m_Gpu, m_FineMotion, 0) ||
              pl_tex_poll(m_Gpu, m_SceneMetric, 0))) {
         StreamHealthTelemetry::frameExtrapolationAnalysisBusySkip();
-        m_HasMotion = false;
-        m_MotionPairIntervalUs = 0;
+
+        const bool currentIsIntra =
+                (frame->flags & AV_FRAME_FLAG_KEY) ||
+                frame->pict_type == AV_PICTURE_TYPE_I;
+        const bool keepRecentMotion =
+                m_HasMotion &&
+                m_MotionPairIntervalUs != 0 &&
+                m_MotionAgeFrames == 0 &&
+                !currentIsIntra;
+
+        if (keepRecentMotion) {
+            m_MotionAgeFrames = 1;
+        }
+        else {
+            m_HasMotion = false;
+            m_MotionPairIntervalUs = 0;
+            m_MotionAgeFrames = 0;
+        }
+
         m_LastRealRenderTimeUs = renderTimeUs;
         m_SyntheticSinceLastReal = false;
 
         av_frame_unref(m_LatestRealFrame);
         if (av_frame_ref(m_LatestRealFrame, frame) < 0) {
+            m_HasMotion = false;
+            m_MotionPairIntervalUs = 0;
+            m_MotionAgeFrames = 0;
             return false;
         }
 
         // Keep m_LastRealPts and m_HistoryIndex pointing at the last frame that
-        // actually entered the GPU history. The next successful analysis may
-        // therefore span multiple RTP intervals and will normalize that span.
+        // actually entered GPU history. The next successful analysis may span
+        // multiple RTP intervals and will normalize that span.
         return true;
     }
 
@@ -513,6 +539,8 @@ bool FrameExtrapolator::submitRealFrame(const AVFrame* frame,
     if (!dispatchDownsample(luma, m_FineLuma[currentIndex], 4) ||
             !dispatchDownsample(m_FineLuma[currentIndex], m_CoarseLuma[currentIndex], 2)) {
         m_HasMotion = false;
+        m_MotionPairIntervalUs = 0;
+        m_MotionAgeFrames = 0;
         return false;
     }
 
@@ -521,6 +549,8 @@ bool FrameExtrapolator::submitRealFrame(const AVFrame* frame,
                 !dispatchCoarseMotion(m_CoarseLuma[currentIndex], m_CoarseLuma[m_HistoryIndex]) ||
                 !dispatchFineMotion(m_FineLuma[currentIndex], m_FineLuma[m_HistoryIndex])) {
             m_HasMotion = false;
+            m_MotionPairIntervalUs = 0;
+            m_MotionAgeFrames = 0;
             return false;
         }
 
@@ -559,6 +589,7 @@ bool FrameExtrapolator::submitRealFrame(const AVFrame* frame,
         m_MotionPairIntervalUs = 0;
     }
 
+    m_MotionAgeFrames = 0;
     m_HistoryIndex = currentIndex;
     m_HasHistory = true;
     m_LastRealRenderTimeUs = renderTimeUs;
@@ -568,6 +599,8 @@ bool FrameExtrapolator::submitRealFrame(const AVFrame* frame,
     av_frame_unref(m_LatestRealFrame);
     if (av_frame_ref(m_LatestRealFrame, frame) < 0) {
         m_HasMotion = false;
+        m_MotionPairIntervalUs = 0;
+        m_MotionAgeFrames = 0;
         return false;
     }
 
