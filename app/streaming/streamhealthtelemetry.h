@@ -20,6 +20,7 @@ void pacerFrameDrop();
 // Frame-extrapolation diagnostics. These are relaxed session counters used only
 // by the debug OSD and must never block or affect the render path.
 void setFrameExtrapolationActive(bool active);
+void frameExtrapolationDeadlineMiss();
 void frameExtrapolationOpportunity();
 void frameExtrapolationAnalysisBusySkip();
 void frameExtrapolationRejectNoMotion();
