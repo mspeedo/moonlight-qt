@@ -76,6 +76,7 @@ private:
     uint64_t m_LastRealRenderTimeUs = 0;
     int64_t m_LastRealPts = AV_NOPTS_VALUE;
     uint64_t m_MotionPairIntervalUs = 0;
+    uint64_t m_LastTelemetryTargetUs = 0;
 
     int m_SourceWidth = 0;
     int m_SourceHeight = 0;
