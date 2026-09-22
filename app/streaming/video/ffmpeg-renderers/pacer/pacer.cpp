@@ -153,6 +153,18 @@ int Pacer::renderThread(void* context)
         // Wait for the renderer to be ready for the next frame
         me->m_VsyncRenderer->waitToRender();
 
+        // submitRealFrame() may disable the renderer-side extrapolator after
+        // Pacer initialization. Stop timed extrapolation wakeups immediately in
+        // that case rather than continuing to count unusable deadline misses.
+        if (me->m_FrameExtrapolationActive &&
+                !me->m_VsyncRenderer->isFrameExtrapolationActive()) {
+            me->m_FrameExtrapolationActive = false;
+            me->m_SyntheticSinceLastReal = false;
+            me->m_SyntheticReplacedPts = AV_NOPTS_VALUE;
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "Frame extrapolation renderer disabled; disarming Pacer");
+        }
+
         // Acquire the frame queue lock to protect the queue and
         // the not empty condition
         me->m_FrameQueueLock.lock();
