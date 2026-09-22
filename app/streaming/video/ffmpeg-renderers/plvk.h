@@ -11,6 +11,11 @@
 #include <libplacebo/vulkan.h>
 
 #include <atomic>
+#include <memory>
+
+#if defined(Q_OS_LINUX)
+class FrameExtrapolator;
+#endif
 
 #ifdef Q_OS_DARWIN
 class MetalVulkanTextureFactory {
@@ -44,6 +49,9 @@ public:
     virtual bool initialize(PDECODER_PARAMETERS params) override;
     virtual bool prepareDecoderContext(AVCodecContext* context, AVDictionary** options) override;
     virtual void renderFrame(AVFrame* frame) override;
+    virtual bool isFrameExtrapolationActive() override;
+    virtual bool canExtrapolateFrame(uint64_t targetTimeUs) override;
+    virtual bool renderExtrapolatedFrame(uint64_t targetTimeUs) override;
     virtual bool testRenderFrame(AVFrame* frame) override;
     virtual void waitToRender() override;
     virtual void cleanupRenderContext() override;
@@ -70,6 +78,7 @@ private:
 
     bool createSwapchain(int depth);
     bool createOverlay(pl_overlay* overlay, SDL_Surface* surface);
+    bool renderMappedFrame(pl_frame& mappedFrame);
     bool mapAvFrameToPlacebo(const AVFrame *frame, pl_frame* mappedFrame);
     void unmapAvFrameFromPlacebo(const AVFrame *frame, pl_frame* mappedFrame);
     bool populateQueues(int videoFormat);
@@ -100,6 +109,10 @@ private:
     // Stream state
     int m_MaxVideoFps;
     bool m_EnableVsync = false;
+
+#if defined(Q_OS_LINUX)
+    std::unique_ptr<FrameExtrapolator> m_FrameExtrapolator;
+#endif
 
     // The libplacebo rendering state
     pl_log m_Log = nullptr;

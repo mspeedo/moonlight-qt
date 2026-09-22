@@ -154,32 +154,123 @@ int Pacer::renderThread(void* context)
         // the not empty condition
         me->m_FrameQueueLock.lock();
 
-        // Wait for a frame to be ready to render
+        // Wait for a real frame. With extrapolation active, the only timed
+        // wakeup is the next expected real-frame opportunity. The normal
+        // disabled path remains an indefinite condition wait exactly as before.
+        bool extrapolationDeadlineReached = false;
+        uint64_t extrapolationTargetUs = 0;
         while (!me->m_Stopping && me->m_RenderQueue.isEmpty()) {
-            me->m_RenderQueueNotEmpty.wait(&me->m_FrameQueueLock);
+            if (me->m_FrameExtrapolationActive &&
+                    !me->m_SyntheticSinceLastReal &&
+                    me->m_LastRealRenderTimeUs != 0) {
+                extrapolationTargetUs = me->m_LastRealRenderTimeUs + me->m_FrameIntervalUs;
+                const uint64_t nowUs = LiGetMicroseconds();
+                if (nowUs >= extrapolationTargetUs) {
+                    extrapolationDeadlineReached = true;
+                    break;
+                }
+
+                const uint64_t remainingUs = extrapolationTargetUs - nowUs;
+                const unsigned long waitMs = (unsigned long)SDL_max(
+                            1ULL, (remainingUs + 999ULL) / 1000ULL);
+                me->m_RenderQueueNotEmpty.wait(&me->m_FrameQueueLock, waitMs);
+            }
+            else {
+                me->m_RenderQueueNotEmpty.wait(&me->m_FrameQueueLock);
+            }
         }
 
-        // Select the newest decoded output only after the renderer is ready.
-        // Free one stale frame at a time outside the lock, retaining the existing
-        // frame-pool bound even if the decoder enqueues more frames meanwhile.
-        while (me->m_RenderLatestFrame && !me->m_Stopping && me->m_RenderQueue.count() > 1) {
-            AVFrame* staleFrame = me->m_RenderQueue.dequeue();
+        if (extrapolationDeadlineReached && !me->m_Stopping &&
+                me->m_RenderQueue.isEmpty()) {
+            // Do not hold the queue lock while asking the renderer to dispatch
+            // GPU work. A frame that arrives after this deadline is late for the
+            // opportunity we are replacing, and will be handled by the existing
+            // newest-frame policy on the next real render.
             me->m_FrameQueueLock.unlock();
-            av_frame_free(&staleFrame);
-            me->m_VideoStats->pacerDroppedFrames++;
-            StreamPipelineTelemetry::pacerDrop();
+
+            const uint64_t requestUs = LiGetMicroseconds();
+            const bool deadlineStillUseful =
+                    requestUs <= extrapolationTargetUs + me->m_FrameIntervalUs / 4ULL;
+            const bool extrapolated = deadlineStillUseful &&
+                    me->m_VsyncRenderer->canExtrapolateFrame(extrapolationTargetUs) &&
+                    me->m_VsyncRenderer->renderExtrapolatedFrame(extrapolationTargetUs);
+            if (extrapolated) {
+                me->m_SyntheticSinceLastReal = true;
+                if (me->m_LastRealPts != AV_NOPTS_VALUE) {
+                    const int64_t intervalPts = (int64_t)
+                            ((me->m_FrameIntervalUs * 90000ULL + 500000ULL) / 1000000ULL);
+                    me->m_SyntheticReplacedPts = me->m_LastRealPts +
+                            (intervalPts > 0 ? intervalPts : 1);
+                }
+                else {
+                    me->m_SyntheticReplacedPts = AV_NOPTS_VALUE;
+                }
+                continue;
+            }
+
+            // Analysis may be invalid, unfinished, or rejected. Preserve the
+            // existing hold behavior without starting a second swapchain frame.
             me->m_FrameQueueLock.lock();
+            while (!me->m_Stopping && me->m_RenderQueue.isEmpty()) {
+                me->m_RenderQueueNotEmpty.wait(&me->m_FrameQueueLock);
+            }
+        }
+
+        AVFrame* frame = nullptr;
+        for (;;) {
+            // Select the newest decoded output only after the renderer is ready.
+            // Free one stale frame at a time outside the lock, retaining the
+            // existing frame-pool bound even if the decoder enqueues more frames.
+            while (me->m_RenderLatestFrame && !me->m_Stopping &&
+                    me->m_RenderQueue.count() > 1) {
+                AVFrame* staleFrame = me->m_RenderQueue.dequeue();
+                me->m_FrameQueueLock.unlock();
+                av_frame_free(&staleFrame);
+                me->m_VideoStats->pacerDroppedFrames++;
+                StreamPipelineTelemetry::pacerDrop();
+                me->m_FrameQueueLock.lock();
+            }
+
+            if (me->m_Stopping) {
+                break;
+            }
+
+            if (me->m_RenderQueue.isEmpty()) {
+                me->m_RenderQueueNotEmpty.wait(&me->m_FrameQueueLock);
+                continue;
+            }
+
+            // If a synthetic frame already replaced the immediately following
+            // stream timestamp, don't present that real frame later and move
+            // the client backwards in time. Hold the synthetic image until the
+            // next useful real frame arrives. RTP PTS is 90 kHz and is more
+            // stable for this decision than local arrival wall-clock time.
+            if (me->m_FrameExtrapolationActive &&
+                    me->m_SyntheticSinceLastReal &&
+                    me->m_SyntheticReplacedPts != AV_NOPTS_VALUE) {
+                AVFrame* candidate = me->m_RenderQueue.head();
+                if (candidate->pts != AV_NOPTS_VALUE &&
+                        candidate->pts <= me->m_SyntheticReplacedPts + 2) {
+                    AVFrame* replacedFrame = me->m_RenderQueue.dequeue();
+                    me->m_FrameQueueLock.unlock();
+                    av_frame_free(&replacedFrame);
+                    me->m_VideoStats->pacerDroppedFrames++;
+                    StreamPipelineTelemetry::pacerDrop();
+                    me->m_FrameQueueLock.lock();
+                    continue;
+                }
+            }
+
+            frame = me->m_RenderQueue.dequeue();
+            break;
         }
 
         if (me->m_Stopping) {
-            // Exit this thread
             me->m_FrameQueueLock.unlock();
             break;
         }
 
-        AVFrame* frame = me->m_RenderQueue.dequeue();
         me->m_FrameQueueLock.unlock();
-
         me->renderFrame(frame);
     }
 
@@ -283,6 +374,16 @@ bool Pacer::initialize(SDL_Window* window, int maxVideoFps, bool enablePacing, b
             m_VsyncRenderer->getRendererType() == IFFmpegRenderer::RendererType::Vulkan &&
             m_VsyncRenderer->isRenderThreadSupported();
 
+    m_NominalFrameIntervalUs = (1000000ULL + (uint64_t)maxVideoFps / 2ULL) /
+            (uint64_t)maxVideoFps;
+    m_FrameIntervalUs = m_NominalFrameIntervalUs;
+    m_FrameExtrapolationActive = m_RenderLatestFrame &&
+            m_VsyncRenderer->isFrameExtrapolationActive();
+    if (m_FrameExtrapolationActive) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "Single-frame extrapolation armed for the unpaced Vulkan path");
+    }
+
     if (enablePacing) {
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                     "Frame pacing: target %d Hz with %d FPS stream",
@@ -352,6 +453,27 @@ void Pacer::renderFrame(AVFrame* frame)
     // Count time spent in Pacer's queues
     uint64_t beforeRender = LiGetMicroseconds();
     m_VideoStats->totalPacerTimeUs += (beforeRender - (uint64_t)frame->pkt_dts);
+
+    if (m_FrameExtrapolationActive) {
+        // Use decoded RTP PTS (90 kHz) to gently track real stream cadence,
+        // but ignore multi-frame gaps so a hitch cannot stretch the next
+        // extrapolation deadline. The configured FPS remains the baseline.
+        if (frame->pts != AV_NOPTS_VALUE &&
+                m_LastRealPts != AV_NOPTS_VALUE &&
+                frame->pts > m_LastRealPts) {
+            const uint64_t ptsDeltaUs = (uint64_t)(frame->pts - m_LastRealPts) *
+                    1000000ULL / 90000ULL;
+            if (ptsDeltaUs >= m_NominalFrameIntervalUs * 3ULL / 4ULL &&
+                    ptsDeltaUs <= m_NominalFrameIntervalUs * 5ULL / 4ULL) {
+                m_FrameIntervalUs = (m_FrameIntervalUs * 7ULL + ptsDeltaUs) / 8ULL;
+            }
+        }
+
+        m_LastRealPts = frame->pts;
+        m_LastRealRenderTimeUs = beforeRender;
+        m_SyntheticSinceLastReal = false;
+        m_SyntheticReplacedPts = AV_NOPTS_VALUE;
+    }
 
     // Resolve the frame identity before taking the semantic render-start clock.
     // After the timestamp, armRenderStart() is an inline TLS store and then the

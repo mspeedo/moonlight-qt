@@ -3,6 +3,7 @@
 #include "SDL_compat.h"
 
 #include <array>
+#include <cstdint>
 
 #include "streaming/video/decoder.h"
 #include "streaming/video/overlaymanager.h"
@@ -160,6 +161,20 @@ public:
     virtual bool initialize(PDECODER_PARAMETERS params) = 0;
     virtual bool prepareDecoderContext(AVCodecContext* context, AVDictionary** options) = 0;
     virtual void renderFrame(AVFrame* frame) = 0;
+
+    // Experimental client-side hitch masking. Renderers that do not explicitly
+    // implement this remain completely unaffected.
+    virtual bool isFrameExtrapolationActive() {
+        return false;
+    }
+
+    virtual bool canExtrapolateFrame(uint64_t) {
+        return false;
+    }
+
+    virtual bool renderExtrapolatedFrame(uint64_t) {
+        return false;
+    }
 
     enum class InitFailureReason
     {

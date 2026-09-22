@@ -1731,6 +1731,22 @@ Flickable {
                 }
 
                 CheckBox {
+                    id: frameExtrapolationCheck
+                    hoverEnabled: true
+                    width: parent.width
+                    visible: Qt.platform.os === "linux"
+                    text: qsTr("Enable frame extrapolation")
+                    font.pointSize: 12
+                    checked: StreamingPreferences.enableFrameExtrapolation
+                    onCheckedChanged: StreamingPreferences.enableFrameExtrapolation = checked
+
+                    ToolTip.delay: 1000
+                    ToolTip.timeout: 10000
+                    ToolTip.visible: hovered
+                    ToolTip.text: qsTr("Generates at most one motion-extrapolated frame to mask short frame-delivery hitches. Vulkan renderer only. Experimental. Takes effect on the next stream.")
+                }
+
+                CheckBox {
                     id: networkBufferCheck
                     hoverEnabled: true
                     width: parent.width

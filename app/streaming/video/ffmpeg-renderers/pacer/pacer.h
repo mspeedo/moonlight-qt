@@ -69,6 +69,13 @@ private:
     AVFrame* m_DeferredFreeFrame;
     bool m_Stopping;
     bool m_RenderLatestFrame;
+    bool m_FrameExtrapolationActive = false;
+    bool m_SyntheticSinceLastReal = false;
+    uint64_t m_LastRealRenderTimeUs = 0;
+    uint64_t m_NominalFrameIntervalUs = 0;
+    uint64_t m_FrameIntervalUs = 0;
+    int64_t m_LastRealPts = AV_NOPTS_VALUE;
+    int64_t m_SyntheticReplacedPts = AV_NOPTS_VALUE;
 
     IVsyncSource* m_VsyncSource;
     IFFmpegRenderer* m_VsyncRenderer;

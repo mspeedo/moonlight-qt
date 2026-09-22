@@ -1,5 +1,9 @@
 #include "plvk.h"
 
+#if defined(Q_OS_LINUX)
+#include "frameextrapolator.h"
+#endif
+
 #include "streaming/session.h"
 #include "streaming/streamutils.h"
 
@@ -167,6 +171,11 @@ PlVkRenderer::~PlVkRenderer()
 {
     // The render context must have been cleaned up by now
     SDL_assert(!m_HasPendingSwapchainFrame);
+
+#if defined(Q_OS_LINUX)
+    // FrameExtrapolator owns libplacebo GPU objects, so destroy it before Vulkan.
+    m_FrameExtrapolator.reset();
+#endif
 
     if (m_Vulkan != nullptr) {
 #ifdef PLVK_USE_EARLY_RENDER_TO_WAIT
@@ -546,6 +555,27 @@ bool PlVkRenderer::initialize(PDECODER_PARAMETERS params)
                      "pl_renderer_create() failed");
         return false;
     }
+
+#if defined(Q_OS_LINUX)
+    if (params->enableFrameExtrapolation && !params->testOnly &&
+            !params->enableVsync && !params->enableFramePacing) {
+        m_FrameExtrapolator = std::make_unique<FrameExtrapolator>(
+                    m_Log, m_Vulkan->gpu, params->frameRate);
+        if (!m_FrameExtrapolator->initialize()) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "Frame extrapolation initialization failed; continuing without it");
+            m_FrameExtrapolator.reset();
+        }
+        else {
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "Experimental frame extrapolation enabled");
+        }
+    }
+    else if (params->enableFrameExtrapolation && !params->testOnly) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "Frame extrapolation requires the unpaced Vulkan path with V-Sync disabled");
+    }
+#endif
 
 #ifdef PLVK_USE_EARLY_RENDER_TO_WAIT
     SDL_Surface *emptySurface = SDL_CreateRGBSurfaceWithFormat(0, 1, 1, 0, SDL_PIXELFORMAT_ARGB8888);
@@ -958,30 +988,23 @@ void PlVkRenderer::cleanupRenderContext()
     }
 }
 
-void PlVkRenderer::renderFrame(AVFrame *frame)
+bool PlVkRenderer::renderMappedFrame(pl_frame& mappedFrame)
 {
-    pl_frame mappedFrame, targetFrame;
+    pl_frame targetFrame;
 
-    // If waitToRender() failed to get the next swapchain frame, skip
-    // rendering this frame. It probably means the window is occluded.
+    // If waitToRender() failed to get the next swapchain frame, skip rendering.
     if (!m_HasPendingSwapchainFrame) {
-        return;
+        return false;
     }
 
-    if (!mapAvFrameToPlacebo(frame, &mappedFrame)) {
-        // This function logs internally
-        return;
-    }
-
-    // Adjust the swapchain if the colorspace of incoming frames has changed
+    // Adjust the swapchain if the colorspace of incoming frames has changed.
+    // Synthetic frames inherit the exact representation/colorspace of the real
+    // source frame and therefore use this same path.
     if (!pl_color_space_equal(&mappedFrame.color, &m_LastColorspace)) {
         m_LastColorspace = mappedFrame.color;
         SDL_assert(pl_color_space_equal(&mappedFrame.color, &m_LastColorspace));
 
 #ifdef Q_OS_DARWIN
-        // There is a gamma mismatch on macOS between what libplacebo thinks BT.709
-        // should use and what the Metal layer actually displays. Use sRGB for the
-        // swapchain when the incoming frames are BT.709 as a workaround.
         if (pl_color_space_equal(&mappedFrame.color, &pl_color_space_bt709)) {
             pl_swapchain_colorspace_hint(m_Swapchain, &pl_color_space_srgb);
         }
@@ -992,14 +1015,12 @@ void PlVkRenderer::renderFrame(AVFrame *frame)
         }
     }
 
-    // Fixed storage: displaying a second debug texture adds no per-frame allocation.
-    // Leave it uninitialized on the common no-overlay path; it is zeroed only
-    // when an active or pending overlay actually requires processing.
     pl_overlay_part overlayParts[kOverlayCount];
     pl_tex texturesToDestroy[kOverlayCount * 2];
     pl_overlay overlays[kOverlayCount];
     int textureCount = 0;
     int overlayCount = 0;
+    bool frameSubmitted = false;
 
     pl_frame_from_swapchain(&targetFrame, &m_SwapchainFrame);
 
@@ -1008,14 +1029,9 @@ void PlVkRenderer::renderFrame(AVFrame *frame)
         SDL_memset(texturesToDestroy, 0, sizeof(texturesToDestroy));
         SDL_memset(overlays, 0, sizeof(overlays));
 
-        // We perform minimal processing under the overlay lock to avoid blocking
-        // threads updating the overlay. Producers set the atomic flag under this
-        // same lock, so clearing it here cannot lose a concurrent update.
         SDL_AtomicLock(&m_OverlayLock);
         bool overlayStateRemains = false;
         for (int i = 0; i < kOverlayCount; i++) {
-            // Transfer only handles under the existing spin lock. Keep the previous
-            // texture in staging for worker-side reuse; never upload under this lock.
             if (m_Overlays[i].hasStagingOverlay) {
 #if defined(HAVE_LIBPLACEBO_VULKAN) && defined(Q_OS_LINUX)
                 if (i == Overlay::OverlayDebug || i == kGraphOverlay) {
@@ -1050,24 +1066,18 @@ void PlVkRenderer::renderFrame(AVFrame *frame)
                 m_Overlays[i].hasOverlay = false;
             }
 
-            // We have an overlay to draw
             if (m_Overlays[i].hasOverlay) {
-                // Position the overlay
                 overlayParts[i].src = { 0, 0, (float)m_Overlays[i].overlay.tex->params.w, (float)m_Overlays[i].overlay.tex->params.h };
                 if (i == Overlay::OverlayStatusUpdate) {
-                    // Bottom Left
                     overlayParts[i].dst.x0 = 0;
                     overlayParts[i].dst.y0 = SDL_max(0, targetFrame.crop.y1 - overlayParts[i].src.y1);
                 }
                 else if (i == Overlay::OverlayDebug) {
-                    // Top left
                     overlayParts[i].dst.x0 = 0;
                     overlayParts[i].dst.y0 = 0;
                 }
 #if defined(HAVE_LIBPLACEBO_VULKAN) && defined(Q_OS_LINUX)
                 else if (i == kGraphOverlay) {
-                    // Text is promoted first under this same lock. Its actual width
-                    // also positions the graph correctly after any text-width change.
                     overlayParts[i].dst.x0 = m_Overlays[Overlay::OverlayDebug].overlay.tex->params.w + 24;
                     overlayParts[i].dst.y0 = 0;
                 }
@@ -1077,7 +1087,6 @@ void PlVkRenderer::renderFrame(AVFrame *frame)
 
                 m_Overlays[i].overlay.parts = &overlayParts[i];
                 m_Overlays[i].overlay.num_parts = 1;
-
                 overlays[overlayCount++] = m_Overlays[i].overlay;
             }
 
@@ -1100,7 +1109,6 @@ void PlVkRenderer::renderFrame(AVFrame *frame)
     dst.w = targetFrame.crop.x1 - targetFrame.crop.x0;
     dst.h = targetFrame.crop.y1 - targetFrame.crop.y0;
 
-    // Scale the video to the surface size while preserving the aspect ratio
     StreamUtils::scaleSourceToDestinationSurface(&src, &dst);
 
     targetFrame.crop.x0 = dst.x;
@@ -1109,31 +1117,29 @@ void PlVkRenderer::renderFrame(AVFrame *frame)
     targetFrame.crop.y1 = dst.y + dst.h;
 
 #ifndef PLVK_USE_EARLY_RENDER_TO_WAIT
-    // For PLVK_USE_EARLY_RENDER_TO_WAIT, we already timed our early render in waitToRender()
     beginRenderTiming();
 #endif
 
-    // Render the video image and overlays into the swapchain buffer
+    // Overlays are composed after the video image for both real and synthetic
+    // frames, so the Moonlight OSD itself is never motion-warped.
     targetFrame.num_overlays = overlayCount;
     targetFrame.overlays = overlayCount != 0 ? overlays : nullptr;
     if (!pl_render_image(m_Renderer, &mappedFrame, &targetFrame, &pl_render_fast_params)) {
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                      "pl_render_image() failed");
-        // NB: We must fallthrough to call pl_swapchain_submit_frame()
     }
 
-    // Submit the frame for display and swap buffers
     m_HasPendingSwapchainFrame = false;
     if (!pl_swapchain_submit_frame(m_Swapchain)) {
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                      "pl_swapchain_submit_frame() failed");
 
-        // Recreate the renderer
         SDL_Event event;
         event.type = SDL_RENDER_DEVICE_RESET;
         SDL_PushEvent(&event);
-        goto UnmapExit;
+        goto CleanupExit;
     }
+    frameSubmitted = true;
 
 #ifndef PLVK_USE_EARLY_RENDER_TO_WAIT
     endRenderTiming();
@@ -1144,31 +1150,109 @@ void PlVkRenderer::renderFrame(AVFrame *frame)
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                     "Switching to triple-buffered swapchain after delayed presentations");
         if (!createSwapchain(2)) {
-            // Recreate the renderer
             SDL_Event event;
             event.type = SDL_RENDER_DEVICE_RESET;
             SDL_PushEvent(&event);
-            goto UnmapExit;
+            goto CleanupExit;
         }
 
-        // Restore the swapchain's colorspace from the previous swapchain frame
         pl_swapchain_colorspace_hint(m_Swapchain, &targetFrame.color);
     }
 #endif
 
 #ifdef Q_OS_WIN32
-    // On Windows, we swap buffers here instead of waitToRender()
-    // to avoid some performance problems on Nvidia GPUs.
     pl_swapchain_swap_buffers(m_Swapchain);
 #endif
 
-UnmapExit:
-    // Delete any textures that need to be destroyed
+CleanupExit:
     for (int i = 0; i < textureCount; ++i) {
         pl_tex_destroy(m_Vulkan->gpu, &texturesToDestroy[i]);
     }
 
+    return frameSubmitted;
+}
+
+void PlVkRenderer::renderFrame(AVFrame *frame)
+{
+    pl_frame mappedFrame;
+
+    if (!m_HasPendingSwapchainFrame) {
+        return;
+    }
+
+    if (!mapAvFrameToPlacebo(frame, &mappedFrame)) {
+        return;
+    }
+
+#if defined(Q_OS_LINUX)
+    if (m_FrameExtrapolator != nullptr) {
+        if (!m_FrameExtrapolator->submitRealFrame(frame, mappedFrame, LiGetMicroseconds())) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "Frame extrapolation analysis failed; disabling it for this stream");
+            m_FrameExtrapolator.reset();
+        }
+    }
+#endif
+
+    renderMappedFrame(mappedFrame);
     unmapAvFrameFromPlacebo(frame, &mappedFrame);
+}
+
+bool PlVkRenderer::isFrameExtrapolationActive()
+{
+#if defined(Q_OS_LINUX)
+    return m_FrameExtrapolator != nullptr;
+#else
+    return false;
+#endif
+}
+
+bool PlVkRenderer::canExtrapolateFrame(uint64_t targetTimeUs)
+{
+#if defined(Q_OS_LINUX)
+    return m_HasPendingSwapchainFrame &&
+            m_FrameExtrapolator != nullptr &&
+            m_FrameExtrapolator->canExtrapolate(targetTimeUs);
+#else
+    Q_UNUSED(targetTimeUs)
+    return false;
+#endif
+}
+
+bool PlVkRenderer::renderExtrapolatedFrame(uint64_t targetTimeUs)
+{
+#if defined(Q_OS_LINUX)
+    if (!canExtrapolateFrame(targetTimeUs)) {
+        return false;
+    }
+
+    const AVFrame* latestRealFrame = m_FrameExtrapolator->latestRealFrame();
+    pl_frame mappedFrame;
+    if (latestRealFrame == nullptr ||
+            !mapAvFrameToPlacebo(latestRealFrame, &mappedFrame)) {
+        return false;
+    }
+
+    pl_frame syntheticFrame;
+    if (!m_FrameExtrapolator->buildSyntheticFrame(mappedFrame,
+                                                    targetTimeUs,
+                                                    &syntheticFrame)) {
+        unmapAvFrameFromPlacebo(latestRealFrame, &mappedFrame);
+        return false;
+    }
+
+    const bool submitted = renderMappedFrame(syntheticFrame);
+    unmapAvFrameFromPlacebo(latestRealFrame, &mappedFrame);
+
+    if (submitted) {
+        m_FrameExtrapolator->markSyntheticPresented();
+    }
+
+    return submitted;
+#else
+    Q_UNUSED(targetTimeUs)
+    return false;
+#endif
 }
 
 bool PlVkRenderer::testRenderFrame(AVFrame *frame)

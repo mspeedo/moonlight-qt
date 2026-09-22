@@ -196,7 +196,8 @@ private:
                        bool testOnly,
                        IVideoDecoder*& chosenDecoder, bool preferMailbox = false,
                        bool enableTransportBuffer = false,
-                       int transportBufferMs = 0);
+                       int transportBufferMs = 0,
+                       bool enableFrameExtrapolation = false);
 
     static
     void clStageStarting(int stage);

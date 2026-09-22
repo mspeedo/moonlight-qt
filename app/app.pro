@@ -351,6 +351,11 @@ libplacebo {
     HEADERS += \
         streaming/video/ffmpeg-renderers/plvk.h
 
+    linux {
+        SOURCES += streaming/video/ffmpeg-renderers/frameextrapolator.cpp
+        HEADERS += streaming/video/ffmpeg-renderers/frameextrapolator.h
+    }
+
     macx {
         SOURCES += streaming/video/ffmpeg-renderers/plvk_objc.mm
     }

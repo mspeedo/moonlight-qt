@@ -723,8 +723,12 @@ bool FFmpegVideoDecoder::completeInitialization(const AVCodec* decoder, enum AVP
     m_VideoDecoderCtx->pkt_timebase.num = 1;
     m_VideoDecoderCtx->pkt_timebase.den = 90000;
 
-    // Allocate enough extra frames for Pacer to avoid stalling the decoder
-    m_VideoDecoderCtx->extra_hw_frames = PACER_MAX_OUTSTANDING_FRAMES;
+    // Allocate enough extra frames for Pacer to avoid stalling the decoder.
+    // Extrapolation retains one additional reference to the latest real frame,
+    // so reserve one extra decoder surface only when the renderer actually
+    // enabled the feature for this stream.
+    m_VideoDecoderCtx->extra_hw_frames = PACER_MAX_OUTSTANDING_FRAMES +
+            (m_FrontendRenderer->isFrameExtrapolationActive() ? 1 : 0);
 
     // For non-hwaccel decoders, set the pix_fmt to hint to the decoder which
     // format should be used. This is necessary for certain decoders like the

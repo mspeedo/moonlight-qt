@@ -47,6 +47,7 @@ typedef struct _DECODER_PARAMETERS {
     bool enableFramePacing;
     bool enableTransportBuffer;
     int transportBufferMs;
+    bool enableFrameExtrapolation;
     bool testOnly;
 } DECODER_PARAMETERS, *PDECODER_PARAMETERS;
 
