@@ -17,6 +17,16 @@ void noteDecodeUnit(std::uint32_t frameNumber);
 // VIDEO_STATS::pacerDroppedFrames.
 void pacerFrameDrop();
 
+// Frame-extrapolation diagnostics. These are relaxed session counters used only
+// by the debug OSD and must never block or affect the render path.
+void setFrameExtrapolationActive(bool active);
+void frameExtrapolationOpportunity();
+void frameExtrapolationAnalysisBusySkip();
+void frameExtrapolationRejectNoMotion();
+void frameExtrapolationRejectTiming();
+void frameExtrapolationRejectGpuBusy();
+void frameExtrapolationRejectState();
+
 // Called only after a synthetic frame has been successfully submitted by the
 // Vulkan extrapolation path. Failed trigger/analysis attempts are not counted.
 void frameExtrapolated();
