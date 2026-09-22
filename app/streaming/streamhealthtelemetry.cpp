@@ -21,6 +21,7 @@ namespace {
 std::atomic<std::uint32_t> g_LastDecodeUnitFrameNumber { 0 };
 std::atomic<std::uint64_t> g_NetworkFrameDrops { 0 };
 std::atomic<std::uint64_t> g_PacerFrameDrops { 0 };
+std::atomic<std::uint64_t> g_FrameExtrapolated { 0 };
 
 } // namespace
 
@@ -29,6 +30,7 @@ void reset()
     g_LastDecodeUnitFrameNumber.store(0, std::memory_order_relaxed);
     g_NetworkFrameDrops.store(0, std::memory_order_relaxed);
     g_PacerFrameDrops.store(0, std::memory_order_relaxed);
+    g_FrameExtrapolated.store(0, std::memory_order_relaxed);
 }
 
 void noteDecodeUnit(std::uint32_t frameNumber)
@@ -56,6 +58,11 @@ void noteDecodeUnit(std::uint32_t frameNumber)
 void pacerFrameDrop()
 {
     g_PacerFrameDrops.fetch_add(1, std::memory_order_relaxed);
+}
+
+void frameExtrapolated()
+{
+    g_FrameExtrapolated.fetch_add(1, std::memory_order_relaxed);
 }
 
 void formatOverlayLines(char* output, std::size_t length)
@@ -88,14 +95,17 @@ void formatOverlayLines(char* output, std::size_t length)
                   "Stream health\n"
                   "  FEC frames: recovered %u | failed %u | success %s\n"
                   "  Network frame drops: %llu\n"
-                  "  Pacer frame drops: %llu",
+                  "  Pacer frame drops: %llu\n"
+                  "  Frame extrapolated: %llu",
                   recoveredFrames,
                   failedFrames,
                   success,
                   static_cast<unsigned long long>(
                       g_NetworkFrameDrops.load(std::memory_order_relaxed)),
                   static_cast<unsigned long long>(
-                      g_PacerFrameDrops.load(std::memory_order_relaxed)));
+                      g_PacerFrameDrops.load(std::memory_order_relaxed)),
+                  static_cast<unsigned long long>(
+                      g_FrameExtrapolated.load(std::memory_order_relaxed)));
 #if defined(Q_OS_LINUX)
     if (GameModeControl::isEnabledFast()) {
         const std::size_t used = std::strlen(output);

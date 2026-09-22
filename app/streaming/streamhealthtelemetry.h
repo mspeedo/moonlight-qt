@@ -17,6 +17,10 @@ void noteDecodeUnit(std::uint32_t frameNumber);
 // VIDEO_STATS::pacerDroppedFrames.
 void pacerFrameDrop();
 
+// Called only after a synthetic frame has been successfully submitted by the
+// Vulkan extrapolation path. Failed trigger/analysis attempts are not counted.
+void frameExtrapolated();
+
 // Format stream-lifetime health counters for the debug OSD. This block is
 // independent of the latency benchmark and is shown above benchmark telemetry.
 void formatOverlayLines(char* output, std::size_t length);

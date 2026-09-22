@@ -9,6 +9,8 @@
 #include <libplacebo/dispatch.h>
 #include <libplacebo/renderer.h>
 
+#include "streaming/streamhealthtelemetry.h"
+
 extern "C" {
 #include <libavutil/frame.h>
 }
@@ -38,7 +40,11 @@ public:
                              uint64_t frameIntervalUs,
                              pl_frame* syntheticFrame);
 
-    void markSyntheticPresented() { m_SyntheticSinceLastReal = true; }
+    void markSyntheticPresented()
+    {
+        m_SyntheticSinceLastReal = true;
+        StreamHealthTelemetry::frameExtrapolated();
+    }
 
 private:
     bool ensureResources(const pl_frame& frame);
