@@ -1,6 +1,7 @@
 #include "pacer.h"
 #include "streaming/streamutils.h"
 #include "streaming/streampipelinetelemetry.h"
+#include "streaming/streamhealthtelemetry.h"
 
 #ifdef Q_OS_WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -185,6 +186,8 @@ int Pacer::renderThread(void* context)
 
         if (extrapolationDeadlineReached && !me->m_Stopping &&
                 me->m_RenderQueue.isEmpty()) {
+            StreamHealthTelemetry::frameExtrapolationDeadlineMiss();
+
             // Do not hold the queue lock while asking the renderer to dispatch
             // GPU work. A frame that arrives after this deadline is late for the
             // opportunity we are replacing, and will be handled by the existing
