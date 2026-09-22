@@ -33,6 +33,11 @@ static_assert(PACER_MAX_OUTSTANDING_FRAMES == MAX_QUEUED_FRAMES + 2,
 // V-sync happens.
 #define TIMER_SLACK_MS 3
 
+// Allow ordinary host/game cadence jitter to resolve before synthesizing a
+// replacement frame. The motion target remains the original predicted frame
+// time; this grace only controls when we decide that frame is actually missing.
+static constexpr uint64_t EXTRAPOLATION_GRACE_US = 2000ULL;
+
 Pacer::Pacer(IFFmpegRenderer* renderer, PVIDEO_STATS videoStats) :
     m_RenderThread(nullptr),
     m_VsyncThread(nullptr),
@@ -169,24 +174,28 @@ int Pacer::renderThread(void* context)
         // the not empty condition
         me->m_FrameQueueLock.lock();
 
-        // Wait for a real frame. With extrapolation active, the only timed
-        // wakeup is the next expected real-frame opportunity. The normal
-        // disabled path remains an indefinite condition wait exactly as before.
+        // Wait for a real frame. With extrapolation active, wake at the
+        // predicted real-frame timestamp plus a small grace period so normal
+        // host/game cadence jitter does not immediately become a synthetic
+        // presentation. The extrapolation target itself remains the original
+        // predicted timestamp so motion projection is not increased by grace.
         bool extrapolationDeadlineReached = false;
         uint64_t extrapolationTargetUs = 0;
+        uint64_t extrapolationTriggerUs = 0;
         while (!me->m_Stopping && me->m_RenderQueue.isEmpty()) {
             if (me->m_FrameExtrapolationActive &&
                     !me->m_SyntheticSinceLastReal &&
                     me->m_LastRealRenderTimeUs != 0 &&
                     me->m_CadenceSampleCount >= 3) {
                 extrapolationTargetUs = me->m_LastRealRenderTimeUs + me->m_FrameIntervalUs;
+                extrapolationTriggerUs = extrapolationTargetUs + EXTRAPOLATION_GRACE_US;
                 const uint64_t nowUs = LiGetMicroseconds();
-                if (nowUs >= extrapolationTargetUs) {
+                if (nowUs >= extrapolationTriggerUs) {
                     extrapolationDeadlineReached = true;
                     break;
                 }
 
-                const uint64_t remainingUs = extrapolationTargetUs - nowUs;
+                const uint64_t remainingUs = extrapolationTriggerUs - nowUs;
                 const unsigned long waitMs = (unsigned long)SDL_max(
                             1ULL, (remainingUs + 999ULL) / 1000ULL);
                 me->m_RenderQueueNotEmpty.wait(&me->m_FrameQueueLock, waitMs);
@@ -200,18 +209,31 @@ int Pacer::renderThread(void* context)
                 me->m_RenderQueue.isEmpty()) {
             StreamHealthTelemetry::frameExtrapolationDeadlineMiss();
 
-            // Do not hold the queue lock while asking the renderer to dispatch
-            // GPU work. A frame that arrives after this deadline is late for the
-            // opportunity we are replacing, and will be handled by the existing
-            // newest-frame policy on the next real render.
+            // Do not hold the queue lock while checking GPU readiness. The
+            // trigger has already waited through the grace period, but a real
+            // frame can still arrive while we perform the cheap readiness test.
             me->m_FrameQueueLock.unlock();
 
             const uint64_t requestUs = LiGetMicroseconds();
             const bool deadlineStillUseful =
-                    requestUs <= extrapolationTargetUs + me->m_FrameIntervalUs / 4ULL;
-            const bool extrapolated = deadlineStillUseful &&
+                    requestUs <= extrapolationTriggerUs + me->m_FrameIntervalUs / 4ULL;
+            const bool extrapolationReady = deadlineStillUseful &&
                     me->m_VsyncRenderer->canExtrapolateFrame(
-                            extrapolationTargetUs, me->m_FrameIntervalUs) &&
+                            extrapolationTargetUs, me->m_FrameIntervalUs);
+
+            // Close the most important race before doing the expensive full
+            // synthetic warp/present. If a real frame arrived while readiness
+            // was checked, cancel this synthetic opportunity and let the normal
+            // newest-frame path render the real frame instead.
+            bool realFrameArrived = false;
+            if (extrapolationReady) {
+                me->m_FrameQueueLock.lock();
+                realFrameArrived = me->m_Stopping || !me->m_RenderQueue.isEmpty();
+                me->m_FrameQueueLock.unlock();
+            }
+
+            const bool extrapolated = extrapolationReady &&
+                    !realFrameArrived &&
                     me->m_VsyncRenderer->renderExtrapolatedFrame(
                             extrapolationTargetUs, me->m_FrameIntervalUs);
             if (extrapolated) {
@@ -230,8 +252,9 @@ int Pacer::renderThread(void* context)
                 continue;
             }
 
-            // Analysis may be invalid, unfinished, or rejected. Preserve the
-            // existing hold behavior without starting a second swapchain frame.
+            // Analysis may be invalid, unfinished, too late, or cancelled by a
+            // real frame arriving during the readiness check. Preserve normal
+            // hold behavior and continue immediately if a real frame is ready.
             me->m_FrameQueueLock.lock();
             while (!me->m_Stopping && me->m_RenderQueue.isEmpty()) {
                 me->m_RenderQueueNotEmpty.wait(&me->m_FrameQueueLock);
@@ -320,7 +343,6 @@ void Pacer::enqueueFrameForRenderingAndUnlock(AVFrame *frame)
     else {
         SDL_Event event;
 
-        // For main thread rendering, we'll push an event to trigger a callback
         event.type = SDL_USEREVENT;
         event.user.code = SDL_CODE_FRAME_READY;
         SDL_PushEvent(&event);
@@ -587,7 +609,6 @@ void Pacer::renderFrame(AVFrame* frame)
     while (m_RenderQueue.count() > frameDropTarget) {
         AVFrame* frame = m_RenderQueue.dequeue();
 
-        // Drop the lock while we call av_frame_free()
         m_FrameQueueLock.unlock();
         m_VideoStats->pacerDroppedFrames++;
         StreamPipelineTelemetry::pacerDrop();
@@ -609,10 +630,8 @@ void Pacer::dropFrameForEnqueue(QQueue<AVFrame*>& queue)
 
 void Pacer::submitFrame(AVFrame* frame)
 {
-    // Make sure initialize() has been called
     SDL_assert(m_MaxVideoFps != 0);
 
-    // Queue the frame and possibly wake up the render thread
     m_FrameQueueLock.lock();
     if (m_VsyncSource != nullptr) {
         dropFrameForEnqueue(m_PacingQueue);
