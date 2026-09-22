@@ -36,9 +36,12 @@ bool FrameExtrapolator::createTexture(pl_tex* texture, int width, int height, in
 {
     // Three-component storage images are not universally available, so use
     // RGBA for three-component video planes while preserving pl_plane metadata.
+    // The pinned libplacebo dispatch path still requires renderable targets even
+    // for compute shaders, so keep both RENDERABLE and STORABLE capabilities.
     const int storageComponents = components == 3 ? 4 : components;
     const enum pl_fmt_caps caps = (enum pl_fmt_caps)
-            (PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_LINEAR | PL_FMT_CAP_STORABLE);
+            (PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_LINEAR |
+             PL_FMT_CAP_STORABLE | PL_FMT_CAP_RENDERABLE);
     pl_fmt format = pl_find_fmt(m_Gpu, PL_FMT_FLOAT, storageComponents, 16, 0, caps);
     if (format == nullptr) {
         return false;
@@ -49,6 +52,7 @@ bool FrameExtrapolator::createTexture(pl_tex* texture, int width, int height, in
     params.h = height;
     params.format = format;
     params.sampleable = true;
+    params.renderable = true;
     params.storable = true;
 
     *texture = pl_tex_create(m_Gpu, &params);
