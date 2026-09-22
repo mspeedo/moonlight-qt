@@ -21,6 +21,13 @@ namespace {
 std::atomic<std::uint32_t> g_LastDecodeUnitFrameNumber { 0 };
 std::atomic<std::uint64_t> g_NetworkFrameDrops { 0 };
 std::atomic<std::uint64_t> g_PacerFrameDrops { 0 };
+std::atomic<bool> g_FrameExtrapolationActive { false };
+std::atomic<std::uint64_t> g_FrameExtrapolationOpportunities { 0 };
+std::atomic<std::uint64_t> g_FrameExtrapolationAnalysisBusySkips { 0 };
+std::atomic<std::uint64_t> g_FrameExtrapolationRejectNoMotion { 0 };
+std::atomic<std::uint64_t> g_FrameExtrapolationRejectTiming { 0 };
+std::atomic<std::uint64_t> g_FrameExtrapolationRejectGpuBusy { 0 };
+std::atomic<std::uint64_t> g_FrameExtrapolationRejectState { 0 };
 std::atomic<std::uint64_t> g_FrameExtrapolated { 0 };
 
 } // namespace
@@ -30,6 +37,13 @@ void reset()
     g_LastDecodeUnitFrameNumber.store(0, std::memory_order_relaxed);
     g_NetworkFrameDrops.store(0, std::memory_order_relaxed);
     g_PacerFrameDrops.store(0, std::memory_order_relaxed);
+    g_FrameExtrapolationActive.store(false, std::memory_order_relaxed);
+    g_FrameExtrapolationOpportunities.store(0, std::memory_order_relaxed);
+    g_FrameExtrapolationAnalysisBusySkips.store(0, std::memory_order_relaxed);
+    g_FrameExtrapolationRejectNoMotion.store(0, std::memory_order_relaxed);
+    g_FrameExtrapolationRejectTiming.store(0, std::memory_order_relaxed);
+    g_FrameExtrapolationRejectGpuBusy.store(0, std::memory_order_relaxed);
+    g_FrameExtrapolationRejectState.store(0, std::memory_order_relaxed);
     g_FrameExtrapolated.store(0, std::memory_order_relaxed);
 }
 
@@ -58,6 +72,41 @@ void noteDecodeUnit(std::uint32_t frameNumber)
 void pacerFrameDrop()
 {
     g_PacerFrameDrops.fetch_add(1, std::memory_order_relaxed);
+}
+
+void setFrameExtrapolationActive(bool active)
+{
+    g_FrameExtrapolationActive.store(active, std::memory_order_relaxed);
+}
+
+void frameExtrapolationOpportunity()
+{
+    g_FrameExtrapolationOpportunities.fetch_add(1, std::memory_order_relaxed);
+}
+
+void frameExtrapolationAnalysisBusySkip()
+{
+    g_FrameExtrapolationAnalysisBusySkips.fetch_add(1, std::memory_order_relaxed);
+}
+
+void frameExtrapolationRejectNoMotion()
+{
+    g_FrameExtrapolationRejectNoMotion.fetch_add(1, std::memory_order_relaxed);
+}
+
+void frameExtrapolationRejectTiming()
+{
+    g_FrameExtrapolationRejectTiming.fetch_add(1, std::memory_order_relaxed);
+}
+
+void frameExtrapolationRejectGpuBusy()
+{
+    g_FrameExtrapolationRejectGpuBusy.fetch_add(1, std::memory_order_relaxed);
+}
+
+void frameExtrapolationRejectState()
+{
+    g_FrameExtrapolationRejectState.fetch_add(1, std::memory_order_relaxed);
 }
 
 void frameExtrapolated()
@@ -96,7 +145,9 @@ void formatOverlayLines(char* output, std::size_t length)
                   "  FEC frames: recovered %u | failed %u | success %s\n"
                   "  Network frame drops: %llu\n"
                   "  Pacer frame drops: %llu\n"
-                  "  Frame extrapolated: %llu",
+                  "Frame extrapolation: %s | presented %llu\n"
+                  "  opportunities %llu | analysis busy skips %llu\n"
+                  "  rejects: no motion %llu | timing %llu | GPU busy %llu | state %llu",
                   recoveredFrames,
                   failedFrames,
                   success,
@@ -104,8 +155,21 @@ void formatOverlayLines(char* output, std::size_t length)
                       g_NetworkFrameDrops.load(std::memory_order_relaxed)),
                   static_cast<unsigned long long>(
                       g_PacerFrameDrops.load(std::memory_order_relaxed)),
+                  g_FrameExtrapolationActive.load(std::memory_order_relaxed) ? "active" : "inactive",
                   static_cast<unsigned long long>(
-                      g_FrameExtrapolated.load(std::memory_order_relaxed)));
+                      g_FrameExtrapolated.load(std::memory_order_relaxed)),
+                  static_cast<unsigned long long>(
+                      g_FrameExtrapolationOpportunities.load(std::memory_order_relaxed)),
+                  static_cast<unsigned long long>(
+                      g_FrameExtrapolationAnalysisBusySkips.load(std::memory_order_relaxed)),
+                  static_cast<unsigned long long>(
+                      g_FrameExtrapolationRejectNoMotion.load(std::memory_order_relaxed)),
+                  static_cast<unsigned long long>(
+                      g_FrameExtrapolationRejectTiming.load(std::memory_order_relaxed)),
+                  static_cast<unsigned long long>(
+                      g_FrameExtrapolationRejectGpuBusy.load(std::memory_order_relaxed)),
+                  static_cast<unsigned long long>(
+                      g_FrameExtrapolationRejectState.load(std::memory_order_relaxed)));
 #if defined(Q_OS_LINUX)
     if (GameModeControl::isEnabledFast()) {
         const std::size_t used = std::strlen(output);
