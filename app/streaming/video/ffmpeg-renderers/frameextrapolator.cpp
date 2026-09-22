@@ -7,6 +7,48 @@
 
 #include <libplacebo/shaders/custom.h>
 
+namespace {
+
+class FrameAcquireGuard
+{
+public:
+    FrameAcquireGuard(pl_gpu gpu, pl_frame& frame) :
+        m_Gpu(gpu),
+        m_Frame(&frame)
+    {
+        if (frame.acquire == nullptr) {
+            m_Ok = true;
+            return;
+        }
+
+        // A frame that needs explicit acquisition must also provide the
+        // matching release callback so ownership can be returned safely.
+        if (frame.release == nullptr) {
+            return;
+        }
+
+        m_Ok = frame.acquire(gpu, &frame);
+        m_NeedsRelease = m_Ok;
+    }
+
+    ~FrameAcquireGuard()
+    {
+        if (m_NeedsRelease) {
+            m_Frame->release(m_Gpu, m_Frame);
+        }
+    }
+
+    bool ok() const { return m_Ok; }
+
+private:
+    pl_gpu m_Gpu = nullptr;
+    pl_frame* m_Frame = nullptr;
+    bool m_Ok = false;
+    bool m_NeedsRelease = false;
+};
+
+}
+
 FrameExtrapolator::FrameExtrapolator(pl_log log, pl_gpu gpu) :
     m_Log(log),
     m_Gpu(gpu)
@@ -37,8 +79,8 @@ bool FrameExtrapolator::createTexture(pl_tex* texture, int width, int height, in
 {
     // Three-component storage images are not universally available, so use
     // RGBA for three-component video planes while preserving pl_plane metadata.
-    // These textures are compute/storage resources only. Requiring renderable
-    // formats here caused startup crashes on the RDNA3 Vulkan path.
+    // Custom compute writes these through PL_DESC_STORAGE_IMG, so renderable
+    // capability is neither required nor requested.
     const int storageComponents = components == 3 ? 4 : components;
     const enum pl_fmt_caps caps = (enum pl_fmt_caps)
             (PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_LINEAR | PL_FMT_CAP_STORABLE);
@@ -184,10 +226,10 @@ bool FrameExtrapolator::runCompute(pl_tex target,
         return false;
     }
 
-    // pl_dispatch_finish() in our pinned libplacebo revision rejects every
-    // non-renderable target before it reaches the compute path. Keep these
-    // analysis textures storable-only and make the destination an explicit
-    // storage-image side effect instead, then dispatch with pl_dispatch_compute().
+    // Mirror libplacebo's own side-effect compute pattern: the destination is
+    // an explicit storage image and the shader has no conventional color
+    // output. pl_dispatch_compute() then dispatches the shader without a render
+    // target while libplacebo owns all Vulkan layout/barrier transitions.
     pl_shader_desc computeDescriptors[4] = {};
     for (int i = 0; i < descriptorCount; ++i) {
         computeDescriptors[i] = descriptors[i];
@@ -197,15 +239,17 @@ bool FrameExtrapolator::runCompute(pl_tex target,
     computeDescriptors[descriptorCount].desc.access = PL_DESC_ACCESS_WRITEONLY;
     computeDescriptors[descriptorCount].binding.object = (void*)target;
 
-    // Keep existing shader bodies unchanged. They produce `color`; this small
-    // stack wrapper stores it explicitly. The bounds guard is required because
-    // compute workgroup dimensions are rounded up by libplacebo.
+    // Existing pass bodies calculate into `color`. Declare it explicitly,
+    // then make imageStore() the only observable output. The bounds guard is
+    // required because libplacebo rounds compute workgroups up to cover the
+    // requested width and height.
     char wrappedBody[16384];
     const int wrappedLength = std::snprintf(
                 wrappedBody,
                 sizeof(wrappedBody),
                 "ivec2 output_pos = ivec2(gl_GlobalInvocationID.xy);\n"
                 "if (all(lessThan(output_pos, imageSize(out_image)))) {\n"
+                "vec4 color = vec4(0.0);\n"
                 "%s\n"
                 "imageStore(out_image, output_pos, color);\n"
                 "}\n",
@@ -220,7 +264,7 @@ bool FrameExtrapolator::runCompute(pl_tex target,
     params.header = header;
     params.body = wrappedBody;
     params.input = PL_SHADER_SIG_NONE;
-    params.output = PL_SHADER_SIG_COLOR;
+    params.output = PL_SHADER_SIG_NONE;
     params.descriptors = computeDescriptors;
     params.num_descriptors = descriptorCount + 1;
     params.variables = variables;
@@ -228,8 +272,6 @@ bool FrameExtrapolator::runCompute(pl_tex target,
     params.compute = true;
     params.compute_group_size[0] = groupSizeX;
     params.compute_group_size[1] = groupSizeY;
-    params.output_w = target->params.w;
-    params.output_h = target->params.h;
 
     if (!pl_shader_custom(shader, &params)) {
         // pl_dispatch_begin() transfers an active shader to the caller. If
@@ -511,9 +553,18 @@ bool FrameExtrapolator::dispatchWarp(pl_tex source, pl_tex target, float alpha)
 }
 
 bool FrameExtrapolator::submitRealFrame(const AVFrame* frame,
-                                        const pl_frame& mappedFrame,
+                                        pl_frame& mappedFrame,
                                         uint64_t renderTimeUs)
 {
+    // pl_render_image() has already released a mapped Vulkan AVFrame by the
+    // time this post-render analysis runs. Re-acquire it before directly
+    // sampling its textures so FFmpeg/libplacebo semaphore and layout ownership
+    // remains correct. DRM PRIME/VAAPI mappings have no callback and are no-op.
+    FrameAcquireGuard frameGuard(m_Gpu, mappedFrame);
+    if (!frameGuard.ok()) {
+        return false;
+    }
+
     if (!ensureResources(mappedFrame)) {
         return false;
     }
@@ -698,13 +749,22 @@ bool FrameExtrapolator::canExtrapolate(uint64_t targetTimeUs,
     return true;
 }
 
-bool FrameExtrapolator::buildSyntheticFrame(const pl_frame& currentFrame,
+bool FrameExtrapolator::buildSyntheticFrame(pl_frame& currentFrame,
                                              uint64_t targetTimeUs,
                                              uint64_t frameIntervalUs,
                                              pl_frame* syntheticFrame)
 {
     if (!canExtrapolate(targetTimeUs, frameIntervalUs) ||
             currentFrame.num_planes != m_PlaneCount) {
+        return false;
+    }
+
+    // buildSyntheticFrame() directly samples the mapped real frame during the
+    // warp, so Vulkan-decoded frames need the same FFmpeg/libplacebo ownership
+    // handoff as normal rendering. release() semaphore-orders ownership back
+    // only after the queued warp reads have completed; no CPU wait is added.
+    FrameAcquireGuard frameGuard(m_Gpu, currentFrame);
+    if (!frameGuard.ok()) {
         return false;
     }
 
@@ -737,6 +797,14 @@ bool FrameExtrapolator::buildSyntheticFrame(const pl_frame& currentFrame,
     for (int i = 0; i < syntheticFrame->num_planes; ++i) {
         syntheticFrame->planes[i].texture = m_SyntheticPlanes[i];
     }
+
+    // The synthetic planes are owned wholly by FrameExtrapolator. Do not let
+    // pl_render_image() invoke the real AVFrame's Vulkan acquire/release hooks
+    // against these replacement textures or associate FFmpeg semaphores with
+    // the wrong images.
+    syntheticFrame->acquire = nullptr;
+    syntheticFrame->release = nullptr;
+    syntheticFrame->user_data = nullptr;
 
     return true;
 }
