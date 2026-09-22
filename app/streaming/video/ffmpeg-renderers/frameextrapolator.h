@@ -98,6 +98,7 @@ private:
     pl_tex m_SyntheticPlanes[PL_MAX_PLANES] = {};
 
     int m_HistoryIndex = 0;
+    int m_MotionAgeFrames = 0;
     bool m_HasHistory = false;
     bool m_HasMotion = false;
     bool m_ResourcesReady = false;
