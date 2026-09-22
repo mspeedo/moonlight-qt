@@ -3,6 +3,7 @@
 #if defined(Q_OS_LINUX) && defined(HAVE_LIBPLACEBO_VULKAN)
 
 #include <algorithm>
+#include <cstdio>
 
 #include <libplacebo/shaders/custom.h>
 
@@ -36,12 +37,11 @@ bool FrameExtrapolator::createTexture(pl_tex* texture, int width, int height, in
 {
     // Three-component storage images are not universally available, so use
     // RGBA for three-component video planes while preserving pl_plane metadata.
-    // The pinned libplacebo dispatch path still requires renderable targets even
-    // for compute shaders, so keep both RENDERABLE and STORABLE capabilities.
+    // These textures are compute/storage resources only. Requiring renderable
+    // formats here caused startup crashes on the RDNA3 Vulkan path.
     const int storageComponents = components == 3 ? 4 : components;
     const enum pl_fmt_caps caps = (enum pl_fmt_caps)
-            (PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_LINEAR |
-             PL_FMT_CAP_STORABLE | PL_FMT_CAP_RENDERABLE);
+            (PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_LINEAR | PL_FMT_CAP_STORABLE);
     pl_fmt format = pl_find_fmt(m_Gpu, PL_FMT_FLOAT, storageComponents, 16, 0, caps);
     if (format == nullptr) {
         return false;
@@ -52,7 +52,6 @@ bool FrameExtrapolator::createTexture(pl_tex* texture, int width, int height, in
     params.h = height;
     params.format = format;
     params.sampleable = true;
-    params.renderable = true;
     params.storable = true;
 
     *texture = pl_tex_create(m_Gpu, &params);
@@ -175,19 +174,55 @@ bool FrameExtrapolator::runCompute(pl_tex target,
                                    int groupSizeX,
                                    int groupSizeY)
 {
+    if (target == nullptr || !target->params.storable ||
+            descriptorCount < 0 || descriptorCount > 3) {
+        return false;
+    }
+
     pl_shader shader = pl_dispatch_begin(m_Dispatch);
     if (shader == nullptr) {
+        return false;
+    }
+
+    // pl_dispatch_finish() in our pinned libplacebo revision rejects every
+    // non-renderable target before it reaches the compute path. Keep these
+    // analysis textures storable-only and make the destination an explicit
+    // storage-image side effect instead, then dispatch with pl_dispatch_compute().
+    pl_shader_desc computeDescriptors[4] = {};
+    for (int i = 0; i < descriptorCount; ++i) {
+        computeDescriptors[i] = descriptors[i];
+    }
+    computeDescriptors[descriptorCount].desc.name = "out_image";
+    computeDescriptors[descriptorCount].desc.type = PL_DESC_STORAGE_IMG;
+    computeDescriptors[descriptorCount].desc.access = PL_DESC_ACCESS_WRITEONLY;
+    computeDescriptors[descriptorCount].binding.object = (void*)target;
+
+    // Keep existing shader bodies unchanged. They produce `color`; this small
+    // stack wrapper stores it explicitly. The bounds guard is required because
+    // compute workgroup dimensions are rounded up by libplacebo.
+    char wrappedBody[16384];
+    const int wrappedLength = std::snprintf(
+                wrappedBody,
+                sizeof(wrappedBody),
+                "ivec2 output_pos = ivec2(gl_GlobalInvocationID.xy);\n"
+                "if (all(lessThan(output_pos, imageSize(out_image)))) {\n"
+                "%s\n"
+                "imageStore(out_image, output_pos, color);\n"
+                "}\n",
+                body != nullptr ? body : "");
+    if (wrappedLength < 0 || wrappedLength >= (int)sizeof(wrappedBody)) {
+        pl_dispatch_abort(m_Dispatch, &shader);
         return false;
     }
 
     struct pl_custom_shader params = {};
     params.description = description;
     params.header = header;
-    params.body = body;
+    params.body = wrappedBody;
     params.input = PL_SHADER_SIG_NONE;
     params.output = PL_SHADER_SIG_COLOR;
-    params.descriptors = descriptors;
-    params.num_descriptors = descriptorCount;
+    params.descriptors = computeDescriptors;
+    params.num_descriptors = descriptorCount + 1;
     params.variables = variables;
     params.num_variables = variableCount;
     params.compute = true;
@@ -204,10 +239,11 @@ bool FrameExtrapolator::runCompute(pl_tex target,
         return false;
     }
 
-    struct pl_dispatch_params dispatch = {};
+    struct pl_dispatch_compute_params dispatch = {};
     dispatch.shader = &shader;
-    dispatch.target = target;
-    return pl_dispatch_finish(m_Dispatch, &dispatch);
+    dispatch.width = target->params.w;
+    dispatch.height = target->params.h;
+    return pl_dispatch_compute(m_Dispatch, &dispatch);
 }
 
 bool FrameExtrapolator::dispatchDownsample(pl_tex source, pl_tex target, int scale)
