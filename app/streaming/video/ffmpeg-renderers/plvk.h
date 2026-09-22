@@ -50,8 +50,8 @@ public:
     virtual bool prepareDecoderContext(AVCodecContext* context, AVDictionary** options) override;
     virtual void renderFrame(AVFrame* frame) override;
     virtual bool isFrameExtrapolationActive() override;
-    virtual bool canExtrapolateFrame(uint64_t targetTimeUs) override;
-    virtual bool renderExtrapolatedFrame(uint64_t targetTimeUs) override;
+    virtual bool canExtrapolateFrame(uint64_t targetTimeUs, uint64_t frameIntervalUs) override;
+    virtual bool renderExtrapolatedFrame(uint64_t targetTimeUs, uint64_t frameIntervalUs) override;
     virtual bool testRenderFrame(AVFrame* frame) override;
     virtual void waitToRender() override;
     virtual void cleanupRenderContext() override;

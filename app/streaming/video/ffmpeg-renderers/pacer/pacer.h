@@ -7,6 +7,8 @@
 #include <QMutex>
 #include <QWaitCondition>
 
+#include <array>
+
 // The maximum number of frames pacer will ever hold is:
 // - 3 frames in the pacing queue
 // - 1 frame removed from the render queue in the process of rendering
@@ -72,8 +74,12 @@ private:
     bool m_FrameExtrapolationActive = false;
     bool m_SyntheticSinceLastReal = false;
     uint64_t m_LastRealRenderTimeUs = 0;
+    static constexpr int kCadenceHistorySize = 7;
     uint64_t m_NominalFrameIntervalUs = 0;
     uint64_t m_FrameIntervalUs = 0;
+    std::array<uint64_t, kCadenceHistorySize> m_CadenceSamplesUs {};
+    int m_CadenceSampleCount = 0;
+    int m_CadenceSampleIndex = 0;
     int64_t m_LastRealPts = AV_NOPTS_VALUE;
     int64_t m_SyntheticReplacedPts = AV_NOPTS_VALUE;
 

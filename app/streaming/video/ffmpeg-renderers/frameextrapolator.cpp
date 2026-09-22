@@ -3,15 +3,12 @@
 #if defined(Q_OS_LINUX) && defined(HAVE_LIBPLACEBO_VULKAN)
 
 #include <algorithm>
-#include <cmath>
 
 #include <libplacebo/shaders/custom.h>
 
-FrameExtrapolator::FrameExtrapolator(pl_log log, pl_gpu gpu, int streamFps) :
+FrameExtrapolator::FrameExtrapolator(pl_log log, pl_gpu gpu) :
     m_Log(log),
-    m_Gpu(gpu),
-    m_StreamFps(std::max(streamFps, 1)),
-    m_FrameIntervalUs(1000000ULL / std::max(streamFps, 1))
+    m_Gpu(gpu)
 {
 }
 
@@ -480,24 +477,23 @@ bool FrameExtrapolator::submitRealFrame(const AVFrame* frame,
             return false;
         }
 
-        // Normalize displacement when the two rendered real frames are more
-        // than one stream interval apart (for example 100 -> synthetic 101' ->
-        // real 102). Block matching measures the whole temporal gap, while the
-        // next synthetic frame predicts only one interval.
-        m_MotionTimeScale = 1.0f;
-        if (m_LastRealPts != AV_NOPTS_VALUE && frame->pts != AV_NOPTS_VALUE &&
-                frame->pts > m_LastRealPts) {
-            const uint64_t deltaUs = (uint64_t)(frame->pts - m_LastRealPts) *
+        // Record the temporal span represented by this motion field. RTP PTS
+        // is 90 kHz; unsigned subtraction keeps the delta correct across the
+        // 32-bit RTP timestamp wrap. A later synthetic warp scales this motion
+        // to the pacer's current expected interval, so pairs such as 100 -> 102
+        // do not over-project the next frame.
+        m_MotionPairIntervalUs = 0;
+        if (m_LastRealPts != AV_NOPTS_VALUE && frame->pts != AV_NOPTS_VALUE) {
+            const uint32_t deltaPts =
+                    (uint32_t)frame->pts - (uint32_t)m_LastRealPts;
+            const uint64_t deltaUs = (uint64_t)deltaPts *
                     1000000ULL / 90000ULL;
-            if (deltaUs > m_FrameIntervalUs * 5ULL / 2ULL ||
-                    deltaUs < m_FrameIntervalUs / 2ULL) {
-                m_HasMotion = false;
+            if (deltaPts != 0 && deltaUs >= 2000ULL && deltaUs <= 100000ULL) {
+                m_MotionPairIntervalUs = deltaUs;
+                m_HasMotion = true;
             }
             else {
-                m_MotionTimeScale = (float)std::clamp(
-                            (double)m_FrameIntervalUs / (double)deltaUs,
-                            0.4, 1.25);
-                m_HasMotion = true;
+                m_HasMotion = false;
             }
         }
         else {
@@ -513,7 +509,7 @@ bool FrameExtrapolator::submitRealFrame(const AVFrame* frame,
     }
     else {
         m_HasMotion = false;
-        m_MotionTimeScale = 1.0f;
+        m_MotionPairIntervalUs = 0;
     }
 
     m_HistoryIndex = currentIndex;
@@ -531,17 +527,22 @@ bool FrameExtrapolator::submitRealFrame(const AVFrame* frame,
     return true;
 }
 
-bool FrameExtrapolator::canExtrapolate(uint64_t targetTimeUs)
+bool FrameExtrapolator::canExtrapolate(uint64_t targetTimeUs,
+                                        uint64_t frameIntervalUs)
 {
     if (!m_ResourcesReady || !m_HasMotion || m_SyntheticSinceLastReal ||
             m_LatestRealFrame == nullptr || m_LatestRealFrame->width <= 0 ||
-            m_LastRealRenderTimeUs == 0 || targetTimeUs <= m_LastRealRenderTimeUs) {
+            m_LastRealRenderTimeUs == 0 || m_MotionPairIntervalUs == 0 ||
+            frameIntervalUs == 0 || targetTimeUs <= m_LastRealRenderTimeUs) {
         return false;
     }
 
     const uint64_t elapsedUs = targetTimeUs - m_LastRealRenderTimeUs;
-    const double alpha = (double)elapsedUs / (double)m_FrameIntervalUs;
-    if (alpha < 0.75 || alpha > 1.25) {
+    const double predictionAlpha = (double)elapsedUs / (double)frameIntervalUs;
+    const double temporalScale = (double)frameIntervalUs /
+            (double)m_MotionPairIntervalUs;
+    if (predictionAlpha < 0.75 || predictionAlpha > 1.25 ||
+            temporalScale < 0.35 || temporalScale > 1.50) {
         return false;
     }
 
@@ -557,16 +558,22 @@ bool FrameExtrapolator::canExtrapolate(uint64_t targetTimeUs)
 
 bool FrameExtrapolator::buildSyntheticFrame(const pl_frame& currentFrame,
                                              uint64_t targetTimeUs,
+                                             uint64_t frameIntervalUs,
                                              pl_frame* syntheticFrame)
 {
-    if (!canExtrapolate(targetTimeUs) || currentFrame.num_planes != m_PlaneCount) {
+    if (!canExtrapolate(targetTimeUs, frameIntervalUs) ||
+            currentFrame.num_planes != m_PlaneCount) {
         return false;
     }
 
-    const double rawAlpha = (double)(targetTimeUs - m_LastRealRenderTimeUs) /
-            (double)m_FrameIntervalUs;
-    const float alpha = (float)std::clamp(rawAlpha, 0.75, 1.25) *
-            m_MotionTimeScale;
+    const double predictionAlpha =
+            (double)(targetTimeUs - m_LastRealRenderTimeUs) /
+            (double)frameIntervalUs;
+    const double temporalScale =
+            (double)frameIntervalUs / (double)m_MotionPairIntervalUs;
+    const float alpha = (float)(
+            std::clamp(predictionAlpha, 0.75, 1.25) *
+            std::clamp(temporalScale, 0.4, 1.25));
 
     pl_dispatch_reset_frame(m_Dispatch);
 

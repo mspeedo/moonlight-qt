@@ -168,11 +168,11 @@ public:
         return false;
     }
 
-    virtual bool canExtrapolateFrame(uint64_t) {
+    virtual bool canExtrapolateFrame(uint64_t, uint64_t) {
         return false;
     }
 
-    virtual bool renderExtrapolatedFrame(uint64_t) {
+    virtual bool renderExtrapolatedFrame(uint64_t, uint64_t) {
         return false;
     }
 

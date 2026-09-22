@@ -16,7 +16,7 @@ extern "C" {
 class FrameExtrapolator
 {
 public:
-    FrameExtrapolator(pl_log log, pl_gpu gpu, int streamFps);
+    FrameExtrapolator(pl_log log, pl_gpu gpu);
     ~FrameExtrapolator();
 
     bool initialize();
@@ -27,13 +27,16 @@ public:
 
     // Non-blocking readiness check. If analysis is still executing, this returns
     // false so the pacer preserves normal hold/repeat behavior.
-    bool canExtrapolate(uint64_t targetTimeUs);
+    bool canExtrapolate(uint64_t targetTimeUs, uint64_t frameIntervalUs);
 
     const AVFrame* latestRealFrame() const { return m_LatestRealFrame; }
 
     // Produces a YUV-compatible synthetic pl_frame using the current real frame
     // as the source. The returned frame borrows this object's synthetic textures.
-    bool buildSyntheticFrame(const pl_frame& currentFrame, uint64_t targetTimeUs, pl_frame* syntheticFrame);
+    bool buildSyntheticFrame(const pl_frame& currentFrame,
+                             uint64_t targetTimeUs,
+                             uint64_t frameIntervalUs,
+                             pl_frame* syntheticFrame);
 
     void markSyntheticPresented() { m_SyntheticSinceLastReal = true; }
 
@@ -64,11 +67,9 @@ private:
     pl_dispatch m_Dispatch = nullptr;
     AVFrame* m_LatestRealFrame = nullptr;
 
-    int m_StreamFps;
-    uint64_t m_FrameIntervalUs;
     uint64_t m_LastRealRenderTimeUs = 0;
     int64_t m_LastRealPts = AV_NOPTS_VALUE;
-    float m_MotionTimeScale = 1.0f;
+    uint64_t m_MotionPairIntervalUs = 0;
 
     int m_SourceWidth = 0;
     int m_SourceHeight = 0;

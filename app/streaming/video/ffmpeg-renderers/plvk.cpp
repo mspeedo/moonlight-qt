@@ -560,7 +560,7 @@ bool PlVkRenderer::initialize(PDECODER_PARAMETERS params)
     if (params->enableFrameExtrapolation && !params->testOnly &&
             !params->enableVsync && !params->enableFramePacing) {
         m_FrameExtrapolator = std::make_unique<FrameExtrapolator>(
-                    m_Log, m_Vulkan->gpu, params->frameRate);
+                    m_Log, m_Vulkan->gpu);
         if (!m_FrameExtrapolator->initialize()) {
             SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                         "Frame extrapolation initialization failed; continuing without it");
@@ -1211,22 +1211,25 @@ bool PlVkRenderer::isFrameExtrapolationActive()
 #endif
 }
 
-bool PlVkRenderer::canExtrapolateFrame(uint64_t targetTimeUs)
+bool PlVkRenderer::canExtrapolateFrame(uint64_t targetTimeUs,
+                                        uint64_t frameIntervalUs)
 {
 #if defined(Q_OS_LINUX)
     return m_HasPendingSwapchainFrame &&
             m_FrameExtrapolator != nullptr &&
-            m_FrameExtrapolator->canExtrapolate(targetTimeUs);
+            m_FrameExtrapolator->canExtrapolate(targetTimeUs, frameIntervalUs);
 #else
     Q_UNUSED(targetTimeUs)
+    Q_UNUSED(frameIntervalUs)
     return false;
 #endif
 }
 
-bool PlVkRenderer::renderExtrapolatedFrame(uint64_t targetTimeUs)
+bool PlVkRenderer::renderExtrapolatedFrame(uint64_t targetTimeUs,
+                                           uint64_t frameIntervalUs)
 {
 #if defined(Q_OS_LINUX)
-    if (!canExtrapolateFrame(targetTimeUs)) {
+    if (!canExtrapolateFrame(targetTimeUs, frameIntervalUs)) {
         return false;
     }
 
@@ -1240,6 +1243,7 @@ bool PlVkRenderer::renderExtrapolatedFrame(uint64_t targetTimeUs)
     pl_frame syntheticFrame;
     if (!m_FrameExtrapolator->buildSyntheticFrame(mappedFrame,
                                                     targetTimeUs,
+                                                    frameIntervalUs,
                                                     &syntheticFrame)) {
         unmapAvFrameFromPlacebo(latestRealFrame, &mappedFrame);
         return false;
@@ -1255,6 +1259,7 @@ bool PlVkRenderer::renderExtrapolatedFrame(uint64_t targetTimeUs)
     return submitted;
 #else
     Q_UNUSED(targetTimeUs)
+    Q_UNUSED(frameIntervalUs)
     return false;
 #endif
 }

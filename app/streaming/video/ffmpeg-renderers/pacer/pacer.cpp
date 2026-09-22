@@ -14,6 +14,8 @@
 
 #include <SDL_syswm.h>
 
+#include <algorithm>
+
 // Limit the number of queued frames to prevent excessive memory consumption
 // if the V-Sync source or renderer is blocked for a while. It's important
 // that the sum of all queued frames between both pacing and rendering queues
@@ -162,7 +164,8 @@ int Pacer::renderThread(void* context)
         while (!me->m_Stopping && me->m_RenderQueue.isEmpty()) {
             if (me->m_FrameExtrapolationActive &&
                     !me->m_SyntheticSinceLastReal &&
-                    me->m_LastRealRenderTimeUs != 0) {
+                    me->m_LastRealRenderTimeUs != 0 &&
+                    me->m_CadenceSampleCount >= 3) {
                 extrapolationTargetUs = me->m_LastRealRenderTimeUs + me->m_FrameIntervalUs;
                 const uint64_t nowUs = LiGetMicroseconds();
                 if (nowUs >= extrapolationTargetUs) {
@@ -192,15 +195,19 @@ int Pacer::renderThread(void* context)
             const bool deadlineStillUseful =
                     requestUs <= extrapolationTargetUs + me->m_FrameIntervalUs / 4ULL;
             const bool extrapolated = deadlineStillUseful &&
-                    me->m_VsyncRenderer->canExtrapolateFrame(extrapolationTargetUs) &&
-                    me->m_VsyncRenderer->renderExtrapolatedFrame(extrapolationTargetUs);
+                    me->m_VsyncRenderer->canExtrapolateFrame(
+                            extrapolationTargetUs, me->m_FrameIntervalUs) &&
+                    me->m_VsyncRenderer->renderExtrapolatedFrame(
+                            extrapolationTargetUs, me->m_FrameIntervalUs);
             if (extrapolated) {
                 me->m_SyntheticSinceLastReal = true;
                 if (me->m_LastRealPts != AV_NOPTS_VALUE) {
                     const int64_t intervalPts = (int64_t)
                             ((me->m_FrameIntervalUs * 90000ULL + 500000ULL) / 1000000ULL);
-                    me->m_SyntheticReplacedPts = me->m_LastRealPts +
-                            (intervalPts > 0 ? intervalPts : 1);
+                    const uint32_t replacedPts =
+                            (uint32_t)me->m_LastRealPts +
+                            (uint32_t)(intervalPts > 0 ? intervalPts : 1);
+                    me->m_SyntheticReplacedPts = (int64_t)replacedPts;
                 }
                 else {
                     me->m_SyntheticReplacedPts = AV_NOPTS_VALUE;
@@ -249,15 +256,19 @@ int Pacer::renderThread(void* context)
                     me->m_SyntheticSinceLastReal &&
                     me->m_SyntheticReplacedPts != AV_NOPTS_VALUE) {
                 AVFrame* candidate = me->m_RenderQueue.head();
-                if (candidate->pts != AV_NOPTS_VALUE &&
-                        candidate->pts <= me->m_SyntheticReplacedPts + 2) {
-                    AVFrame* replacedFrame = me->m_RenderQueue.dequeue();
-                    me->m_FrameQueueLock.unlock();
-                    av_frame_free(&replacedFrame);
-                    me->m_VideoStats->pacerDroppedFrames++;
-                    StreamPipelineTelemetry::pacerDrop();
-                    me->m_FrameQueueLock.lock();
-                    continue;
+                if (candidate->pts != AV_NOPTS_VALUE) {
+                    const int32_t ptsOffset = (int32_t)(
+                            (uint32_t)candidate->pts -
+                            (uint32_t)me->m_SyntheticReplacedPts);
+                    if (ptsOffset <= 2) {
+                        AVFrame* replacedFrame = me->m_RenderQueue.dequeue();
+                        me->m_FrameQueueLock.unlock();
+                        av_frame_free(&replacedFrame);
+                        me->m_VideoStats->pacerDroppedFrames++;
+                        StreamPipelineTelemetry::pacerDrop();
+                        me->m_FrameQueueLock.lock();
+                        continue;
+                    }
                 }
             }
 
@@ -455,17 +466,29 @@ void Pacer::renderFrame(AVFrame* frame)
     m_VideoStats->totalPacerTimeUs += (beforeRender - (uint64_t)frame->pkt_dts);
 
     if (m_FrameExtrapolationActive) {
-        // Use decoded RTP PTS (90 kHz) to gently track real stream cadence,
-        // but ignore multi-frame gaps so a hitch cannot stretch the next
-        // extrapolation deadline. The configured FPS remains the baseline.
+        // Track actual decoded stream cadence from RTP PTS rather than assuming
+        // configured FPS. A fixed-size median rejects isolated doubled gaps
+        // caused by hitches or by dropping the real frame replaced by a
+        // synthetic one. Unsigned subtraction handles 32-bit RTP wrap.
         if (frame->pts != AV_NOPTS_VALUE &&
-                m_LastRealPts != AV_NOPTS_VALUE &&
-                frame->pts > m_LastRealPts) {
-            const uint64_t ptsDeltaUs = (uint64_t)(frame->pts - m_LastRealPts) *
+                m_LastRealPts != AV_NOPTS_VALUE) {
+            const uint32_t deltaPts =
+                    (uint32_t)frame->pts - (uint32_t)m_LastRealPts;
+            const uint64_t ptsDeltaUs = (uint64_t)deltaPts *
                     1000000ULL / 90000ULL;
-            if (ptsDeltaUs >= m_NominalFrameIntervalUs * 3ULL / 4ULL &&
-                    ptsDeltaUs <= m_NominalFrameIntervalUs * 5ULL / 4ULL) {
-                m_FrameIntervalUs = (m_FrameIntervalUs * 7ULL + ptsDeltaUs) / 8ULL;
+            if (deltaPts != 0 && ptsDeltaUs >= 2000ULL && ptsDeltaUs <= 100000ULL) {
+                m_CadenceSamplesUs[m_CadenceSampleIndex] = ptsDeltaUs;
+                m_CadenceSampleIndex =
+                        (m_CadenceSampleIndex + 1) % kCadenceHistorySize;
+                m_CadenceSampleCount =
+                        SDL_min(m_CadenceSampleCount + 1, kCadenceHistorySize);
+
+                std::array<uint64_t, kCadenceHistorySize> sorted =
+                        m_CadenceSamplesUs;
+                std::sort(sorted.begin(),
+                          sorted.begin() + m_CadenceSampleCount);
+                m_FrameIntervalUs =
+                        sorted[(m_CadenceSampleCount - 1) / 2];
             }
         }
 
