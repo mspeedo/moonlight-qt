@@ -26,6 +26,7 @@ std::atomic<std::uint64_t> g_PacerFrameDrops { 0 };
 // so a single boolean can be cleared by a discarded candidate even while the
 // selected extrapolator is still alive.
 std::atomic<int> g_FrameExtrapolationActiveInstances { 0 };
+std::atomic<std::uint64_t> g_FrameExtrapolationDeadlineMisses { 0 };
 std::atomic<std::uint64_t> g_FrameExtrapolationOpportunities { 0 };
 std::atomic<std::uint64_t> g_FrameExtrapolationAnalysisBusySkips { 0 };
 std::atomic<std::uint64_t> g_FrameExtrapolationRejectNoMotion { 0 };
@@ -43,6 +44,7 @@ void reset()
     g_PacerFrameDrops.store(0, std::memory_order_relaxed);
     // Do not reset g_FrameExtrapolationActiveInstances here. Extrapolator
     // lifetime is independent of OSD/session-counter reset ordering.
+    g_FrameExtrapolationDeadlineMisses.store(0, std::memory_order_relaxed);
     g_FrameExtrapolationOpportunities.store(0, std::memory_order_relaxed);
     g_FrameExtrapolationAnalysisBusySkips.store(0, std::memory_order_relaxed);
     g_FrameExtrapolationRejectNoMotion.store(0, std::memory_order_relaxed);
@@ -96,6 +98,11 @@ void setFrameExtrapolationActive(bool active)
                    std::memory_order_relaxed,
                    std::memory_order_relaxed)) {
     }
+}
+
+void frameExtrapolationDeadlineMiss()
+{
+    g_FrameExtrapolationDeadlineMisses.fetch_add(1, std::memory_order_relaxed);
 }
 
 void frameExtrapolationOpportunity()
@@ -168,7 +175,7 @@ void formatOverlayLines(char* output, std::size_t length)
                   "  Network frame drops: %llu\n"
                   "  Pacer frame drops: %llu\n"
                   "Frame extrapolation: %s | presented %llu\n"
-                  "  opportunities %llu | analysis busy skips %llu\n"
+                  "  deadline misses %llu | opportunities %llu | analysis busy skips %llu\n"
                   "  rejects: no motion %llu | timing %llu | GPU busy %llu | state %llu",
                   recoveredFrames,
                   failedFrames,
@@ -180,6 +187,8 @@ void formatOverlayLines(char* output, std::size_t length)
                   activeExtrapolators > 0 ? "active" : "inactive",
                   static_cast<unsigned long long>(
                       g_FrameExtrapolated.load(std::memory_order_relaxed)),
+                  static_cast<unsigned long long>(
+                      g_FrameExtrapolationDeadlineMisses.load(std::memory_order_relaxed)),
                   static_cast<unsigned long long>(
                       g_FrameExtrapolationOpportunities.load(std::memory_order_relaxed)),
                   static_cast<unsigned long long>(
