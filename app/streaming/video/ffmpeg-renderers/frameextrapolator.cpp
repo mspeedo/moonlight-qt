@@ -34,8 +34,7 @@ bool FrameExtrapolator::createTexture(pl_tex* texture, int width, int height, in
     // RGBA for three-component video planes while preserving pl_plane metadata.
     const int storageComponents = components == 3 ? 4 : components;
     const enum pl_fmt_caps caps = (enum pl_fmt_caps)
-            (PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_LINEAR |
-             PL_FMT_CAP_STORABLE | PL_FMT_CAP_RENDERABLE);
+            (PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_LINEAR | PL_FMT_CAP_STORABLE);
     pl_fmt format = pl_find_fmt(m_Gpu, PL_FMT_FLOAT, storageComponents, 16, 0, caps);
     if (format == nullptr) {
         return false;
@@ -46,7 +45,6 @@ bool FrameExtrapolator::createTexture(pl_tex* texture, int width, int height, in
     params.h = height;
     params.format = format;
     params.sampleable = true;
-    params.renderable = true;
     params.storable = true;
 
     *texture = pl_tex_create(m_Gpu, &params);
@@ -184,8 +182,14 @@ bool FrameExtrapolator::runCompute(pl_tex target,
     params.compute = true;
     params.compute_group_size[0] = groupSizeX;
     params.compute_group_size[1] = groupSizeY;
+    params.output_w = target->params.w;
+    params.output_h = target->params.h;
 
     if (!pl_shader_custom(shader, &params)) {
+        // pl_dispatch_begin() transfers an active shader to the caller. If
+        // shader construction fails, return it explicitly instead of leaking
+        // an unfinished dispatch object into the next frame.
+        pl_dispatch_abort(m_Dispatch, &shader);
         return false;
     }
 
@@ -289,22 +293,31 @@ bool FrameExtrapolator::dispatchCoarseMotion(pl_tex current, pl_tex previous)
         ivec2 bestVector = ivec2(0);
 
         // Backward vector convention: for a current-frame block at p, v points
-        // to the matching location p+v in the previous frame.
-        for (int dy = -8; dy <= 8; ++dy) {
-            for (int dx = -8; dx <= 8; ++dx) {
-                ivec2 candidate = ivec2(dx, dy);
-                float sad = 0.0;
-                for (int by = 0; by < 4; ++by) {
-                    for (int bx = 0; bx < 4; ++bx) {
-                        ivec2 cp = clamp(base + ivec2(bx, by), ivec2(0), size - ivec2(1));
-                        ivec2 pp = clamp(cp + candidate, ivec2(0), size - ivec2(1));
-                        sad += abs(texelFetch(current_luma, cp, 0).r -
-                                   texelFetch(previous_luma, pp, 0).r);
+        // to the matching location p+v in the previous frame. Search the full
+        // +/-8 range hierarchically instead of evaluating all 17x17 offsets.
+        // This keeps the same maximum displacement while reducing the coarse
+        // pass from 289 candidate SADs per block to at most 36.
+        for (int level = 0; level < 4; ++level) {
+            int step = level == 0 ? 8 : (level == 1 ? 4 : (level == 2 ? 2 : 1));
+            ivec2 center = bestVector;
+
+            for (int dy = -1; dy <= 1; ++dy) {
+                for (int dx = -1; dx <= 1; ++dx) {
+                    ivec2 candidate = clamp(center + ivec2(dx, dy) * step,
+                                            ivec2(-8), ivec2(8));
+                    float sad = 0.0;
+                    for (int by = 0; by < 4; ++by) {
+                        for (int bx = 0; bx < 4; ++bx) {
+                            ivec2 cp = clamp(base + ivec2(bx, by), ivec2(0), size - ivec2(1));
+                            ivec2 pp = clamp(cp + candidate, ivec2(0), size - ivec2(1));
+                            sad += abs(texelFetch(current_luma, cp, 0).r -
+                                       texelFetch(previous_luma, pp, 0).r);
+                        }
                     }
-                }
-                if (sad < bestCost) {
-                    bestCost = sad;
-                    bestVector = candidate;
+                    if (sad < bestCost) {
+                        bestCost = sad;
+                        bestVector = candidate;
+                    }
                 }
             }
         }
@@ -458,9 +471,38 @@ bool FrameExtrapolator::submitRealFrame(const AVFrame* frame,
         return false;
     }
 
+    const int currentIndex = m_HasHistory ? 1 - m_HistoryIndex : 0;
+
+    // Never build a queue of analysis work behind presentation. If any of the
+    // reusable analysis resources are still busy, skip this frame's analysis
+    // completely. This preserves the latest real AVFrame for future use but
+    // deliberately invalidates motion until a fresh pair has completed.
+    if (m_HasHistory &&
+            (pl_tex_poll(m_Gpu, m_FineLuma[m_HistoryIndex], 0) ||
+             pl_tex_poll(m_Gpu, m_CoarseLuma[m_HistoryIndex], 0) ||
+             pl_tex_poll(m_Gpu, m_FineLuma[currentIndex], 0) ||
+             pl_tex_poll(m_Gpu, m_CoarseLuma[currentIndex], 0) ||
+             pl_tex_poll(m_Gpu, m_CoarseMotion, 0) ||
+             pl_tex_poll(m_Gpu, m_FineMotion, 0) ||
+             pl_tex_poll(m_Gpu, m_SceneMetric, 0))) {
+        m_HasMotion = false;
+        m_MotionPairIntervalUs = 0;
+        m_LastRealRenderTimeUs = renderTimeUs;
+        m_SyntheticSinceLastReal = false;
+
+        av_frame_unref(m_LatestRealFrame);
+        if (av_frame_ref(m_LatestRealFrame, frame) < 0) {
+            return false;
+        }
+
+        // Keep m_LastRealPts and m_HistoryIndex pointing at the last frame that
+        // actually entered the GPU history. The next successful analysis may
+        // therefore span multiple RTP intervals and will normalize that span.
+        return true;
+    }
+
     pl_dispatch_reset_frame(m_Dispatch);
 
-    const int currentIndex = m_HasHistory ? 1 - m_HistoryIndex : 0;
     pl_tex luma = mappedFrame.planes[0].texture;
 
     if (!dispatchDownsample(luma, m_FineLuma[currentIndex], 4) ||
