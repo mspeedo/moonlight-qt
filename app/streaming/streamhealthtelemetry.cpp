@@ -21,7 +21,11 @@ namespace {
 std::atomic<std::uint32_t> g_LastDecodeUnitFrameNumber { 0 };
 std::atomic<std::uint64_t> g_NetworkFrameDrops { 0 };
 std::atomic<std::uint64_t> g_PacerFrameDrops { 0 };
-std::atomic<bool> g_FrameExtrapolationActive { false };
+// This is lifecycle state, not a session counter. Moonlight may construct and
+// destroy multiple Vulkan renderer candidates while selecting the live decoder,
+// so a single boolean can be cleared by a discarded candidate even while the
+// selected extrapolator is still alive.
+std::atomic<int> g_FrameExtrapolationActiveInstances { 0 };
 std::atomic<std::uint64_t> g_FrameExtrapolationOpportunities { 0 };
 std::atomic<std::uint64_t> g_FrameExtrapolationAnalysisBusySkips { 0 };
 std::atomic<std::uint64_t> g_FrameExtrapolationRejectNoMotion { 0 };
@@ -37,7 +41,8 @@ void reset()
     g_LastDecodeUnitFrameNumber.store(0, std::memory_order_relaxed);
     g_NetworkFrameDrops.store(0, std::memory_order_relaxed);
     g_PacerFrameDrops.store(0, std::memory_order_relaxed);
-    g_FrameExtrapolationActive.store(false, std::memory_order_relaxed);
+    // Do not reset g_FrameExtrapolationActiveInstances here. Extrapolator
+    // lifetime is independent of OSD/session-counter reset ordering.
     g_FrameExtrapolationOpportunities.store(0, std::memory_order_relaxed);
     g_FrameExtrapolationAnalysisBusySkips.store(0, std::memory_order_relaxed);
     g_FrameExtrapolationRejectNoMotion.store(0, std::memory_order_relaxed);
@@ -76,7 +81,21 @@ void pacerFrameDrop()
 
 void setFrameExtrapolationActive(bool active)
 {
-    g_FrameExtrapolationActive.store(active, std::memory_order_relaxed);
+    if (active) {
+        g_FrameExtrapolationActiveInstances.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+
+    // Clamp at zero so an unusual teardown/reset ordering can never underflow
+    // the diagnostic state and make a later live instance appear active forever.
+    int count = g_FrameExtrapolationActiveInstances.load(std::memory_order_relaxed);
+    while (count > 0 &&
+           !g_FrameExtrapolationActiveInstances.compare_exchange_weak(
+                   count,
+                   count - 1,
+                   std::memory_order_relaxed,
+                   std::memory_order_relaxed)) {
+    }
 }
 
 void frameExtrapolationOpportunity()
@@ -139,6 +158,9 @@ void formatOverlayLines(char* output, std::size_t length)
         std::snprintf(success, sizeof(success), "N/A");
     }
 
+    const int activeExtrapolators =
+            g_FrameExtrapolationActiveInstances.load(std::memory_order_relaxed);
+
     std::snprintf(output,
                   length,
                   "Stream health\n"
@@ -155,7 +177,7 @@ void formatOverlayLines(char* output, std::size_t length)
                       g_NetworkFrameDrops.load(std::memory_order_relaxed)),
                   static_cast<unsigned long long>(
                       g_PacerFrameDrops.load(std::memory_order_relaxed)),
-                  g_FrameExtrapolationActive.load(std::memory_order_relaxed) ? "active" : "inactive",
+                  activeExtrapolators > 0 ? "active" : "inactive",
                   static_cast<unsigned long long>(
                       g_FrameExtrapolated.load(std::memory_order_relaxed)),
                   static_cast<unsigned long long>(
