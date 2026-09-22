@@ -25,7 +25,7 @@ public:
 
     // Queues reduced-resolution analysis for a real frame. This never waits for
     // the GPU; libplacebo tracks the resource dependencies between dispatches.
-    bool submitRealFrame(const AVFrame* frame, const pl_frame& mappedFrame, uint64_t renderTimeUs);
+    bool submitRealFrame(const AVFrame* frame, pl_frame& mappedFrame, uint64_t renderTimeUs);
 
     // Non-blocking readiness check. If analysis is still executing, this returns
     // false so the pacer preserves normal hold/repeat behavior.
@@ -35,7 +35,7 @@ public:
 
     // Produces a YUV-compatible synthetic pl_frame using the current real frame
     // as the source. The returned frame borrows this object's synthetic textures.
-    bool buildSyntheticFrame(const pl_frame& currentFrame,
+    bool buildSyntheticFrame(pl_frame& currentFrame,
                              uint64_t targetTimeUs,
                              uint64_t frameIntervalUs,
                              pl_frame* syntheticFrame);
