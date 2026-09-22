@@ -14,6 +14,8 @@ FrameExtrapolator::FrameExtrapolator(pl_log log, pl_gpu gpu) :
 
 FrameExtrapolator::~FrameExtrapolator()
 {
+    StreamHealthTelemetry::setFrameExtrapolationActive(false);
+
     // Destroy GPU resources before releasing the decoded surface reference.
     // pl_tex_destroy() handles any outstanding GPU use of these resources.
     destroyResources();
@@ -25,7 +27,9 @@ bool FrameExtrapolator::initialize()
 {
     m_Dispatch = pl_dispatch_create(m_Log, m_Gpu);
     m_LatestRealFrame = av_frame_alloc();
-    return m_Dispatch != nullptr && m_LatestRealFrame != nullptr;
+    const bool initialized = m_Dispatch != nullptr && m_LatestRealFrame != nullptr;
+    StreamHealthTelemetry::setFrameExtrapolationActive(initialized);
+    return initialized;
 }
 
 bool FrameExtrapolator::createTexture(pl_tex* texture, int width, int height, int components)
@@ -485,6 +489,7 @@ bool FrameExtrapolator::submitRealFrame(const AVFrame* frame,
              pl_tex_poll(m_Gpu, m_CoarseMotion, 0) ||
              pl_tex_poll(m_Gpu, m_FineMotion, 0) ||
              pl_tex_poll(m_Gpu, m_SceneMetric, 0))) {
+        StreamHealthTelemetry::frameExtrapolationAnalysisBusySkip();
         m_HasMotion = false;
         m_MotionPairIntervalUs = 0;
         m_LastRealRenderTimeUs = renderTimeUs;
@@ -572,10 +577,26 @@ bool FrameExtrapolator::submitRealFrame(const AVFrame* frame,
 bool FrameExtrapolator::canExtrapolate(uint64_t targetTimeUs,
                                         uint64_t frameIntervalUs)
 {
-    if (!m_ResourcesReady || !m_HasMotion || m_SyntheticSinceLastReal ||
+    const bool firstCheckForTarget = targetTimeUs != m_LastTelemetryTargetUs;
+    if (firstCheckForTarget) {
+        m_LastTelemetryTargetUs = targetTimeUs;
+        StreamHealthTelemetry::frameExtrapolationOpportunity();
+    }
+
+    if (!m_ResourcesReady || m_SyntheticSinceLastReal ||
             m_LatestRealFrame == nullptr || m_LatestRealFrame->width <= 0 ||
             m_LastRealRenderTimeUs == 0 || m_MotionPairIntervalUs == 0 ||
             frameIntervalUs == 0 || targetTimeUs <= m_LastRealRenderTimeUs) {
+        if (firstCheckForTarget) {
+            StreamHealthTelemetry::frameExtrapolationRejectState();
+        }
+        return false;
+    }
+
+    if (!m_HasMotion) {
+        if (firstCheckForTarget) {
+            StreamHealthTelemetry::frameExtrapolationRejectNoMotion();
+        }
         return false;
     }
 
@@ -585,6 +606,9 @@ bool FrameExtrapolator::canExtrapolate(uint64_t targetTimeUs,
             (double)m_MotionPairIntervalUs;
     if (predictionAlpha < 0.75 || predictionAlpha > 1.25 ||
             temporalScale < 0.35 || temporalScale > 1.50) {
+        if (firstCheckForTarget) {
+            StreamHealthTelemetry::frameExtrapolationRejectTiming();
+        }
         return false;
     }
 
@@ -592,6 +616,9 @@ bool FrameExtrapolator::canExtrapolate(uint64_t targetTimeUs,
     // analysis is still in flight rather than synchronizing the CPU with GPU.
     if (pl_tex_poll(m_Gpu, m_FineMotion, 0) ||
             pl_tex_poll(m_Gpu, m_SceneMetric, 0)) {
+        if (firstCheckForTarget) {
+            StreamHealthTelemetry::frameExtrapolationRejectGpuBusy();
+        }
         return false;
     }
 
