@@ -655,6 +655,13 @@ bool FFmpegVideoDecoder::completeInitialization(const AVCodec* decoder, enum AVP
         return false;
     }
 
+    if (!m_TestOnly && params->enableFrameExtrapolation &&
+            !m_FrontendRenderer->isFrameExtrapolationActive()) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "Frame extrapolation requested but unavailable with renderer: %s",
+                    m_FrontendRenderer->getRendererName());
+    }
+
     m_RequiredPixelFormat = requiredFormat;
     m_OriginalVideoWidth = params->width;
     m_OriginalVideoHeight = params->height;

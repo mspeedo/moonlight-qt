@@ -1184,8 +1184,13 @@ void PlVkRenderer::renderFrame(AVFrame *frame)
         return;
     }
 
+    const bool submitted = renderMappedFrame(mappedFrame);
+
 #if defined(Q_OS_LINUX)
-    if (m_FrameExtrapolator != nullptr) {
+    if (submitted && m_FrameExtrapolator != nullptr) {
+        // Queue analysis only after the real frame's presentation work so the
+        // experimental compute passes cannot get in front of normal video
+        // rendering on a shared GPU queue.
         if (!m_FrameExtrapolator->submitRealFrame(frame, mappedFrame, LiGetMicroseconds())) {
             SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                         "Frame extrapolation analysis failed; disabling it for this stream");
@@ -1194,7 +1199,6 @@ void PlVkRenderer::renderFrame(AVFrame *frame)
     }
 #endif
 
-    renderMappedFrame(mappedFrame);
     unmapAvFrameFromPlacebo(frame, &mappedFrame);
 }
 

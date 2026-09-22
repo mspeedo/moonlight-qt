@@ -67,6 +67,8 @@ private:
     int m_StreamFps;
     uint64_t m_FrameIntervalUs;
     uint64_t m_LastRealRenderTimeUs = 0;
+    int64_t m_LastRealPts = AV_NOPTS_VALUE;
+    float m_MotionTimeScale = 1.0f;
 
     int m_SourceWidth = 0;
     int m_SourceHeight = 0;
@@ -78,6 +80,7 @@ private:
     int m_PlaneWidths[PL_MAX_PLANES] = {};
     int m_PlaneHeights[PL_MAX_PLANES] = {};
     int m_PlaneComponents[PL_MAX_PLANES] = {};
+    uint64_t m_PlaneFormatSignatures[PL_MAX_PLANES] = {};
 
     pl_tex m_FineLuma[2] = {};
     pl_tex m_CoarseLuma[2] = {};

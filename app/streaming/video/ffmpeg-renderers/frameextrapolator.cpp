@@ -102,7 +102,9 @@ bool FrameExtrapolator::ensureResources(const pl_frame& frame)
             if (source == nullptr ||
                     source->params.w != m_PlaneWidths[i] ||
                     source->params.h != m_PlaneHeights[i] ||
-                    frame.planes[i].components != m_PlaneComponents[i]) {
+                    frame.planes[i].components != m_PlaneComponents[i] ||
+                    source->params.format == nullptr ||
+                    source->params.format->signature != m_PlaneFormatSignatures[i]) {
                 m_HasMotion = false;
                 return false;
             }
@@ -132,7 +134,8 @@ bool FrameExtrapolator::ensureResources(const pl_frame& frame)
 
     for (int i = 0; i < frame.num_planes; ++i) {
         pl_tex source = frame.planes[i].texture;
-        if (source == nullptr || frame.planes[i].components <= 0) {
+        if (source == nullptr || source->params.format == nullptr ||
+                frame.planes[i].components <= 0) {
             destroyResources();
             return false;
         }
@@ -140,6 +143,7 @@ bool FrameExtrapolator::ensureResources(const pl_frame& frame)
         m_PlaneWidths[i] = source->params.w;
         m_PlaneHeights[i] = source->params.h;
         m_PlaneComponents[i] = frame.planes[i].components;
+        m_PlaneFormatSignatures[i] = source->params.format->signature;
 
         if (!createTexture(&m_SyntheticPlanes[i],
                            m_PlaneWidths[i],
@@ -476,17 +480,46 @@ bool FrameExtrapolator::submitRealFrame(const AVFrame* frame,
             return false;
         }
 
-        // Encoder keyframes are a cheap CPU-visible scene-cut hint. The reduced
-        // GPU scene metric still gates confidence for cuts that aren't flagged.
-        m_HasMotion = !(frame->flags & AV_FRAME_FLAG_KEY);
+        // Normalize displacement when the two rendered real frames are more
+        // than one stream interval apart (for example 100 -> synthetic 101' ->
+        // real 102). Block matching measures the whole temporal gap, while the
+        // next synthetic frame predicts only one interval.
+        m_MotionTimeScale = 1.0f;
+        if (m_LastRealPts != AV_NOPTS_VALUE && frame->pts != AV_NOPTS_VALUE &&
+                frame->pts > m_LastRealPts) {
+            const uint64_t deltaUs = (uint64_t)(frame->pts - m_LastRealPts) *
+                    1000000ULL / 90000ULL;
+            if (deltaUs > m_FrameIntervalUs * 5ULL / 2ULL ||
+                    deltaUs < m_FrameIntervalUs / 2ULL) {
+                m_HasMotion = false;
+            }
+            else {
+                m_MotionTimeScale = (float)std::clamp(
+                            (double)m_FrameIntervalUs / (double)deltaUs,
+                            0.4, 1.25);
+                m_HasMotion = true;
+            }
+        }
+        else {
+            m_HasMotion = false;
+        }
+
+        // Encoder keyframes/I-frames are cheap CPU-visible scene-cut hints.
+        // The reduced GPU scene metric additionally suppresses unflagged cuts.
+        if ((frame->flags & AV_FRAME_FLAG_KEY) ||
+                frame->pict_type == AV_PICTURE_TYPE_I) {
+            m_HasMotion = false;
+        }
     }
     else {
         m_HasMotion = false;
+        m_MotionTimeScale = 1.0f;
     }
 
     m_HistoryIndex = currentIndex;
     m_HasHistory = true;
     m_LastRealRenderTimeUs = renderTimeUs;
+    m_LastRealPts = frame->pts;
     m_SyntheticSinceLastReal = false;
 
     av_frame_unref(m_LatestRealFrame);
@@ -532,7 +565,8 @@ bool FrameExtrapolator::buildSyntheticFrame(const pl_frame& currentFrame,
 
     const double rawAlpha = (double)(targetTimeUs - m_LastRealRenderTimeUs) /
             (double)m_FrameIntervalUs;
-    const float alpha = (float)std::clamp(rawAlpha, 0.75, 1.25);
+    const float alpha = (float)std::clamp(rawAlpha, 0.75, 1.25) *
+            m_MotionTimeScale;
 
     pl_dispatch_reset_frame(m_Dispatch);
 

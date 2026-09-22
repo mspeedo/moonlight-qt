@@ -470,7 +470,6 @@ void Pacer::renderFrame(AVFrame* frame)
         }
 
         m_LastRealPts = frame->pts;
-        m_LastRealRenderTimeUs = beforeRender;
         m_SyntheticSinceLastReal = false;
         m_SyntheticReplacedPts = AV_NOPTS_VALUE;
     }
@@ -495,6 +494,12 @@ void Pacer::renderFrame(AVFrame* frame)
         StreamPipelineTelemetry::renderEnd();
     }
     uint64_t afterRender = LiGetMicroseconds();
+
+    if (m_FrameExtrapolationActive) {
+        // Anchor the missing-frame deadline after normal presentation work has
+        // been submitted, not before renderer/analysis CPU overhead.
+        m_LastRealRenderTimeUs = afterRender;
+    }
 
     m_VideoStats->totalRenderTimeUs += (afterRender - beforeRender);
     m_VideoStats->renderedFrames++;
