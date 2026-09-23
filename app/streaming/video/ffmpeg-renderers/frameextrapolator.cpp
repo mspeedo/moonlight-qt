@@ -294,24 +294,37 @@ bool FrameExtrapolator::dispatchDownsample(pl_tex source, pl_tex target, int sca
     descriptor.desc.name = "src_tex";
     descriptor.desc.type = PL_DESC_SAMPLED_TEX;
     descriptor.binding.object = (void*)source;
-    descriptor.binding.sample_mode =
-            (source->params.format->caps & PL_FMT_CAP_LINEAR) ?
-                PL_TEX_SAMPLE_LINEAR : PL_TEX_SAMPLE_NEAREST;
+    descriptor.binding.sample_mode = PL_TEX_SAMPLE_NEAREST;
 
+    // Use exact box reductions for motion analysis. This is deliberately more
+    // expensive than a single filtered lookup, but it prevents high-frequency
+    // detail from aliasing into false motion vectors.
     const char* body4 = R"(
         ivec2 p = ivec2(gl_GlobalInvocationID.xy);
-        ivec2 dstSize = (textureSize(src_tex, 0) + ivec2(3)) / 4;
-        vec2 uv = (vec2(p) + vec2(0.5)) / vec2(dstSize);
-        float y = textureLod(src_tex, uv, 0.0).r;
-        color = vec4(y, 0.0, 0.0, 1.0);
+        ivec2 srcSize = textureSize(src_tex, 0);
+        ivec2 base = p * 4;
+        float y = 0.0;
+        for (int oy = 0; oy < 4; ++oy) {
+            for (int ox = 0; ox < 4; ++ox) {
+                ivec2 sp = clamp(base + ivec2(ox, oy), ivec2(0), srcSize - ivec2(1));
+                y += texelFetch(src_tex, sp, 0).r;
+            }
+        }
+        color = vec4(y * (1.0 / 16.0), 0.0, 0.0, 1.0);
     )";
 
     const char* body2 = R"(
         ivec2 p = ivec2(gl_GlobalInvocationID.xy);
-        ivec2 dstSize = (textureSize(src_tex, 0) + ivec2(1)) / 2;
-        vec2 uv = (vec2(p) + vec2(0.5)) / vec2(dstSize);
-        float y = textureLod(src_tex, uv, 0.0).r;
-        color = vec4(y, 0.0, 0.0, 1.0);
+        ivec2 srcSize = textureSize(src_tex, 0);
+        ivec2 base = p * 2;
+        float y = 0.0;
+        for (int oy = 0; oy < 2; ++oy) {
+            for (int ox = 0; ox < 2; ++ox) {
+                ivec2 sp = clamp(base + ivec2(ox, oy), ivec2(0), srcSize - ivec2(1));
+                y += texelFetch(src_tex, sp, 0).r;
+            }
+        }
+        color = vec4(y * 0.25, 0.0, 0.0, 1.0);
     )";
 
     return runCompute(target,
@@ -432,7 +445,7 @@ bool FrameExtrapolator::dispatchFineMotion(pl_tex current, pl_tex previous)
     descriptors[1].desc.name = "previous_luma";
     descriptors[1].desc.type = PL_DESC_SAMPLED_TEX;
     descriptors[1].binding.object = (void*)previous;
-    descriptors[1].binding.sample_mode = PL_TEX_SAMPLE_NEAREST;
+    descriptors[1].binding.sample_mode = PL_TEX_SAMPLE_LINEAR;
     descriptors[2].desc.name = "coarse_motion";
     descriptors[2].desc.type = PL_DESC_SAMPLED_TEX;
     descriptors[2].binding.object = (void*)m_CoarseMotion;
@@ -451,6 +464,7 @@ bool FrameExtrapolator::dispatchFineMotion(pl_tex current, pl_tex previous)
         float secondCost = 1e20;
         ivec2 bestVector = seed;
 
+        // Integer +/-2 refinement around the hierarchical coarse seed.
         for (int dy = -2; dy <= 2; ++dy) {
             for (int dx = -2; dx <= 2; ++dx) {
                 ivec2 candidate = seed + ivec2(dx, dy);
@@ -475,13 +489,51 @@ bool FrameExtrapolator::dispatchFineMotion(pl_tex current, pl_tex previous)
             }
         }
 
+        // Resolve the integer-vector quantization that is otherwise very
+        // visible after scaling quarter-resolution motion back to the output.
+        // Nine half-pixel candidates give ~2 full-resolution-pixel precision
+        // while keeping the expensive broad search hierarchical.
+        vec2 bestVectorF = vec2(bestVector);
+        vec2 sizeF = vec2(size);
+        for (int ry = -1; ry <= 1; ++ry) {
+            for (int rx = -1; rx <= 1; ++rx) {
+                if (rx == 0 && ry == 0) {
+                    continue;
+                }
+
+                vec2 candidate = vec2(bestVector) + vec2(rx, ry) * 0.5;
+                float sad = 0.0;
+                for (int by = 0; by < 4; ++by) {
+                    for (int bx = 0; bx < 4; ++bx) {
+                        ivec2 cp = clamp(base + ivec2(bx, by), ivec2(0), size - ivec2(1));
+                        vec2 pp = clamp(vec2(cp) + candidate,
+                                        vec2(0.0), sizeF - vec2(1.0));
+                        float a = texelFetch(current_luma, cp, 0).r;
+                        float b = textureLod(previous_luma,
+                                             (pp + vec2(0.5)) / sizeF,
+                                             0.0).r;
+                        sad += abs(a - b);
+                    }
+                }
+
+                if (sad < bestCost) {
+                    secondCost = bestCost;
+                    bestCost = sad;
+                    bestVectorF = candidate;
+                }
+                else if (sad < secondCost) {
+                    secondCost = sad;
+                }
+            }
+        }
+
         float meanCost = bestCost / 16.0;
         float separation = max(secondCost - bestCost, 0.0) / max(secondCost, 1e-5);
         float uniqueness = clamp(separation * 5.0, 0.0, 1.0);
-        float quality = 1.0 - smoothstep(0.08, 0.22, meanCost);
+        float quality = 1.0 - smoothstep(0.06, 0.18, meanCost);
         float confidence = uniqueness * quality;
 
-        color = vec4(vec2(bestVector), confidence, meanCost);
+        color = vec4(bestVectorF, confidence, meanCost);
     )";
 
     return runCompute(m_FineMotion,
@@ -510,10 +562,14 @@ bool FrameExtrapolator::dispatchWarp(pl_tex source, pl_tex target, float alpha)
     descriptors[2].binding.object = (void*)m_SceneMetric;
     descriptors[2].binding.sample_mode = PL_TEX_SAMPLE_NEAREST;
 
-    pl_shader_var variable = {};
-    variable.var = pl_var_float("extrapolation_alpha");
-    variable.data = &alpha;
-    variable.dynamic = true;
+    const float staleMotionFactor = m_MotionAgeFrames > 0 ? 0.55f : 1.0f;
+    pl_shader_var variables[2] = {};
+    variables[0].var = pl_var_float("extrapolation_alpha");
+    variables[0].data = &alpha;
+    variables[0].dynamic = true;
+    variables[1].var = pl_var_float("stale_motion_factor");
+    variables[1].data = &staleMotionFactor;
+    variables[1].dynamic = true;
 
     const char* body = R"(
         ivec2 p = ivec2(gl_GlobalInvocationID.xy);
@@ -523,10 +579,47 @@ bool FrameExtrapolator::dispatchWarp(pl_tex source, pl_tex target, float alpha)
         vec4 motion = textureLod(motion_field, uv, 0.0);
         float sceneDiff = textureLod(scene_metric, vec2(0.5), 0.0).r;
 
-        // Scene cuts and ambiguous blocks smoothly collapse to the current real
-        // image instead of being warped. No CPU readback is required.
-        float sceneConfidence = 1.0 - smoothstep(0.12, 0.18, sceneDiff);
-        float confidence = clamp(motion.b * sceneConfidence, 0.0, 1.0);
+        // Inspect the actual block vectors around this output location instead
+        // of trusting a locally good SAD match in isolation. Strong vector
+        // disagreement is characteristic of occlusions, disocclusions and
+        // object boundaries where a single backward warp is unsafe.
+        ivec2 motionSize = textureSize(motion_field, 0);
+        ivec2 block = clamp(ivec2(uv * vec2(motionSize)),
+                            ivec2(0), motionSize - ivec2(1));
+        ivec2 leftBlock  = max(block - ivec2(1, 0), ivec2(0));
+        ivec2 rightBlock = min(block + ivec2(1, 0), motionSize - ivec2(1));
+        ivec2 upBlock    = max(block - ivec2(0, 1), ivec2(0));
+        ivec2 downBlock  = min(block + ivec2(0, 1), motionSize - ivec2(1));
+
+        vec4 centerBlock = texelFetch(motion_field, block, 0);
+        vec4 mL = texelFetch(motion_field, leftBlock, 0);
+        vec4 mR = texelFetch(motion_field, rightBlock, 0);
+        vec4 mU = texelFetch(motion_field, upBlock, 0);
+        vec4 mD = texelFetch(motion_field, downBlock, 0);
+
+        float vectorDeviation = 0.25 * (
+                length(centerBlock.rg - mL.rg) +
+                length(centerBlock.rg - mR.rg) +
+                length(centerBlock.rg - mU.rg) +
+                length(centerBlock.rg - mD.rg));
+        float coherence = 1.0 - smoothstep(0.75, 2.0, vectorDeviation);
+
+        float neighbourConfidence = 0.25 * (mL.b + mR.b + mU.b + mD.b);
+        // Neighbour confidence is supporting evidence rather than a hard veto;
+        // coherence already performs the strong boundary/occlusion rejection.
+        float neighbourSupport = mix(0.65, 1.0,
+                                     smoothstep(0.15, 0.60, neighbourConfidence));
+
+        float sceneConfidence = 1.0 - smoothstep(0.10, 0.16, sceneDiff);
+        float rawConfidence = clamp(motion.b, 0.0, 1.0) *
+                              coherence * neighbourSupport *
+                              sceneConfidence * stale_motion_factor;
+
+        // Prefer holding the current real image over partially warping a region
+        // with questionable motion. The sharper gate avoids visible double edges
+        // from broad original/warped blending.
+        float confidence = smoothstep(0.35, 0.70,
+                                      clamp(rawConfidence, 0.0, 1.0));
 
         // motion.rg is a backward current->previous displacement measured in
         // quarter-resolution luma pixels. A future output location therefore
@@ -548,8 +641,8 @@ bool FrameExtrapolator::dispatchWarp(pl_tex source, pl_tex target, float alpha)
                       body,
                       descriptors,
                       3,
-                      &variable,
-                      1);
+                      variables,
+                      2);
 }
 
 bool FrameExtrapolator::submitRealFrame(const AVFrame* frame,
