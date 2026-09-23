@@ -46,22 +46,20 @@ public:
     // false so the pacer preserves normal hold/repeat behavior.
     bool canExtrapolate(uint64_t targetTimeUs, uint64_t frameIntervalUs);
 
-    void markSyntheticPresented()
-    {
-        m_SyntheticSinceLastReal = true;
-        StreamHealthTelemetry::frameExtrapolated();
-    }
+    void markSyntheticPresented();
 
 private:
     bool ensureResources(const pl_frame& frame);
     bool ensureQualityResources();
     bool createTexture(pl_tex* texture, int width, int height, int components);
-    bool createQualityMetricTexture();
+    bool createQualityMetricTexture(pl_tex* texture);
     void destroyResources();
 
     bool dispatchDownsample(pl_tex source, pl_tex target, int scale);
     bool dispatchQualityGrid(pl_tex source, pl_tex target);
     bool dispatchQualityMetric();
+    bool dispatchWarpDiagnosticMetric(float staleMotionFactor);
+    bool queueWarpDiagnosticReadback();
     bool dispatchSceneMetric(pl_tex current, pl_tex previous);
     bool dispatchCoarseMotion(pl_tex current, pl_tex previous);
     bool dispatchFineMotion(pl_tex current, pl_tex previous);
@@ -114,6 +112,7 @@ private:
     pl_tex m_QualitySyntheticGrid = nullptr;
     pl_tex m_QualityGroundTruthGrid = nullptr;
     pl_tex m_QualityMetric = nullptr;
+    pl_tex m_WarpDiagnosticMetric = nullptr;
     int m_QualityGridWidth = 0;
     int m_QualityGridHeight = 0;
 
@@ -124,6 +123,7 @@ private:
     bool m_ResourcesReady = false;
     bool m_QualityResourcesReady = false;
     bool m_HasQualityBaseline = false;
+    bool m_HasWarpDiagnostic = false;
     bool m_SyntheticSinceLastReal = false;
 };
 

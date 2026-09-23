@@ -15,6 +15,12 @@ struct QualityReadback
     alignas(16) float values[4] = {};
 };
 
+struct WarpDiagnosticReadback
+{
+    std::uint64_t generation = 0;
+    alignas(16) float values[4] = {};
+};
+
 void qualityReadbackComplete(void* opaque)
 {
     QualityReadback* readback = static_cast<QualityReadback*>(opaque);
@@ -26,7 +32,24 @@ void qualityReadbackComplete(void* opaque)
             readback->generation,
             readback->values[0],
             readback->values[1],
-            readback->values[2]);
+            readback->values[2],
+            readback->values[3]);
+    delete readback;
+}
+
+void warpDiagnosticReadbackComplete(void* opaque)
+{
+    WarpDiagnosticReadback* readback = static_cast<WarpDiagnosticReadback*>(opaque);
+    if (readback == nullptr) {
+        return;
+    }
+
+    StreamHealthTelemetry::frameExtrapolationWarpSample(
+            readback->generation,
+            readback->values[0],
+            readback->values[1],
+            readback->values[2],
+            readback->values[3]);
     delete readback;
 }
 
@@ -119,7 +142,7 @@ bool FrameExtrapolator::createTexture(pl_tex* texture, int width, int height, in
     return *texture != nullptr;
 }
 
-bool FrameExtrapolator::createQualityMetricTexture()
+bool FrameExtrapolator::createQualityMetricTexture(pl_tex* texture)
 {
     // Require an exact float32 host representation so the asynchronous 1x1
     // readback can be interpreted directly as four floats without conversion.
@@ -137,8 +160,8 @@ bool FrameExtrapolator::createQualityMetricTexture()
     params.storable = true;
     params.host_readable = true;
 
-    m_QualityMetric = pl_tex_create(m_Gpu, &params);
-    return m_QualityMetric != nullptr;
+    *texture = pl_tex_create(m_Gpu, &params);
+    return *texture != nullptr;
 }
 
 bool FrameExtrapolator::ensureQualityResources()
@@ -168,11 +191,13 @@ bool FrameExtrapolator::ensureQualityResources()
                            m_QualityGridWidth, m_QualityGridHeight, 1) ||
             !createTexture(&m_QualityGroundTruthGrid,
                            m_QualityGridWidth, m_QualityGridHeight, 1) ||
-            !createQualityMetricTexture()) {
+            !createQualityMetricTexture(&m_QualityMetric) ||
+            !createQualityMetricTexture(&m_WarpDiagnosticMetric)) {
         pl_tex_destroy(m_Gpu, &m_QualityBaselineGrid);
         pl_tex_destroy(m_Gpu, &m_QualitySyntheticGrid);
         pl_tex_destroy(m_Gpu, &m_QualityGroundTruthGrid);
         pl_tex_destroy(m_Gpu, &m_QualityMetric);
+        pl_tex_destroy(m_Gpu, &m_WarpDiagnosticMetric);
         m_QualityGridWidth = 0;
         m_QualityGridHeight = 0;
         return false;
@@ -205,10 +230,12 @@ void FrameExtrapolator::destroyResources()
     pl_tex_destroy(m_Gpu, &m_QualitySyntheticGrid);
     pl_tex_destroy(m_Gpu, &m_QualityGroundTruthGrid);
     pl_tex_destroy(m_Gpu, &m_QualityMetric);
+    pl_tex_destroy(m_Gpu, &m_WarpDiagnosticMetric);
 
     m_ResourcesReady = false;
     m_QualityResourcesReady = false;
     m_HasQualityBaseline = false;
+    m_HasWarpDiagnostic = false;
     m_QualityGridWidth = 0;
     m_QualityGridHeight = 0;
     m_HasHistory = false;
@@ -502,6 +529,7 @@ bool FrameExtrapolator::dispatchQualityMetric()
         ivec2 gridSize = textureSize(truth_grid, 0);
         float syntheticError = 0.0;
         float holdError = 0.0;
+        float syntheticHoldError = 0.0;
         float betterMotionCells = 0.0;
         float motionCells = 0.0;
         int samples = 0;
@@ -516,6 +544,7 @@ bool FrameExtrapolator::dispatchQualityMetric()
                 float holdDiff = abs(baseline - truth);
                 syntheticError += synthDiff;
                 holdError += holdDiff;
+                syntheticHoldError += abs(synthetic - baseline);
 
                 // Static cells where both candidates are effectively identical
                 // should not dilute the spatial success ratio. Only count cells
@@ -534,7 +563,7 @@ bool FrameExtrapolator::dispatchQualityMetric()
         color = vec4(syntheticError * invSamples,
                      holdError * invSamples,
                      betterFraction,
-                     1.0);
+                     syntheticHoldError * invSamples);
     )";
 
     return runCompute(m_QualityMetric,
@@ -545,6 +574,109 @@ bool FrameExtrapolator::dispatchQualityMetric()
                       3,
                       nullptr,
                       0,
+                      1,
+                      1);
+}
+
+bool FrameExtrapolator::dispatchWarpDiagnosticMetric(float staleMotionFactor)
+{
+    if (m_FineMotion == nullptr || m_SceneMetric == nullptr ||
+            m_WarpDiagnosticMetric == nullptr) {
+        return false;
+    }
+
+    pl_shader_desc descriptors[2] = {};
+    descriptors[0].desc.name = "motion_field";
+    descriptors[0].desc.type = PL_DESC_SAMPLED_TEX;
+    descriptors[0].binding.object = (void*)m_FineMotion;
+    descriptors[0].binding.sample_mode = PL_TEX_SAMPLE_NEAREST;
+    descriptors[1].desc.name = "scene_metric";
+    descriptors[1].desc.type = PL_DESC_SAMPLED_TEX;
+    descriptors[1].binding.object = (void*)m_SceneMetric;
+    descriptors[1].binding.sample_mode = PL_TEX_SAMPLE_NEAREST;
+
+    pl_shader_var variable = {};
+    variable.var = pl_var_float("stale_motion_factor");
+    variable.data = &staleMotionFactor;
+    variable.dynamic = true;
+
+    // Mirror the exact confidence calculation used by dispatchWarp() on a
+    // representative coarse sample grid. This keeps the diagnostic cheap while
+    // still telling us whether vectors exist and where the final gate suppresses them.
+    const char* body = R"(
+        ivec2 motionSize = textureSize(motion_field, 0);
+        float sceneDiff = textureLod(scene_metric, vec2(0.5), 0.0).r;
+        float motionMagnitudeSum = 0.0;
+        float finalConfidenceSum = 0.0;
+        float gatePassCells = 0.0;
+        float movingCells = 0.0;
+        float allCells = 0.0;
+
+        // Sample a fixed coarse grid rather than serially walking every motion
+        // block. This is diagnostic telemetry, so representative coverage is
+        // preferable to adding measurable GPU work to extrapolation.
+        const int gridX = 32;
+        const int gridY = 18;
+        for (int y = 0; y < gridY; ++y) {
+            for (int x = 0; x < gridX; ++x) {
+                vec2 uv = (vec2(x, y) + vec2(0.5)) / vec2(gridX, gridY);
+                ivec2 block = clamp(ivec2(uv * vec2(motionSize)),
+                                    ivec2(0), motionSize - ivec2(1));
+                ivec2 leftBlock  = max(block - ivec2(1, 0), ivec2(0));
+                ivec2 rightBlock = min(block + ivec2(1, 0), motionSize - ivec2(1));
+                ivec2 upBlock    = max(block - ivec2(0, 1), ivec2(0));
+                ivec2 downBlock  = min(block + ivec2(0, 1), motionSize - ivec2(1));
+
+                vec4 centerBlock = texelFetch(motion_field, block, 0);
+                vec4 mL = texelFetch(motion_field, leftBlock, 0);
+                vec4 mR = texelFetch(motion_field, rightBlock, 0);
+                vec4 mU = texelFetch(motion_field, upBlock, 0);
+                vec4 mD = texelFetch(motion_field, downBlock, 0);
+
+                float vectorDeviation = 0.25 * (
+                        length(centerBlock.rg - mL.rg) +
+                        length(centerBlock.rg - mR.rg) +
+                        length(centerBlock.rg - mU.rg) +
+                        length(centerBlock.rg - mD.rg));
+                float coherence = 1.0 - smoothstep(0.75, 2.0, vectorDeviation);
+                float neighbourConfidence = 0.25 * (mL.b + mR.b + mU.b + mD.b);
+                float neighbourSupport = mix(0.65, 1.0,
+                                             smoothstep(0.15, 0.60, neighbourConfidence));
+                float sceneConfidence = 1.0 - smoothstep(0.10, 0.16, sceneDiff);
+                float rawConfidence = clamp(centerBlock.b, 0.0, 1.0) *
+                                      coherence * neighbourSupport *
+                                      sceneConfidence * stale_motion_factor;
+                float finalConfidence = smoothstep(0.35, 0.70,
+                                                   clamp(rawConfidence, 0.0, 1.0));
+
+                // Fine-motion vectors are measured in quarter-resolution luma
+                // pixels, so multiply by four to report full-resolution pixels.
+                float motionMagnitudePx = length(centerBlock.rg) * 4.0;
+                if (motionMagnitudePx >= 0.25) {
+                    movingCells += 1.0;
+                    motionMagnitudeSum += motionMagnitudePx;
+                    finalConfidenceSum += finalConfidence;
+                    gatePassCells += finalConfidence > 0.001 ? 1.0 : 0.0;
+                }
+                allCells += 1.0;
+            }
+        }
+
+        float invMoving = 1.0 / max(movingCells, 1.0);
+        color = vec4(motionMagnitudeSum * invMoving,
+                     finalConfidenceSum * invMoving,
+                     movingCells > 0.0 ? gatePassCells / movingCells : 0.0,
+                     movingCells / max(allCells, 1.0));
+    )";
+
+    return runCompute(m_WarpDiagnosticMetric,
+                      "frame extrapolation warp diagnostic metric",
+                      nullptr,
+                      body,
+                      descriptors,
+                      2,
+                      &variable,
+                      1,
                       1,
                       1);
 }
@@ -867,6 +999,7 @@ bool FrameExtrapolator::submitRealFrame(const AVFrame* frame,
     // presented, Pacer evaluates its exact matching ground-truth frame before
     // this method is reached.
     m_HasQualityBaseline = false;
+    m_HasWarpDiagnostic = false;
 
     // pl_render_image() has already released a mapped Vulkan AVFrame by the
     // time this post-render analysis runs. Re-acquire it before directly
@@ -1057,6 +1190,16 @@ bool FrameExtrapolator::buildPreparedSyntheticFrame(pl_frame& currentFrame,
         m_HasQualityBaseline = true;
     }
 
+    // Snapshot the motion field's effective warp strength for this candidate.
+    // This duplicates only the coarse confidence math, not the full-resolution
+    // warp. Readback is deferred until the candidate is actually presented.
+    m_HasWarpDiagnostic = false;
+    if (m_QualityMeasurementEnabled && m_QualityResourcesReady &&
+            !pl_tex_poll(m_Gpu, m_WarpDiagnosticMetric, 0)) {
+        const float staleMotionFactor = m_MotionAgeFrames > 0 ? 0.55f : 1.0f;
+        m_HasWarpDiagnostic = dispatchWarpDiagnosticMetric(staleMotionFactor);
+    }
+
     *syntheticFrame = currentFrame;
     for (int i = 0; i < syntheticFrame->num_planes; ++i) {
         syntheticFrame->planes[i].texture = m_SyntheticPlanes[i];
@@ -1067,6 +1210,44 @@ bool FrameExtrapolator::buildPreparedSyntheticFrame(pl_frame& currentFrame,
     syntheticFrame->release = nullptr;
     syntheticFrame->user_data = nullptr;
     return true;
+}
+
+bool FrameExtrapolator::queueWarpDiagnosticReadback()
+{
+    if (!m_QualityMeasurementEnabled || !m_QualityResourcesReady ||
+            !m_HasWarpDiagnostic || m_WarpDiagnosticMetric == nullptr) {
+        return false;
+    }
+
+    // Consume this candidate's metric exactly once. The transfer is queued
+    // asynchronously after presentation submission and never waits for the GPU.
+    m_HasWarpDiagnostic = false;
+
+    WarpDiagnosticReadback* readback = new WarpDiagnosticReadback();
+    readback->generation = StreamHealthTelemetry::frameExtrapolationQualityGeneration();
+
+    pl_tex_transfer_params transfer = {};
+    transfer.tex = m_WarpDiagnosticMetric;
+    transfer.ptr = readback->values;
+    transfer.no_import = true;
+    transfer.callback = warpDiagnosticReadbackComplete;
+    transfer.priv = readback;
+    if (!pl_tex_download(m_Gpu, &transfer)) {
+        delete readback;
+        return false;
+    }
+
+    return true;
+}
+
+void FrameExtrapolator::markSyntheticPresented()
+{
+    m_SyntheticSinceLastReal = true;
+    StreamHealthTelemetry::frameExtrapolated();
+
+    if (m_QualityMeasurementEnabled && !queueWarpDiagnosticReadback()) {
+        StreamHealthTelemetry::frameExtrapolationWarpSkip();
+    }
 }
 
 bool FrameExtrapolator::evaluateGroundTruthQuality(pl_frame& groundTruthFrame)

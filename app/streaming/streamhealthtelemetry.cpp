@@ -47,8 +47,15 @@ std::atomic<std::uint64_t> g_FrameExtrapolationQualitySamples { 0 };
 std::atomic<std::uint64_t> g_FrameExtrapolationQualityMotionSamples { 0 };
 std::atomic<std::uint64_t> g_FrameExtrapolationQualitySyntheticMaeTotal { 0 };
 std::atomic<std::uint64_t> g_FrameExtrapolationQualityHoldMaeTotal { 0 };
+std::atomic<std::uint64_t> g_FrameExtrapolationQualitySyntheticHoldMaeTotal { 0 };
 std::atomic<std::uint64_t> g_FrameExtrapolationQualityBetterFractionTotal { 0 };
 std::atomic<std::uint64_t> g_FrameExtrapolationQualitySkips { 0 };
+std::atomic<std::uint64_t> g_FrameExtrapolationWarpSamples { 0 };
+std::atomic<std::uint64_t> g_FrameExtrapolationWarpMotionMagnitudeTotal { 0 };
+std::atomic<std::uint64_t> g_FrameExtrapolationWarpConfidenceTotal { 0 };
+std::atomic<std::uint64_t> g_FrameExtrapolationWarpGatePassTotal { 0 };
+std::atomic<std::uint64_t> g_FrameExtrapolationWarpMovingFractionTotal { 0 };
+std::atomic<std::uint64_t> g_FrameExtrapolationWarpSkips { 0 };
 
 void updateMaximum(std::atomic<std::uint64_t>& maximum, std::uint64_t value)
 {
@@ -90,8 +97,15 @@ void reset()
     g_FrameExtrapolationQualityMotionSamples.store(0, std::memory_order_relaxed);
     g_FrameExtrapolationQualitySyntheticMaeTotal.store(0, std::memory_order_relaxed);
     g_FrameExtrapolationQualityHoldMaeTotal.store(0, std::memory_order_relaxed);
+    g_FrameExtrapolationQualitySyntheticHoldMaeTotal.store(0, std::memory_order_relaxed);
     g_FrameExtrapolationQualityBetterFractionTotal.store(0, std::memory_order_relaxed);
     g_FrameExtrapolationQualitySkips.store(0, std::memory_order_relaxed);
+    g_FrameExtrapolationWarpSamples.store(0, std::memory_order_relaxed);
+    g_FrameExtrapolationWarpMotionMagnitudeTotal.store(0, std::memory_order_relaxed);
+    g_FrameExtrapolationWarpConfidenceTotal.store(0, std::memory_order_relaxed);
+    g_FrameExtrapolationWarpGatePassTotal.store(0, std::memory_order_relaxed);
+    g_FrameExtrapolationWarpMovingFractionTotal.store(0, std::memory_order_relaxed);
+    g_FrameExtrapolationWarpSkips.store(0, std::memory_order_relaxed);
 }
 
 void noteDecodeUnit(std::uint32_t frameNumber)
@@ -202,17 +216,19 @@ std::uint64_t frameExtrapolationQualityGeneration()
 void frameExtrapolationQualitySample(std::uint64_t generation,
                                      float syntheticMae,
                                      float holdMae,
-                                     float betterFraction)
+                                     float betterFraction,
+                                     float syntheticHoldMae)
 {
     if (generation != g_FrameExtrapolationQualityGeneration.load(std::memory_order_relaxed) ||
             !std::isfinite(syntheticMae) || !std::isfinite(holdMae) ||
-            !std::isfinite(betterFraction)) {
+            !std::isfinite(betterFraction) || !std::isfinite(syntheticHoldMae)) {
         return;
     }
 
     syntheticMae = qBound(0.0f, syntheticMae, 1.0f);
     holdMae = qBound(0.0f, holdMae, 1.0f);
     betterFraction = qBound(0.0f, betterFraction, 1.0f);
+    syntheticHoldMae = qBound(0.0f, syntheticHoldMae, 1.0f);
 
     g_FrameExtrapolationQualitySamples.fetch_add(1, std::memory_order_relaxed);
 
@@ -234,6 +250,9 @@ void frameExtrapolationQualitySample(std::uint64_t generation,
     g_FrameExtrapolationQualityHoldMaeTotal.fetch_add(
             static_cast<std::uint64_t>(holdMae * kMaeScale + 0.5),
             std::memory_order_relaxed);
+    g_FrameExtrapolationQualitySyntheticHoldMaeTotal.fetch_add(
+            static_cast<std::uint64_t>(syntheticHoldMae * kMaeScale + 0.5),
+            std::memory_order_relaxed);
     g_FrameExtrapolationQualityBetterFractionTotal.fetch_add(
             static_cast<std::uint64_t>(betterFraction * kFractionScale + 0.5),
             std::memory_order_relaxed);
@@ -242,6 +261,44 @@ void frameExtrapolationQualitySample(std::uint64_t generation,
 void frameExtrapolationQualitySkip()
 {
     g_FrameExtrapolationQualitySkips.fetch_add(1, std::memory_order_relaxed);
+}
+
+void frameExtrapolationWarpSample(std::uint64_t generation,
+                                  float motionMagnitudePx,
+                                  float finalConfidence,
+                                  float gatePassFraction,
+                                  float movingFraction)
+{
+    if (generation != g_FrameExtrapolationQualityGeneration.load(std::memory_order_relaxed) ||
+            !std::isfinite(motionMagnitudePx) || !std::isfinite(finalConfidence) ||
+            !std::isfinite(gatePassFraction) || !std::isfinite(movingFraction)) {
+        return;
+    }
+
+    motionMagnitudePx = qBound(0.0f, motionMagnitudePx, 256.0f);
+    finalConfidence = qBound(0.0f, finalConfidence, 1.0f);
+    gatePassFraction = qBound(0.0f, gatePassFraction, 1.0f);
+    movingFraction = qBound(0.0f, movingFraction, 1.0f);
+
+    constexpr double kMetricScale = 1000000.0;
+    g_FrameExtrapolationWarpSamples.fetch_add(1, std::memory_order_relaxed);
+    g_FrameExtrapolationWarpMotionMagnitudeTotal.fetch_add(
+            static_cast<std::uint64_t>(motionMagnitudePx * kMetricScale + 0.5),
+            std::memory_order_relaxed);
+    g_FrameExtrapolationWarpConfidenceTotal.fetch_add(
+            static_cast<std::uint64_t>(finalConfidence * kMetricScale + 0.5),
+            std::memory_order_relaxed);
+    g_FrameExtrapolationWarpGatePassTotal.fetch_add(
+            static_cast<std::uint64_t>(gatePassFraction * kMetricScale + 0.5),
+            std::memory_order_relaxed);
+    g_FrameExtrapolationWarpMovingFractionTotal.fetch_add(
+            static_cast<std::uint64_t>(movingFraction * kMetricScale + 0.5),
+            std::memory_order_relaxed);
+}
+
+void frameExtrapolationWarpSkip()
+{
+    g_FrameExtrapolationWarpSkips.fetch_add(1, std::memory_order_relaxed);
 }
 
 void frameExtrapolated()
@@ -295,6 +352,8 @@ void formatOverlayLines(char* output, std::size_t length)
             g_FrameExtrapolationQualitySyntheticMaeTotal.load(std::memory_order_relaxed);
     const std::uint64_t qualityHoldTotal =
             g_FrameExtrapolationQualityHoldMaeTotal.load(std::memory_order_relaxed);
+    const std::uint64_t qualitySyntheticHoldTotal =
+            g_FrameExtrapolationQualitySyntheticHoldMaeTotal.load(std::memory_order_relaxed);
     const std::uint64_t qualityBetterTotal =
             g_FrameExtrapolationQualityBetterFractionTotal.load(std::memory_order_relaxed);
     const double qualitySyntheticMae = qualityMotionSamples == 0 ? 0.0 :
@@ -303,12 +362,30 @@ void formatOverlayLines(char* output, std::size_t length)
     const double qualityHoldMae = qualityMotionSamples == 0 ? 0.0 :
             static_cast<double>(qualityHoldTotal) /
             static_cast<double>(qualityMotionSamples) / 1000000000.0;
+    const double qualitySyntheticHoldMae = qualityMotionSamples == 0 ? 0.0 :
+            static_cast<double>(qualitySyntheticHoldTotal) /
+            static_cast<double>(qualityMotionSamples) / 1000000000.0;
     const double qualityGainPercent = qualityHoldTotal == 0 ? 0.0 :
             (1.0 - static_cast<double>(qualitySyntheticTotal) /
                    static_cast<double>(qualityHoldTotal)) * 100.0;
     const double qualityBetterPercent = qualityMotionSamples == 0 ? 0.0 :
             static_cast<double>(qualityBetterTotal) /
             static_cast<double>(qualityMotionSamples) / 1000000.0 * 100.0;
+
+    const std::uint64_t warpSamples =
+            g_FrameExtrapolationWarpSamples.load(std::memory_order_relaxed);
+    const double warpMotionMagnitudePx = warpSamples == 0 ? 0.0 :
+            static_cast<double>(g_FrameExtrapolationWarpMotionMagnitudeTotal.load(
+                    std::memory_order_relaxed)) / static_cast<double>(warpSamples) / 1000000.0;
+    const double warpConfidence = warpSamples == 0 ? 0.0 :
+            static_cast<double>(g_FrameExtrapolationWarpConfidenceTotal.load(
+                    std::memory_order_relaxed)) / static_cast<double>(warpSamples) / 1000000.0;
+    const double warpGatePassPercent = warpSamples == 0 ? 0.0 :
+            static_cast<double>(g_FrameExtrapolationWarpGatePassTotal.load(
+                    std::memory_order_relaxed)) / static_cast<double>(warpSamples) / 1000000.0 * 100.0;
+    const double warpMovingPercent = warpSamples == 0 ? 0.0 :
+            static_cast<double>(g_FrameExtrapolationWarpMovingFractionTotal.load(
+                    std::memory_order_relaxed)) / static_cast<double>(warpSamples) / 1000000.0 * 100.0;
 
     std::snprintf(output,
                   length,
@@ -319,7 +396,8 @@ void formatOverlayLines(char* output, std::size_t length)
                   "Frame extrapolation: %s | presented %llu\n"
                   "  deadline misses %llu | opportunities %llu | analysis busy skips %llu\n"
                   "  timing: wake avg %.2f max %.2f ms | submit avg %.2f max %.2f ms | real wins %llu\n"
-                  "  quality: motion %llu/%llu | luma MAE synth %.4f hold %.4f | gain %.1f%% | better motion cells %.1f%% | skips %llu\n"
+                  "  quality: motion %llu/%llu | luma MAE synth %.4f hold %.4f | gain %.1f%% | synth-hold %.4f | better motion cells %.1f%% | skips %llu\n"
+                  "  warp: samples %llu | motion avg %.2f px | confidence avg %.3f | gate pass %.1f%% | moving cells %.1f%% | skips %llu\n"
                   "  rejects: no motion %llu | timing %llu | GPU busy %llu | state %llu",
                   recoveredFrames,
                   failedFrames,
@@ -350,9 +428,17 @@ void formatOverlayLines(char* output, std::size_t length)
                   qualitySyntheticMae,
                   qualityHoldMae,
                   qualityGainPercent,
+                  qualitySyntheticHoldMae,
                   qualityBetterPercent,
                   static_cast<unsigned long long>(
                       g_FrameExtrapolationQualitySkips.load(std::memory_order_relaxed)),
+                  static_cast<unsigned long long>(warpSamples),
+                  warpMotionMagnitudePx,
+                  warpConfidence,
+                  warpGatePassPercent,
+                  warpMovingPercent,
+                  static_cast<unsigned long long>(
+                      g_FrameExtrapolationWarpSkips.load(std::memory_order_relaxed)),
                   static_cast<unsigned long long>(
                       g_FrameExtrapolationRejectNoMotion.load(std::memory_order_relaxed)),
                   static_cast<unsigned long long>(
