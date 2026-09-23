@@ -33,12 +33,10 @@ static_assert(PACER_MAX_OUTSTANDING_FRAMES == MAX_QUEUED_FRAMES + 2,
 // V-sync happens.
 #define TIMER_SLACK_MS 3
 
-// The synthetic candidate is prepared ahead of time, so do not add an
-// artificial grace period after the expected real-frame timestamp. The
-// millisecond QWaitCondition wake granularity and final swapchain submission
-// already provide unavoidable tolerance; extra grace would create a visible
-// long/short VRR cadence pair.
-static constexpr uint64_t EXTRAPOLATION_GRACE_US = 0ULL;
+// Allow a small grace period after the predicted real-frame timestamp before
+// presenting the prepared synthetic candidate. This avoids false extrapolation
+// when variable-FPS host cadence arrives slightly later than the learned interval.
+static constexpr uint64_t EXTRAPOLATION_GRACE_US = 2000ULL;
 
 Pacer::Pacer(IFFmpegRenderer* renderer, PVIDEO_STATS videoStats) :
     m_RenderThread(nullptr),
@@ -176,10 +174,10 @@ int Pacer::renderThread(void* context)
         // the not empty condition
         me->m_FrameQueueLock.lock();
 
-        // Wait for a real frame. With extrapolation active, wake at the
-        // predicted next real-frame timestamp. The synthetic candidate has
-        // already been prepared, so the deadline path should only perform the
-        // final presentation pass rather than deliberately waiting past target.
+        // Wait for a real frame. With extrapolation active, allow a small
+        // grace period beyond the predicted next real-frame timestamp. The
+        // synthetic candidate is already prepared, so once grace expires the
+        // deadline path only needs to perform the final presentation pass.
         bool extrapolationDeadlineReached = false;
         uint64_t extrapolationTargetUs = 0;
         uint64_t extrapolationTriggerUs = 0;
