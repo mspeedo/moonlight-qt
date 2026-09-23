@@ -33,10 +33,7 @@ static_assert(PACER_MAX_OUTSTANDING_FRAMES == MAX_QUEUED_FRAMES + 2,
 // V-sync happens.
 #define TIMER_SLACK_MS 3
 
-// Allow a small grace period after the predicted real-frame timestamp before
-// presenting the prepared synthetic candidate. This avoids false extrapolation
-// when variable-FPS host cadence arrives slightly later than the learned interval.
-static constexpr uint64_t EXTRAPOLATION_GRACE_US = 2000ULL;
+// Extrapolation grace is configured per stream and stored on Pacer.
 
 Pacer::Pacer(IFFmpegRenderer* renderer, PVIDEO_STATS videoStats) :
     m_RenderThread(nullptr),
@@ -187,7 +184,7 @@ int Pacer::renderThread(void* context)
                     me->m_LastRealRenderTimeUs != 0 &&
                     me->m_CadenceSampleCount >= 3) {
                 extrapolationTargetUs = me->m_LastRealRenderTimeUs + me->m_FrameIntervalUs;
-                extrapolationTriggerUs = extrapolationTargetUs + EXTRAPOLATION_GRACE_US;
+                extrapolationTriggerUs = extrapolationTargetUs + me->m_FrameExtrapolationGraceUs;
                 const uint64_t nowUs = LiGetMicroseconds();
                 if (nowUs >= extrapolationTriggerUs) {
                     extrapolationDeadlineReached = true;
@@ -431,7 +428,8 @@ void Pacer::handleVsync(int timeUntilNextVsyncMillis)
     enqueueFrameForRenderingAndUnlock(m_PacingQueue.dequeue());
 }
 
-bool Pacer::initialize(SDL_Window* window, int maxVideoFps, bool enablePacing, bool enableVsync)
+bool Pacer::initialize(SDL_Window* window, int maxVideoFps, bool enablePacing, bool enableVsync,
+                       int frameExtrapolationGraceMs)
 {
     m_MaxVideoFps = maxVideoFps;
     m_DisplayFps = StreamUtils::getDisplayRefreshRate(window);
@@ -443,11 +441,14 @@ bool Pacer::initialize(SDL_Window* window, int maxVideoFps, bool enablePacing, b
     m_NominalFrameIntervalUs = (1000000ULL + (uint64_t)maxVideoFps / 2ULL) /
             (uint64_t)maxVideoFps;
     m_FrameIntervalUs = m_NominalFrameIntervalUs;
+    m_FrameExtrapolationGraceUs =
+            static_cast<uint64_t>(qBound(0, frameExtrapolationGraceMs, 5)) * 1000ULL;
     m_FrameExtrapolationActive = m_RenderLatestFrame &&
             m_VsyncRenderer->isFrameExtrapolationActive();
     if (m_FrameExtrapolationActive) {
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                    "Single-frame extrapolation armed for the unpaced Vulkan path");
+                    "Single-frame extrapolation armed for the unpaced Vulkan path (grace: %llu ms)",
+                    static_cast<unsigned long long>(m_FrameExtrapolationGraceUs / 1000ULL));
     }
 
     if (enablePacing) {

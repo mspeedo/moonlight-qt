@@ -1746,6 +1746,27 @@ Flickable {
                     ToolTip.text: qsTr("Generates at most one motion-extrapolated frame to mask short frame-delivery hitches. Vulkan renderer only. Experimental. Takes effect on the next stream.")
                 }
 
+                RowLayout {
+                    width: parent.width
+                    visible: Qt.platform.os === "linux"
+                    enabled: frameExtrapolationCheck.checked
+
+                    Label {
+                        text: qsTr("Extrapolation grace (ms)")
+                        font.pointSize: 12
+                        Layout.fillWidth: true
+                    }
+
+                    SpinBox {
+                        id: frameExtrapolationGrace
+                        from: 0
+                        to: 5
+                        editable: true
+                        value: StreamingPreferences.frameExtrapolationGraceMs
+                        onValueModified: StreamingPreferences.frameExtrapolationGraceMs = value
+                    }
+                }
+
                 CheckBox {
                     id: networkBufferCheck
                     hoverEnabled: true

@@ -39,7 +39,8 @@ public:
 
     void submitFrame(AVFrame* frame);
 
-    bool initialize(SDL_Window* window, int maxVideoFps, bool enablePacing, bool enableVsync);
+    bool initialize(SDL_Window* window, int maxVideoFps, bool enablePacing, bool enableVsync,
+                    int frameExtrapolationGraceMs);
 
     void signalVsync();
 
@@ -77,6 +78,7 @@ private:
     static constexpr int kCadenceHistorySize = 7;
     uint64_t m_NominalFrameIntervalUs = 0;
     uint64_t m_FrameIntervalUs = 0;
+    uint64_t m_FrameExtrapolationGraceUs = 2000ULL;
     std::array<uint64_t, kCadenceHistorySize> m_CadenceSamplesUs {};
     int m_CadenceSampleCount = 0;
     int m_CadenceSampleIndex = 0;
