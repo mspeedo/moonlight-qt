@@ -59,18 +59,15 @@ FrameExtrapolator::~FrameExtrapolator()
 {
     StreamHealthTelemetry::setFrameExtrapolationActive(false);
 
-    // Destroy GPU resources before releasing the decoded surface reference.
     // pl_tex_destroy() handles any outstanding GPU use of these resources.
     destroyResources();
     pl_dispatch_destroy(&m_Dispatch);
-    av_frame_free(&m_LatestRealFrame);
 }
 
 bool FrameExtrapolator::initialize()
 {
     m_Dispatch = pl_dispatch_create(m_Log, m_Gpu);
-    m_LatestRealFrame = av_frame_alloc();
-    const bool initialized = m_Dispatch != nullptr && m_LatestRealFrame != nullptr;
+    const bool initialized = m_Dispatch != nullptr;
     StreamHealthTelemetry::setFrameExtrapolationActive(initialized);
     return initialized;
 }
@@ -702,14 +699,6 @@ bool FrameExtrapolator::submitRealFrame(const AVFrame* frame,
         m_LastRealRenderTimeUs = renderTimeUs;
         m_SyntheticSinceLastReal = false;
 
-        av_frame_unref(m_LatestRealFrame);
-        if (av_frame_ref(m_LatestRealFrame, frame) < 0) {
-            m_HasMotion = false;
-            m_MotionPairIntervalUs = 0;
-            m_MotionAgeFrames = 0;
-            return false;
-        }
-
         // Keep m_LastRealPts and m_HistoryIndex pointing at the last frame that
         // actually entered GPU history. The next successful analysis may span
         // multiple RTP intervals and will normalize that span.
@@ -780,14 +769,69 @@ bool FrameExtrapolator::submitRealFrame(const AVFrame* frame,
     m_LastRealPts = frame->pts;
     m_SyntheticSinceLastReal = false;
 
-    av_frame_unref(m_LatestRealFrame);
-    if (av_frame_ref(m_LatestRealFrame, frame) < 0) {
-        m_HasMotion = false;
-        m_MotionPairIntervalUs = 0;
-        m_MotionAgeFrames = 0;
+    return true;
+}
+
+bool FrameExtrapolator::buildPreparedSyntheticFrame(pl_frame& currentFrame,
+                                                     uint64_t frameIntervalUs,
+                                                     pl_frame* syntheticFrame)
+{
+    if (!m_ResourcesReady || !m_HasMotion || m_SyntheticSinceLastReal ||
+            m_MotionPairIntervalUs == 0 || frameIntervalUs == 0 ||
+            currentFrame.num_planes != m_PlaneCount || syntheticFrame == nullptr) {
         return false;
     }
 
+    const double temporalScale = (double)frameIntervalUs /
+            (double)m_MotionPairIntervalUs;
+    if (temporalScale < 0.35 || temporalScale > 1.50) {
+        return false;
+    }
+
+    // Never queue a second prediction behind an older prepared frame. The
+    // deadline path must find a completed candidate rather than create GPU
+    // backlog that could delay normal real-frame rendering.
+    for (int i = 0; i < m_PlaneCount; ++i) {
+        if (m_SyntheticPlanes[i] == nullptr ||
+                pl_tex_poll(m_Gpu, m_SyntheticPlanes[i], 0)) {
+            return false;
+        }
+    }
+
+    FrameAcquireGuard frameGuard(m_Gpu, currentFrame);
+    if (!frameGuard.ok()) {
+        return false;
+    }
+
+    // Predict exactly one current Pacer interval ahead, normalizing motion
+    // fields that span a different number of RTP ticks. The warp is queued
+    // immediately after analysis and libplacebo tracks texture dependencies
+    // without any CPU/GPU synchronization.
+    const float alpha = (float)std::clamp(temporalScale, 0.4, 1.25);
+
+    for (int i = 0; i < currentFrame.num_planes; ++i) {
+        pl_tex source = currentFrame.planes[i].texture;
+        if (source == nullptr ||
+                source->params.w != m_PlaneWidths[i] ||
+                source->params.h != m_PlaneHeights[i] ||
+                currentFrame.planes[i].components != m_PlaneComponents[i]) {
+            return false;
+        }
+
+        if (!dispatchWarp(source, m_SyntheticPlanes[i], alpha)) {
+            return false;
+        }
+    }
+
+    *syntheticFrame = currentFrame;
+    for (int i = 0; i < syntheticFrame->num_planes; ++i) {
+        syntheticFrame->planes[i].texture = m_SyntheticPlanes[i];
+    }
+
+    // These textures are owned wholly by FrameExtrapolator.
+    syntheticFrame->acquire = nullptr;
+    syntheticFrame->release = nullptr;
+    syntheticFrame->user_data = nullptr;
     return true;
 }
 
@@ -801,7 +845,6 @@ bool FrameExtrapolator::canExtrapolate(uint64_t targetTimeUs,
     }
 
     if (!m_ResourcesReady || m_SyntheticSinceLastReal ||
-            m_LatestRealFrame == nullptr || m_LatestRealFrame->width <= 0 ||
             m_LastRealRenderTimeUs == 0 || m_MotionPairIntervalUs == 0 ||
             frameIntervalUs == 0 || targetTimeUs <= m_LastRealRenderTimeUs) {
         if (firstCheckForTarget) {
@@ -842,64 +885,5 @@ bool FrameExtrapolator::canExtrapolate(uint64_t targetTimeUs,
     return true;
 }
 
-bool FrameExtrapolator::buildSyntheticFrame(pl_frame& currentFrame,
-                                             uint64_t targetTimeUs,
-                                             uint64_t frameIntervalUs,
-                                             pl_frame* syntheticFrame)
-{
-    if (!canExtrapolate(targetTimeUs, frameIntervalUs) ||
-            currentFrame.num_planes != m_PlaneCount) {
-        return false;
-    }
-
-    // buildSyntheticFrame() directly samples the mapped real frame during the
-    // warp, so Vulkan-decoded frames need the same FFmpeg/libplacebo ownership
-    // handoff as normal rendering. release() semaphore-orders ownership back
-    // only after the queued warp reads have completed; no CPU wait is added.
-    FrameAcquireGuard frameGuard(m_Gpu, currentFrame);
-    if (!frameGuard.ok()) {
-        return false;
-    }
-
-    const double predictionAlpha =
-            (double)(targetTimeUs - m_LastRealRenderTimeUs) /
-            (double)frameIntervalUs;
-    const double temporalScale =
-            (double)frameIntervalUs / (double)m_MotionPairIntervalUs;
-    const float alpha = (float)(
-            std::clamp(predictionAlpha, 0.75, 1.25) *
-            std::clamp(temporalScale, 0.4, 1.25));
-
-    pl_dispatch_reset_frame(m_Dispatch);
-
-    for (int i = 0; i < currentFrame.num_planes; ++i) {
-        pl_tex source = currentFrame.planes[i].texture;
-        if (source == nullptr ||
-                source->params.w != m_PlaneWidths[i] ||
-                source->params.h != m_PlaneHeights[i] ||
-                currentFrame.planes[i].components != m_PlaneComponents[i]) {
-            return false;
-        }
-
-        if (!dispatchWarp(source, m_SyntheticPlanes[i], alpha)) {
-            return false;
-        }
-    }
-
-    *syntheticFrame = currentFrame;
-    for (int i = 0; i < syntheticFrame->num_planes; ++i) {
-        syntheticFrame->planes[i].texture = m_SyntheticPlanes[i];
-    }
-
-    // The synthetic planes are owned wholly by FrameExtrapolator. Do not let
-    // pl_render_image() invoke the real AVFrame's Vulkan acquire/release hooks
-    // against these replacement textures or associate FFmpeg semaphores with
-    // the wrong images.
-    syntheticFrame->acquire = nullptr;
-    syntheticFrame->release = nullptr;
-    syntheticFrame->user_data = nullptr;
-
-    return true;
-}
 
 #endif

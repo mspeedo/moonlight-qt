@@ -51,7 +51,10 @@ public:
     virtual void renderFrame(AVFrame* frame) override;
     virtual bool isFrameExtrapolationActive() override;
     virtual bool canExtrapolateFrame(uint64_t targetTimeUs, uint64_t frameIntervalUs) override;
+    virtual void setFrameExtrapolationInterval(uint64_t frameIntervalUs) override;
+    virtual bool prepareExtrapolatedFrame(uint64_t targetTimeUs, uint64_t frameIntervalUs) override;
     virtual bool renderExtrapolatedFrame(uint64_t targetTimeUs, uint64_t frameIntervalUs) override;
+    virtual uint64_t getLastRealFrameSubmissionTimeUs() const override;
     virtual bool testRenderFrame(AVFrame* frame) override;
     virtual void waitToRender() override;
     virtual void cleanupRenderContext() override;
@@ -77,8 +80,11 @@ private:
     void endRenderTiming();
 
     bool createSwapchain(int depth);
+    bool startSwapchainFrame();
     bool createOverlay(pl_overlay* overlay, SDL_Surface* surface);
-    bool renderMappedFrame(pl_frame& mappedFrame);
+    bool renderMappedFrame(pl_frame& mappedFrame,
+                           bool capturePreparedTarget = false,
+                           uint64_t* submissionTimeUs = nullptr);
     bool mapAvFrameToPlacebo(const AVFrame *frame, pl_frame* mappedFrame);
     void unmapAvFrameFromPlacebo(const AVFrame *frame, pl_frame* mappedFrame);
     bool populateQueues(int videoFormat);
@@ -91,53 +97,9 @@ private:
     bool isSurfacePresentationSupportedByPhysicalDevice(VkPhysicalDevice device);
 
 #if defined(Q_OS_LINUX)
-    bool ensurePreparedSyntheticTexture(pl_tex referenceTexture)
-    {
-        if (m_Vulkan == nullptr || referenceTexture == nullptr ||
-                referenceTexture->params.format == nullptr) {
-            return false;
-        }
-
-        const pl_fmt format = referenceTexture->params.format;
-        if (!(format->caps & PL_FMT_CAP_RENDERABLE) ||
-                !(format->caps & PL_FMT_CAP_SAMPLEABLE)) {
-            return false;
-        }
-
-        if (m_PreparedSyntheticTexture != nullptr &&
-                m_PreparedSyntheticTexture->params.w == referenceTexture->params.w &&
-                m_PreparedSyntheticTexture->params.h == referenceTexture->params.h &&
-                m_PreparedSyntheticTexture->params.format == format) {
-            return true;
-        }
-
-        pl_tex_params params = {};
-        params.w = referenceTexture->params.w;
-        params.h = referenceTexture->params.h;
-        params.format = format;
-        params.sampleable = true;
-        params.renderable = true;
-        params.blit_src = !!(format->caps & PL_FMT_CAP_BLITTABLE);
-        params.debug_tag = PL_DEBUG_TAG;
-
-        m_HasPreparedSyntheticFrame = false;
-        m_PreparedSyntheticTargetUs = 0;
-        SDL_zero(m_PreparedSyntheticFrame);
-        return pl_tex_recreate(m_Vulkan->gpu,
-                               &m_PreparedSyntheticTexture,
-                               &params);
-    }
-
-    void resetPreparedSyntheticFrame(bool destroyTexture = false)
-    {
-        m_HasPreparedSyntheticFrame = false;
-        m_PreparedSyntheticTargetUs = 0;
-        SDL_zero(m_PreparedSyntheticFrame);
-
-        if (destroyTexture && m_Vulkan != nullptr) {
-            pl_tex_destroy(m_Vulkan->gpu, &m_PreparedSyntheticTexture);
-        }
-    }
+    bool ensurePreparedSyntheticTexture(pl_tex referenceTexture);
+    void resetPreparedSyntheticFrame(bool destroyTexture = false);
+    bool capturePreparedSyntheticTarget(const pl_frame& targetFrame);
 #endif
 
     // The backend renderer if we're frontend-only
@@ -165,11 +127,12 @@ private:
 
     // Ahead-of-time extrapolation prepares a full-size RGB frame offscreen so
     // the deadline path does not need to run motion warp or color conversion.
-    // This state is intentionally dormant until the preparation/present helpers
-    // are wired in by later commits.
     pl_tex m_PreparedSyntheticTexture = nullptr;
     pl_frame m_PreparedSyntheticFrame = {};
+    uint64_t m_PreparedSyntheticIntervalUs = 0;
     uint64_t m_PreparedSyntheticTargetUs = 0;
+    uint64_t m_FrameExtrapolationIntervalUs = 0;
+    uint64_t m_LastRealFrameSubmissionTimeUs = 0;
     bool m_HasPreparedSyntheticFrame = false;
 #endif
 

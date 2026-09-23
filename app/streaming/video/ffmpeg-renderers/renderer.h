@@ -168,12 +168,31 @@ public:
         return false;
     }
 
+    // Supplies the cadence currently learned by Pacer. A value of zero means
+    // cadence is not stable enough to prepare a speculative frame yet.
+    virtual void setFrameExtrapolationInterval(uint64_t) {
+    }
+
     virtual bool canExtrapolateFrame(uint64_t, uint64_t) {
+        return false;
+    }
+
+    // Acquire/prepare the final presentation target for a synthetic frame.
+    // Pacer rechecks its real-frame queue after this returns so a real frame
+    // that arrived while swapchain acquisition blocked can still win.
+    virtual bool prepareExtrapolatedFrame(uint64_t, uint64_t) {
         return false;
     }
 
     virtual bool renderExtrapolatedFrame(uint64_t, uint64_t) {
         return false;
+    }
+
+    // Returns the closest available CPU timestamp to the real frame's
+    // successful presentation submission. Pacer uses this to avoid anchoring
+    // the next deadline after speculative preparation work.
+    virtual uint64_t getLastRealFrameSubmissionTimeUs() const {
+        return 0;
     }
 
     enum class InitFailureReason

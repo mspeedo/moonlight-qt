@@ -173,8 +173,10 @@ PlVkRenderer::~PlVkRenderer()
     SDL_assert(!m_HasPendingSwapchainFrame);
 
 #if defined(Q_OS_LINUX)
-    // FrameExtrapolator owns libplacebo GPU objects, so destroy it before Vulkan.
+    // FrameExtrapolator and the prepared offscreen target own libplacebo GPU
+    // objects, so destroy them before Vulkan.
     m_FrameExtrapolator.reset();
+    resetPreparedSyntheticFrame(true);
 #endif
 
     if (m_Vulkan != nullptr) {
@@ -919,6 +921,133 @@ void PlVkRenderer::endRenderTiming()
 #endif
 }
 
+#if defined(Q_OS_LINUX)
+bool PlVkRenderer::ensurePreparedSyntheticTexture(pl_tex referenceTexture)
+{
+    if (m_Vulkan == nullptr || referenceTexture == nullptr ||
+            referenceTexture->params.format == nullptr) {
+        return false;
+    }
+
+    const pl_fmt format = referenceTexture->params.format;
+    if (!(format->caps & PL_FMT_CAP_RENDERABLE) ||
+            !(format->caps & PL_FMT_CAP_SAMPLEABLE)) {
+        return false;
+    }
+
+    if (m_PreparedSyntheticTexture != nullptr &&
+            m_PreparedSyntheticTexture->params.w == referenceTexture->params.w &&
+            m_PreparedSyntheticTexture->params.h == referenceTexture->params.h &&
+            m_PreparedSyntheticTexture->params.format == format) {
+        return true;
+    }
+
+    // A resize/format change must not turn speculative preparation into a
+    // synchronization point. If the old target is still in use, skip this
+    // candidate and recreate it on a later real frame instead.
+    if (m_PreparedSyntheticTexture != nullptr &&
+            pl_tex_poll(m_Vulkan->gpu, m_PreparedSyntheticTexture, 0)) {
+        resetPreparedSyntheticFrame(false);
+        return false;
+    }
+
+    pl_tex_params params = {};
+    params.w = referenceTexture->params.w;
+    params.h = referenceTexture->params.h;
+    params.format = format;
+    params.sampleable = true;
+    params.renderable = true;
+    params.blit_src = !!(format->caps & PL_FMT_CAP_BLITTABLE);
+    params.debug_tag = PL_DEBUG_TAG;
+
+    resetPreparedSyntheticFrame(false);
+    return pl_tex_recreate(m_Vulkan->gpu,
+                           &m_PreparedSyntheticTexture,
+                           &params);
+}
+
+void PlVkRenderer::resetPreparedSyntheticFrame(bool destroyTexture)
+{
+    m_HasPreparedSyntheticFrame = false;
+    m_PreparedSyntheticIntervalUs = 0;
+    m_PreparedSyntheticTargetUs = 0;
+    SDL_zero(m_PreparedSyntheticFrame);
+
+    if (destroyTexture && m_Vulkan != nullptr) {
+        pl_tex_destroy(m_Vulkan->gpu, &m_PreparedSyntheticTexture);
+    }
+}
+
+bool PlVkRenderer::capturePreparedSyntheticTarget(const pl_frame& targetFrame)
+{
+    if (targetFrame.num_planes != 1 || targetFrame.planes[0].texture == nullptr ||
+            !ensurePreparedSyntheticTexture(targetFrame.planes[0].texture)) {
+        resetPreparedSyntheticFrame(false);
+        return false;
+    }
+
+    // Do not queue another full-size prediction behind an older one. This
+    // keeps ahead-of-time preparation opportunistic and prevents it from
+    // delaying real-frame rendering when the GPU is already busy.
+    if (pl_tex_poll(m_Vulkan->gpu, m_PreparedSyntheticTexture, 0)) {
+        resetPreparedSyntheticFrame(false);
+        return false;
+    }
+
+    m_PreparedSyntheticFrame = targetFrame;
+    m_PreparedSyntheticFrame.planes[0].texture = m_PreparedSyntheticTexture;
+    m_PreparedSyntheticFrame.num_overlays = 0;
+    m_PreparedSyntheticFrame.overlays = nullptr;
+    m_PreparedSyntheticFrame.acquire = nullptr;
+    m_PreparedSyntheticFrame.release = nullptr;
+    m_PreparedSyntheticFrame.user_data = nullptr;
+    m_HasPreparedSyntheticFrame = false;
+    m_PreparedSyntheticIntervalUs = 0;
+    m_PreparedSyntheticTargetUs = 0;
+    return true;
+}
+#endif
+
+bool PlVkRenderer::startSwapchainFrame()
+{
+    if (m_HasPendingSwapchainFrame) {
+        return true;
+    }
+
+    // Resize and acquire only when a real or prepared synthetic frame is
+    // actually about to be submitted. In the extrapolation path this avoids
+    // holding a swapchain image while Pacer waits for the next frame/deadline.
+    int vkDrawableW, vkDrawableH;
+    SDL_Vulkan_GetDrawableSize(m_Window, &vkDrawableW, &vkDrawableH);
+    if (!pl_swapchain_resize(m_Swapchain, &vkDrawableW, &vkDrawableH)) {
+        return false;
+    }
+
+    if (!pl_swapchain_start_frame(m_Swapchain, &m_SwapchainFrame)) {
+        return false;
+    }
+    m_HasPendingSwapchainFrame = true;
+
+#ifdef PLVK_USE_EARLY_RENDER_TO_WAIT
+    // MoltenVK lazily fetches a drawable when the swapchain frame is first
+    // modified. Keep the existing early-render workaround whenever acquisition
+    // is performed here rather than in waitToRender().
+    pl_frame targetFrame;
+    pl_frame_from_swapchain(&targetFrame, &m_SwapchainFrame);
+    targetFrame.num_overlays = 1;
+    targetFrame.overlays = &m_EmptyOverlay;
+
+    beginRenderTiming();
+    if (!pl_render_image(m_Renderer, nullptr, &targetFrame, &pl_render_fast_params)) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "pl_render_image() failed during render wait");
+    }
+    endRenderTiming();
+#endif
+
+    return true;
+}
+
 void PlVkRenderer::waitToRender()
 {
     // Check if the GPU has failed before doing anything else
@@ -940,42 +1069,15 @@ void PlVkRenderer::waitToRender()
     }
 #endif
 
-    // Handle the swapchain being resized
-    int vkDrawableW, vkDrawableH;
-    SDL_Vulkan_GetDrawableSize(m_Window, &vkDrawableW, &vkDrawableH);
-    if (!pl_swapchain_resize(m_Swapchain, &vkDrawableW, &vkDrawableH)) {
-        // Swapchain (re)creation can fail if the window is occluded
+#if defined(Q_OS_LINUX)
+    if (m_FrameExtrapolator != nullptr) {
+        // Pacer may now wait for a real frame or an extrapolation deadline. Do
+        // not acquire a swapchain image until that decision has been made.
         return;
     }
-
-    // Get the next swapchain buffer for rendering. If this fails, renderFrame()
-    // will try again.
-    //
-    // NB: After calling this successfully, we *MUST* call pl_swapchain_submit_frame(),
-    // hence the implementation of cleanupRenderContext() which does just this in case
-    // renderFrame() wasn't called after waitToRender().
-    if (pl_swapchain_start_frame(m_Swapchain, &m_SwapchainFrame)) {
-        m_HasPendingSwapchainFrame = true;
-
-#ifdef PLVK_USE_EARLY_RENDER_TO_WAIT
-        // This is a workaround for MoltenVK which lazily fetches a drawable when the
-        // swapchain frame is first modified (rather than in pl_swapchain_start_frame()).
-        // By rendering an empty overlay on the swapchain here, we will trigger this wait
-        // in the desired context (before we've latched the next frame to present), rather
-        // than in the renderFrame() path where delays directly increase video latency.
-        pl_frame targetFrame;
-        pl_frame_from_swapchain(&targetFrame, &m_SwapchainFrame);
-        targetFrame.num_overlays = 1;
-        targetFrame.overlays = &m_EmptyOverlay;
-
-        beginRenderTiming();
-        if (!pl_render_image(m_Renderer, nullptr, &targetFrame, &pl_render_fast_params)) {
-            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                        "pl_render_image() failed during render wait");
-        }
-        endRenderTiming();
 #endif
-    }
+
+    startSwapchainFrame();
 }
 
 void PlVkRenderer::cleanupRenderContext()
@@ -988,12 +1090,19 @@ void PlVkRenderer::cleanupRenderContext()
     }
 }
 
-bool PlVkRenderer::renderMappedFrame(pl_frame& mappedFrame)
+bool PlVkRenderer::renderMappedFrame(pl_frame& mappedFrame,
+                                     bool capturePreparedTarget,
+                                     uint64_t* submissionTimeUs)
 {
     pl_frame targetFrame;
+    if (submissionTimeUs != nullptr) {
+        *submissionTimeUs = 0;
+    }
 
-    // If waitToRender() failed to get the next swapchain frame, skip rendering.
-    if (!m_HasPendingSwapchainFrame) {
+    // Extrapolation defers swapchain acquisition until a real or prepared
+    // synthetic frame is actually selected. Conventional paths normally arrive
+    // here with a frame already acquired by waitToRender().
+    if (!startSwapchainFrame()) {
         return false;
     }
 
@@ -1116,6 +1225,17 @@ bool PlVkRenderer::renderMappedFrame(pl_frame& mappedFrame)
     targetFrame.crop.x1 = dst.x + dst.w;
     targetFrame.crop.y1 = dst.y + dst.h;
 
+#if defined(Q_OS_LINUX)
+    if (capturePreparedTarget && m_FrameExtrapolator != nullptr &&
+            m_FrameExtrapolationIntervalUs != 0) {
+        // Snapshot an offscreen equivalent of the real swapchain target while
+        // its exact dimensions, crop, format, and output colorspace are known.
+        // The expensive synthetic image can then be rendered into this target
+        // after the real frame has already been submitted.
+        capturePreparedSyntheticTarget(targetFrame);
+    }
+#endif
+
 #ifndef PLVK_USE_EARLY_RENDER_TO_WAIT
     beginRenderTiming();
 #endif
@@ -1140,6 +1260,9 @@ bool PlVkRenderer::renderMappedFrame(pl_frame& mappedFrame)
         goto CleanupExit;
     }
     frameSubmitted = true;
+    if (submissionTimeUs != nullptr) {
+        *submissionTimeUs = LiGetMicroseconds();
+    }
 
 #ifndef PLVK_USE_EARLY_RENDER_TO_WAIT
     endRenderTiming();
@@ -1176,25 +1299,70 @@ void PlVkRenderer::renderFrame(AVFrame *frame)
 {
     pl_frame mappedFrame;
 
-    if (!m_HasPendingSwapchainFrame) {
-        return;
+#if defined(Q_OS_LINUX)
+    m_LastRealFrameSubmissionTimeUs = 0;
+    if (m_FrameExtrapolator != nullptr) {
+        // Any new real frame makes an older prediction semantically stale even
+        // if that prediction is still finishing asynchronously on the GPU.
+        resetPreparedSyntheticFrame(false);
     }
+#endif
 
     if (!mapAvFrameToPlacebo(frame, &mappedFrame)) {
         return;
     }
 
+#if defined(Q_OS_LINUX)
+    uint64_t realSubmissionUs = 0;
+    const bool submitted = renderMappedFrame(mappedFrame, true, &realSubmissionUs);
+#else
     const bool submitted = renderMappedFrame(mappedFrame);
+#endif
 
 #if defined(Q_OS_LINUX)
     if (submitted && m_FrameExtrapolator != nullptr) {
-        // Queue analysis only after the real frame's presentation work so the
-        // experimental compute passes cannot get in front of normal video
-        // rendering on a shared GPU queue.
-        if (!m_FrameExtrapolator->submitRealFrame(frame, mappedFrame, LiGetMicroseconds())) {
+        // The timestamp is captured immediately after successful swapchain
+        // submission, before overlay cleanup or speculative preparation work.
+        m_LastRealFrameSubmissionTimeUs = realSubmissionUs;
+
+        // Queue analysis, prediction warp, and output-color rendering only after
+        // the real frame has already been submitted, so speculative work never
+        // gets in front of normal video presentation.
+        if (!m_FrameExtrapolator->submitRealFrame(frame, mappedFrame, realSubmissionUs)) {
             SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                         "Frame extrapolation analysis failed; disabling it for this stream");
+            resetPreparedSyntheticFrame(false);
             m_FrameExtrapolator.reset();
+        }
+        else if (m_PreparedSyntheticFrame.num_planes != 0 &&
+                 m_FrameExtrapolationIntervalUs != 0) {
+            const uint64_t frameIntervalUs = m_FrameExtrapolationIntervalUs;
+            pl_frame syntheticYuvFrame;
+            if (m_FrameExtrapolator->buildPreparedSyntheticFrame(mappedFrame,
+                                                                  frameIntervalUs,
+                                                                  &syntheticYuvFrame)) {
+                // No overlays are baked into this image. They remain fresh and
+                // are composed only if/when the prepared frame is presented.
+                if (pl_render_image(m_Renderer,
+                                    &syntheticYuvFrame,
+                                    &m_PreparedSyntheticFrame,
+                                    &pl_render_fast_params)) {
+                    m_PreparedSyntheticIntervalUs = frameIntervalUs;
+                    m_PreparedSyntheticTargetUs = realSubmissionUs + frameIntervalUs;
+
+                    // Keep the content crop captured from the real swapchain
+                    // target. The offscreen texture outside that crop does not
+                    // need defined border pixels; final presentation recreates
+                    // the same letterbox/pillarbox geometry.
+                    m_HasPreparedSyntheticFrame = true;
+                }
+                else {
+                    resetPreparedSyntheticFrame(false);
+                }
+            }
+            else {
+                resetPreparedSyntheticFrame(false);
+            }
         }
     }
 #endif
@@ -1211,13 +1379,67 @@ bool PlVkRenderer::isFrameExtrapolationActive()
 #endif
 }
 
-bool PlVkRenderer::canExtrapolateFrame(uint64_t targetTimeUs,
-                                        uint64_t frameIntervalUs)
+void PlVkRenderer::setFrameExtrapolationInterval(uint64_t frameIntervalUs)
 {
 #if defined(Q_OS_LINUX)
-    return m_HasPendingSwapchainFrame &&
-            m_FrameExtrapolator != nullptr &&
-            m_FrameExtrapolator->canExtrapolate(targetTimeUs, frameIntervalUs);
+    m_FrameExtrapolationIntervalUs = frameIntervalUs;
+#else
+    Q_UNUSED(frameIntervalUs)
+#endif
+}
+
+uint64_t PlVkRenderer::getLastRealFrameSubmissionTimeUs() const
+{
+#if defined(Q_OS_LINUX)
+    return m_LastRealFrameSubmissionTimeUs;
+#else
+    return 0;
+#endif
+}
+
+bool PlVkRenderer::canExtrapolateFrame(uint64_t targetTimeUs,
+                                      uint64_t frameIntervalUs)
+{
+#if defined(Q_OS_LINUX)
+    if (m_FrameExtrapolator == nullptr ||
+            !m_FrameExtrapolator->canExtrapolate(targetTimeUs, frameIntervalUs)) {
+        return false;
+    }
+
+    if (!m_HasPreparedSyntheticFrame || m_PreparedSyntheticTexture == nullptr) {
+        StreamHealthTelemetry::frameExtrapolationRejectState();
+        return false;
+    }
+
+    if (m_PreparedSyntheticIntervalUs != frameIntervalUs ||
+            m_PreparedSyntheticTargetUs != targetTimeUs) {
+        StreamHealthTelemetry::frameExtrapolationRejectTiming();
+        return false;
+    }
+
+    // This is the key deadline property: never wait for speculative work. If
+    // the complete RGB candidate has not finished, preserve normal hold/repeat.
+    if (pl_tex_poll(m_Vulkan->gpu, m_PreparedSyntheticTexture, 0)) {
+        StreamHealthTelemetry::frameExtrapolationRejectGpuBusy();
+        return false;
+    }
+
+    return true;
+#else
+    Q_UNUSED(targetTimeUs)
+    Q_UNUSED(frameIntervalUs)
+    return false;
+#endif
+}
+
+bool PlVkRenderer::prepareExtrapolatedFrame(uint64_t targetTimeUs,
+                                            uint64_t frameIntervalUs)
+{
+#if defined(Q_OS_LINUX)
+    // Revalidate readiness before potentially blocking in swapchain acquisition.
+    // Pacer will check its real-frame queue again after this returns.
+    return canExtrapolateFrame(targetTimeUs, frameIntervalUs) &&
+            startSwapchainFrame();
 #else
     Q_UNUSED(targetTimeUs)
     Q_UNUSED(frameIntervalUs)
@@ -1233,24 +1455,12 @@ bool PlVkRenderer::renderExtrapolatedFrame(uint64_t targetTimeUs,
         return false;
     }
 
-    const AVFrame* latestRealFrame = m_FrameExtrapolator->latestRealFrame();
-    pl_frame mappedFrame;
-    if (latestRealFrame == nullptr ||
-            !mapAvFrameToPlacebo(latestRealFrame, &mappedFrame)) {
-        return false;
-    }
-
-    pl_frame syntheticFrame;
-    if (!m_FrameExtrapolator->buildSyntheticFrame(mappedFrame,
-                                                    targetTimeUs,
-                                                    frameIntervalUs,
-                                                    &syntheticFrame)) {
-        unmapAvFrameFromPlacebo(latestRealFrame, &mappedFrame);
-        return false;
-    }
-
-    const bool submitted = renderMappedFrame(syntheticFrame);
-    unmapAvFrameFromPlacebo(latestRealFrame, &mappedFrame);
+    // Motion analysis, warping, scaling, and YUV/output color conversion have
+    // already completed. This is only the final 1:1 RGB presentation pass plus
+    // fresh overlays.
+    pl_frame preparedFrame = m_PreparedSyntheticFrame;
+    const bool submitted = renderMappedFrame(preparedFrame, false);
+    resetPreparedSyntheticFrame(false);
 
     if (submitted) {
         m_FrameExtrapolator->markSyntheticPresented();

@@ -33,10 +33,12 @@ static_assert(PACER_MAX_OUTSTANDING_FRAMES == MAX_QUEUED_FRAMES + 2,
 // V-sync happens.
 #define TIMER_SLACK_MS 3
 
-// Allow ordinary host/game cadence jitter to resolve before synthesizing a
-// replacement frame. The motion target remains the original predicted frame
-// time; this grace only controls when we decide that frame is actually missing.
-static constexpr uint64_t EXTRAPOLATION_GRACE_US = 2000ULL;
+// The synthetic candidate is prepared ahead of time, so do not add an
+// artificial grace period after the expected real-frame timestamp. The
+// millisecond QWaitCondition wake granularity and final swapchain submission
+// already provide unavoidable tolerance; extra grace would create a visible
+// long/short VRR cadence pair.
+static constexpr uint64_t EXTRAPOLATION_GRACE_US = 0ULL;
 
 Pacer::Pacer(IFFmpegRenderer* renderer, PVIDEO_STATS videoStats) :
     m_RenderThread(nullptr),
@@ -175,10 +177,9 @@ int Pacer::renderThread(void* context)
         me->m_FrameQueueLock.lock();
 
         // Wait for a real frame. With extrapolation active, wake at the
-        // predicted real-frame timestamp plus a small grace period so normal
-        // host/game cadence jitter does not immediately become a synthetic
-        // presentation. The extrapolation target itself remains the original
-        // predicted timestamp so motion projection is not increased by grace.
+        // predicted next real-frame timestamp. The synthetic candidate has
+        // already been prepared, so the deadline path should only perform the
+        // final presentation pass rather than deliberately waiting past target.
         bool extrapolationDeadlineReached = false;
         uint64_t extrapolationTargetUs = 0;
         uint64_t extrapolationTriggerUs = 0;
@@ -209,8 +210,7 @@ int Pacer::renderThread(void* context)
                 me->m_RenderQueue.isEmpty()) {
             StreamHealthTelemetry::frameExtrapolationDeadlineMiss();
 
-            // Do not hold the queue lock while checking GPU readiness. The
-            // trigger has already waited through the grace period, but a real
+            // Do not hold the queue lock while checking GPU readiness. A real
             // frame can still arrive while we perform the cheap readiness test.
             me->m_FrameQueueLock.unlock();
 
@@ -221,18 +221,27 @@ int Pacer::renderThread(void* context)
                     me->m_VsyncRenderer->canExtrapolateFrame(
                             extrapolationTargetUs, me->m_FrameIntervalUs);
 
-            // Close the most important race before doing the expensive full
-            // synthetic warp/present. If a real frame arrived while readiness
-            // was checked, cancel this synthetic opportunity and let the normal
-            // newest-frame path render the real frame instead.
+            // Swapchain acquisition can itself block briefly. Perform it before
+            // the final queue check so a real frame arriving during acquisition
+            // still wins over the synthetic candidate.
+            const bool presentationTargetReady = extrapolationReady &&
+                    me->m_VsyncRenderer->prepareExtrapolatedFrame(
+                            extrapolationTargetUs, me->m_FrameIntervalUs);
+
+            // Acquisition can also consume enough time that presenting the
+            // synthetic frame would recreate a long/short cadence pair.
+            const bool presentationStillUseful = presentationTargetReady &&
+                    LiGetMicroseconds() <=
+                    extrapolationTriggerUs + me->m_FrameIntervalUs / 4ULL;
+
             bool realFrameArrived = false;
-            if (extrapolationReady) {
+            if (presentationTargetReady) {
                 me->m_FrameQueueLock.lock();
                 realFrameArrived = me->m_Stopping || !me->m_RenderQueue.isEmpty();
                 me->m_FrameQueueLock.unlock();
             }
 
-            const bool extrapolated = extrapolationReady &&
+            const bool extrapolated = presentationStillUseful &&
                     !realFrameArrived &&
                     me->m_VsyncRenderer->renderExtrapolatedFrame(
                             extrapolationTargetUs, me->m_FrameIntervalUs);
@@ -532,6 +541,13 @@ void Pacer::renderFrame(AVFrame* frame)
         m_LastRealPts = frame->pts;
         m_SyntheticSinceLastReal = false;
         m_SyntheticReplacedPts = AV_NOPTS_VALUE;
+
+        // Ahead-of-time preparation is only useful once the same cadence data
+        // that arms the deadline is stable. Supplying it before renderFrame()
+        // lets the renderer queue the next synthetic candidate immediately
+        // after this real frame is submitted.
+        m_VsyncRenderer->setFrameExtrapolationInterval(
+                    m_CadenceSampleCount >= 3 ? m_FrameIntervalUs : 0);
     }
 
     // Resolve the frame identity before taking the semantic render-start clock.
@@ -556,9 +572,13 @@ void Pacer::renderFrame(AVFrame* frame)
     uint64_t afterRender = LiGetMicroseconds();
 
     if (m_FrameExtrapolationActive) {
-        // Anchor the missing-frame deadline after normal presentation work has
-        // been submitted, not before renderer/analysis CPU overhead.
-        m_LastRealRenderTimeUs = afterRender;
+        // Prefer the renderer's timestamp taken immediately after successful
+        // real-frame presentation submission. Falling back to render return is
+        // only for renderers that do not expose a more precise anchor. This
+        // keeps speculative preparation CPU work out of the next deadline.
+        const uint64_t submissionUs =
+                m_VsyncRenderer->getLastRealFrameSubmissionTimeUs();
+        m_LastRealRenderTimeUs = submissionUs != 0 ? submissionUs : afterRender;
     }
 
     m_VideoStats->totalRenderTimeUs += (afterRender - beforeRender);
