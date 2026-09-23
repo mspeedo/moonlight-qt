@@ -177,9 +177,9 @@ public:
         return false;
     }
 
-    // Acquire/prepare the final presentation target for a synthetic frame.
-    // Pacer rechecks its real-frame queue after this returns so a real frame
-    // that arrived while swapchain acquisition blocked can still win.
+    // Confirm that the final presentation target for a synthetic frame is
+    // already available. Implementations used for low-latency extrapolation
+    // should keep this non-blocking; Pacer rechecks the real-frame queue after it.
     virtual bool prepareExtrapolatedFrame(uint64_t, uint64_t) {
         return false;
     }

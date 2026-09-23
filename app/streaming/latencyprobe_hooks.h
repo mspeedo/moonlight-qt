@@ -360,8 +360,15 @@ inline bool swapchainSubmitFrame(pl_swapchain swapchain)
 
     // Preserve the existing pipeline-present timestamp immediately after the
     // original input-benchmark t1, before any display-confirmation bookkeeping.
-    if (result && StreamPipelineTelemetry::presentPendingFast()) {
-        StreamPipelineTelemetry::presentSuccess(LiGetMicroseconds());
+    // Present interval tracks every successful visual submit, including
+    // extrapolated frames. Real-frame-only latency/counters still require the
+    // armed render context.
+    if (result && StreamPipelineTelemetry::isActiveFast()) {
+        const uint64_t presentUs = LiGetMicroseconds();
+        StreamPipelineTelemetry::presentSubmitted(presentUs);
+        if (StreamPipelineTelemetry::presentPendingFast()) {
+            StreamPipelineTelemetry::presentSuccess(presentUs);
+        }
     }
 
     const uint64_t presentId = result && sampleRequested ?

@@ -799,6 +799,27 @@ void recordNetworkBufferReserve(std::uint64_t completedUs,
     g_NetworkBufferConfiguredUs.store(configuredUs, std::memory_order_relaxed);
 }
 
+void presentSubmitted(std::uint64_t presentUs)
+{
+    if (!g_Active.load(std::memory_order_relaxed)) {
+        return;
+    }
+
+    // Rebase on the render thread after a reset or resume from frozen telemetry.
+    // An already-live benchmark start preserves the interval baseline too.
+    const std::uint64_t generation = g_Generation.load(std::memory_order_acquire);
+    if (g_PresentGeneration != generation) {
+        g_LastPresentUs = 0;
+        g_PresentGeneration = generation;
+    }
+
+    if (g_LastPresentUs != 0 &&
+            presentUs > g_LastPresentUs) {
+        g_PresentInterval.add(presentUs, presentUs - g_LastPresentUs);
+    }
+    g_LastPresentUs = presentUs;
+}
+
 void presentSuccess(std::uint64_t presentUs)
 {
     if (!g_Active.load(std::memory_order_relaxed) ||
@@ -812,20 +833,7 @@ void presentSuccess(std::uint64_t presentUs)
     g_RenderStartToPresent.add(
                                presentUs,
                                presentUs - g_RenderContext.renderStartUs);
-
-    // Rebase on the render thread after a reset or resume from frozen telemetry.
-    // An already-live benchmark start preserves the interval baseline too.
-    const std::uint64_t generation = g_Generation.load(std::memory_order_acquire);
-    if (g_PresentGeneration != generation) {
-        g_LastPresentUs = 0;
-        g_PresentGeneration = generation;
-    }
     g_Frames.fetch_add(1, std::memory_order_relaxed);
-    if (g_LastPresentUs != 0 &&
-            presentUs > g_LastPresentUs) {
-        g_PresentInterval.add(presentUs, presentUs - g_LastPresentUs);
-    }
-    g_LastPresentUs = presentUs;
 
     // Consume the context at the first successful real swapchain submit. A
     // renderer that performs another submit inside the same renderFrame() must

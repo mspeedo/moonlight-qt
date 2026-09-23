@@ -21,6 +21,9 @@ void pacerFrameDrop();
 // by the debug OSD and must never block or affect the render path.
 void setFrameExtrapolationActive(bool active);
 void frameExtrapolationDeadlineMiss();
+void frameExtrapolationDeadlineWake(std::uint64_t latenessUs);
+void frameExtrapolationSubmitDelay(std::uint64_t delayUs);
+void frameExtrapolationCancelledByReal();
 void frameExtrapolationOpportunity();
 void frameExtrapolationAnalysisBusySkip();
 void frameExtrapolationRejectNoMotion();

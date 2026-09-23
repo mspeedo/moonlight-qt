@@ -213,21 +213,24 @@ int Pacer::renderThread(void* context)
             me->m_FrameQueueLock.unlock();
 
             const uint64_t requestUs = LiGetMicroseconds();
+            if (requestUs >= extrapolationTriggerUs) {
+                StreamHealthTelemetry::frameExtrapolationDeadlineWake(
+                        requestUs - extrapolationTriggerUs);
+            }
             const bool deadlineStillUseful =
                     requestUs <= extrapolationTriggerUs + me->m_FrameIntervalUs / 4ULL;
             const bool extrapolationReady = deadlineStillUseful &&
                     me->m_VsyncRenderer->canExtrapolateFrame(
                             extrapolationTargetUs, me->m_FrameIntervalUs);
 
-            // Swapchain acquisition can itself block briefly. Perform it before
-            // the final queue check so a real frame arriving during acquisition
-            // still wins over the synthetic candidate.
+            // waitToRender() acquired the swapchain target before this timed
+            // wait began, so this deadline-path confirmation must remain
+            // non-blocking. Recheck usefulness afterward as a guard against
+            // scheduler stalls or unexpectedly expensive readiness work.
             const bool presentationTargetReady = extrapolationReady &&
                     me->m_VsyncRenderer->prepareExtrapolatedFrame(
                             extrapolationTargetUs, me->m_FrameIntervalUs);
 
-            // Acquisition can also consume enough time that presenting the
-            // synthetic frame would recreate a long/short cadence pair.
             const bool presentationStillUseful = presentationTargetReady &&
                     LiGetMicroseconds() <=
                     extrapolationTriggerUs + me->m_FrameIntervalUs / 4ULL;
@@ -237,6 +240,9 @@ int Pacer::renderThread(void* context)
                 me->m_FrameQueueLock.lock();
                 realFrameArrived = me->m_Stopping || !me->m_RenderQueue.isEmpty();
                 me->m_FrameQueueLock.unlock();
+                if (realFrameArrived && !me->m_Stopping) {
+                    StreamHealthTelemetry::frameExtrapolationCancelledByReal();
+                }
             }
 
             const bool extrapolated = presentationStillUseful &&
@@ -244,6 +250,11 @@ int Pacer::renderThread(void* context)
                     me->m_VsyncRenderer->renderExtrapolatedFrame(
                             extrapolationTargetUs, me->m_FrameIntervalUs);
             if (extrapolated) {
+                const uint64_t submittedUs = LiGetMicroseconds();
+                if (submittedUs >= extrapolationTriggerUs) {
+                    StreamHealthTelemetry::frameExtrapolationSubmitDelay(
+                            submittedUs - extrapolationTriggerUs);
+                }
                 me->m_SyntheticSinceLastReal = true;
                 if (me->m_LastRealPts != AV_NOPTS_VALUE) {
                     const int64_t intervalPts = (int64_t)

@@ -27,6 +27,13 @@ std::atomic<std::uint64_t> g_PacerFrameDrops { 0 };
 // selected extrapolator is still alive.
 std::atomic<int> g_FrameExtrapolationActiveInstances { 0 };
 std::atomic<std::uint64_t> g_FrameExtrapolationDeadlineMisses { 0 };
+std::atomic<std::uint64_t> g_FrameExtrapolationDeadlineWakeCount { 0 };
+std::atomic<std::uint64_t> g_FrameExtrapolationDeadlineWakeTotalUs { 0 };
+std::atomic<std::uint64_t> g_FrameExtrapolationDeadlineWakeMaxUs { 0 };
+std::atomic<std::uint64_t> g_FrameExtrapolationSubmitCount { 0 };
+std::atomic<std::uint64_t> g_FrameExtrapolationSubmitTotalUs { 0 };
+std::atomic<std::uint64_t> g_FrameExtrapolationSubmitMaxUs { 0 };
+std::atomic<std::uint64_t> g_FrameExtrapolationCancelledByReal { 0 };
 std::atomic<std::uint64_t> g_FrameExtrapolationOpportunities { 0 };
 std::atomic<std::uint64_t> g_FrameExtrapolationAnalysisBusySkips { 0 };
 std::atomic<std::uint64_t> g_FrameExtrapolationRejectNoMotion { 0 };
@@ -34,6 +41,17 @@ std::atomic<std::uint64_t> g_FrameExtrapolationRejectTiming { 0 };
 std::atomic<std::uint64_t> g_FrameExtrapolationRejectGpuBusy { 0 };
 std::atomic<std::uint64_t> g_FrameExtrapolationRejectState { 0 };
 std::atomic<std::uint64_t> g_FrameExtrapolated { 0 };
+
+void updateMaximum(std::atomic<std::uint64_t>& maximum, std::uint64_t value)
+{
+    std::uint64_t current = maximum.load(std::memory_order_relaxed);
+    while (value > current &&
+           !maximum.compare_exchange_weak(current,
+                                          value,
+                                          std::memory_order_relaxed,
+                                          std::memory_order_relaxed)) {
+    }
+}
 
 } // namespace
 
@@ -45,6 +63,13 @@ void reset()
     // Do not reset g_FrameExtrapolationActiveInstances here. Extrapolator
     // lifetime is independent of OSD/session-counter reset ordering.
     g_FrameExtrapolationDeadlineMisses.store(0, std::memory_order_relaxed);
+    g_FrameExtrapolationDeadlineWakeCount.store(0, std::memory_order_relaxed);
+    g_FrameExtrapolationDeadlineWakeTotalUs.store(0, std::memory_order_relaxed);
+    g_FrameExtrapolationDeadlineWakeMaxUs.store(0, std::memory_order_relaxed);
+    g_FrameExtrapolationSubmitCount.store(0, std::memory_order_relaxed);
+    g_FrameExtrapolationSubmitTotalUs.store(0, std::memory_order_relaxed);
+    g_FrameExtrapolationSubmitMaxUs.store(0, std::memory_order_relaxed);
+    g_FrameExtrapolationCancelledByReal.store(0, std::memory_order_relaxed);
     g_FrameExtrapolationOpportunities.store(0, std::memory_order_relaxed);
     g_FrameExtrapolationAnalysisBusySkips.store(0, std::memory_order_relaxed);
     g_FrameExtrapolationRejectNoMotion.store(0, std::memory_order_relaxed);
@@ -103,6 +128,25 @@ void setFrameExtrapolationActive(bool active)
 void frameExtrapolationDeadlineMiss()
 {
     g_FrameExtrapolationDeadlineMisses.fetch_add(1, std::memory_order_relaxed);
+}
+
+void frameExtrapolationDeadlineWake(std::uint64_t latenessUs)
+{
+    g_FrameExtrapolationDeadlineWakeCount.fetch_add(1, std::memory_order_relaxed);
+    g_FrameExtrapolationDeadlineWakeTotalUs.fetch_add(latenessUs, std::memory_order_relaxed);
+    updateMaximum(g_FrameExtrapolationDeadlineWakeMaxUs, latenessUs);
+}
+
+void frameExtrapolationSubmitDelay(std::uint64_t delayUs)
+{
+    g_FrameExtrapolationSubmitCount.fetch_add(1, std::memory_order_relaxed);
+    g_FrameExtrapolationSubmitTotalUs.fetch_add(delayUs, std::memory_order_relaxed);
+    updateMaximum(g_FrameExtrapolationSubmitMaxUs, delayUs);
+}
+
+void frameExtrapolationCancelledByReal()
+{
+    g_FrameExtrapolationCancelledByReal.fetch_add(1, std::memory_order_relaxed);
 }
 
 void frameExtrapolationOpportunity()
@@ -167,6 +211,16 @@ void formatOverlayLines(char* output, std::size_t length)
 
     const int activeExtrapolators =
             g_FrameExtrapolationActiveInstances.load(std::memory_order_relaxed);
+    const std::uint64_t wakeCount =
+            g_FrameExtrapolationDeadlineWakeCount.load(std::memory_order_relaxed);
+    const std::uint64_t submitCount =
+            g_FrameExtrapolationSubmitCount.load(std::memory_order_relaxed);
+    const double wakeAverageMs = wakeCount == 0 ? 0.0 :
+            static_cast<double>(g_FrameExtrapolationDeadlineWakeTotalUs.load(
+                    std::memory_order_relaxed)) / static_cast<double>(wakeCount) / 1000.0;
+    const double submitAverageMs = submitCount == 0 ? 0.0 :
+            static_cast<double>(g_FrameExtrapolationSubmitTotalUs.load(
+                    std::memory_order_relaxed)) / static_cast<double>(submitCount) / 1000.0;
 
     std::snprintf(output,
                   length,
@@ -176,6 +230,7 @@ void formatOverlayLines(char* output, std::size_t length)
                   "  Pacer frame drops: %llu\n"
                   "Frame extrapolation: %s | presented %llu\n"
                   "  deadline misses %llu | opportunities %llu | analysis busy skips %llu\n"
+                  "  timing: wake avg %.2f max %.2f ms | submit avg %.2f max %.2f ms | real wins %llu\n"
                   "  rejects: no motion %llu | timing %llu | GPU busy %llu | state %llu",
                   recoveredFrames,
                   failedFrames,
@@ -193,6 +248,14 @@ void formatOverlayLines(char* output, std::size_t length)
                       g_FrameExtrapolationOpportunities.load(std::memory_order_relaxed)),
                   static_cast<unsigned long long>(
                       g_FrameExtrapolationAnalysisBusySkips.load(std::memory_order_relaxed)),
+                  wakeAverageMs,
+                  static_cast<double>(g_FrameExtrapolationDeadlineWakeMaxUs.load(
+                      std::memory_order_relaxed)) / 1000.0,
+                  submitAverageMs,
+                  static_cast<double>(g_FrameExtrapolationSubmitMaxUs.load(
+                      std::memory_order_relaxed)) / 1000.0,
+                  static_cast<unsigned long long>(
+                      g_FrameExtrapolationCancelledByReal.load(std::memory_order_relaxed)),
                   static_cast<unsigned long long>(
                       g_FrameExtrapolationRejectNoMotion.load(std::memory_order_relaxed)),
                   static_cast<unsigned long long>(

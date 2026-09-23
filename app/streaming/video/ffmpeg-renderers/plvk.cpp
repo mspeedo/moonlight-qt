@@ -1014,9 +1014,10 @@ bool PlVkRenderer::startSwapchainFrame()
         return true;
     }
 
-    // Resize and acquire only when a real or prepared synthetic frame is
-    // actually about to be submitted. In the extrapolation path this avoids
-    // holding a swapchain image while Pacer waits for the next frame/deadline.
+    // Acquire the presentation target before Pacer waits for the next frame.
+    // Keeping swapchain acquisition out of the extrapolation deadline path is
+    // critical: a late acquire would directly extend the hitch we are trying to
+    // mask. renderMappedFrame() still calls this as a harmless fallback.
     int vkDrawableW, vkDrawableH;
     SDL_Vulkan_GetDrawableSize(m_Window, &vkDrawableW, &vkDrawableH);
     if (!pl_swapchain_resize(m_Swapchain, &vkDrawableW, &vkDrawableH)) {
@@ -1069,14 +1070,9 @@ void PlVkRenderer::waitToRender()
     }
 #endif
 
-#if defined(Q_OS_LINUX)
-    if (m_FrameExtrapolator != nullptr) {
-        // Pacer may now wait for a real frame or an extrapolation deadline. Do
-        // not acquire a swapchain image until that decision has been made.
-        return;
-    }
-#endif
-
+    // Acquire early for both real and extrapolated frames. Pacer may now wait
+    // for either a decoded frame or an extrapolation deadline with the final
+    // presentation target already available.
     startSwapchainFrame();
 }
 
@@ -1099,9 +1095,10 @@ bool PlVkRenderer::renderMappedFrame(pl_frame& mappedFrame,
         *submissionTimeUs = 0;
     }
 
-    // Extrapolation defers swapchain acquisition until a real or prepared
-    // synthetic frame is actually selected. Conventional paths normally arrive
-    // here with a frame already acquired by waitToRender().
+    // The normal path arrives here with a frame already acquired by
+    // waitToRender(). Keep this fallback for transient acquisition failures and
+    // non-threaded/special paths without putting acquisition on the synthetic
+    // deadline path.
     if (!startSwapchainFrame()) {
         return false;
     }
@@ -1436,10 +1433,10 @@ bool PlVkRenderer::prepareExtrapolatedFrame(uint64_t targetTimeUs,
                                             uint64_t frameIntervalUs)
 {
 #if defined(Q_OS_LINUX)
-    // Revalidate readiness before potentially blocking in swapchain acquisition.
-    // Pacer will check its real-frame queue again after this returns.
-    return canExtrapolateFrame(targetTimeUs, frameIntervalUs) &&
-            startSwapchainFrame();
+    // The presentation target must already have been acquired by waitToRender().
+    // This deadline-path check is deliberately non-blocking.
+    return m_HasPendingSwapchainFrame &&
+            canExtrapolateFrame(targetTimeUs, frameIntervalUs);
 #else
     Q_UNUSED(targetTimeUs)
     Q_UNUSED(frameIntervalUs)

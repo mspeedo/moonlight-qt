@@ -146,6 +146,12 @@ void decodeSubmitted(std::uint64_t decodeStartUs, bool accepted);
 void decodedFrame(AVFrame* frame, std::uint64_t decodedUs);
 
 #if !defined(_WIN32) && !defined(__APPLE__)
+// Called for every successful swapchain submission so Present interval reflects
+// both real and extrapolated visual updates.
+void presentSubmitted(std::uint64_t presentUs);
+
+// Called only when the successful submission belongs to a real decoded frame.
+// This records Render start -> present and the real-frame counter/context.
 void presentSuccess(std::uint64_t presentUs);
 #endif
 
