@@ -27,14 +27,23 @@ public:
     // the GPU; libplacebo tracks the resource dependencies between dispatches.
     bool submitRealFrame(const AVFrame* frame, pl_frame& mappedFrame, uint64_t renderTimeUs);
 
+    // Queue a one-frame-ahead synthetic YUV frame immediately after a real frame.
+    // Unlike the deadline path, this deliberately does not wait for analysis to
+    // complete: libplacebo orders the warp behind the just-queued motion passes.
+    // It returns false rather than building a backlog if the reusable synthetic
+    // planes are still in use by an older prepared frame.
+    bool buildPreparedSyntheticFrame(pl_frame& currentFrame,
+                                     uint64_t frameIntervalUs,
+                                     pl_frame* syntheticFrame);
+
     // Non-blocking readiness check. If analysis is still executing, this returns
     // false so the pacer preserves normal hold/repeat behavior.
     bool canExtrapolate(uint64_t targetTimeUs, uint64_t frameIntervalUs);
 
     const AVFrame* latestRealFrame() const { return m_LatestRealFrame; }
 
-    // Produces a YUV-compatible synthetic pl_frame using the current real frame
-    // as the source. The returned frame borrows this object's synthetic textures.
+    // Legacy on-demand builder retained as a fallback/debug path. The normal
+    // Vulkan extrapolation path now presents an ahead-of-time prepared image.
     bool buildSyntheticFrame(pl_frame& currentFrame,
                              uint64_t targetTimeUs,
                              uint64_t frameIntervalUs,
