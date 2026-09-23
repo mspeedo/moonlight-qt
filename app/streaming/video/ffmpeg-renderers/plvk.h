@@ -90,6 +90,56 @@ private:
     bool isColorSpaceSupportedByPhysicalDevice(VkPhysicalDevice device, VkColorSpaceKHR colorSpace);
     bool isSurfacePresentationSupportedByPhysicalDevice(VkPhysicalDevice device);
 
+#if defined(Q_OS_LINUX)
+    bool ensurePreparedSyntheticTexture(pl_tex referenceTexture)
+    {
+        if (m_Vulkan == nullptr || referenceTexture == nullptr ||
+                referenceTexture->params.format == nullptr) {
+            return false;
+        }
+
+        const pl_fmt format = referenceTexture->params.format;
+        if (!(format->caps & PL_FMT_CAP_RENDERABLE) ||
+                !(format->caps & PL_FMT_CAP_SAMPLEABLE)) {
+            return false;
+        }
+
+        if (m_PreparedSyntheticTexture != nullptr &&
+                m_PreparedSyntheticTexture->params.w == referenceTexture->params.w &&
+                m_PreparedSyntheticTexture->params.h == referenceTexture->params.h &&
+                m_PreparedSyntheticTexture->params.format == format) {
+            return true;
+        }
+
+        pl_tex_params params = {};
+        params.w = referenceTexture->params.w;
+        params.h = referenceTexture->params.h;
+        params.format = format;
+        params.sampleable = true;
+        params.renderable = true;
+        params.blit_src = !!(format->caps & PL_FMT_CAP_BLITTABLE);
+        params.debug_tag = PL_DEBUG_TAG;
+
+        m_HasPreparedSyntheticFrame = false;
+        m_PreparedSyntheticTargetUs = 0;
+        SDL_zero(m_PreparedSyntheticFrame);
+        return pl_tex_recreate(m_Vulkan->gpu,
+                               &m_PreparedSyntheticTexture,
+                               &params);
+    }
+
+    void resetPreparedSyntheticFrame(bool destroyTexture = false)
+    {
+        m_HasPreparedSyntheticFrame = false;
+        m_PreparedSyntheticTargetUs = 0;
+        SDL_zero(m_PreparedSyntheticFrame);
+
+        if (destroyTexture && m_Vulkan != nullptr) {
+            pl_tex_destroy(m_Vulkan->gpu, &m_PreparedSyntheticTexture);
+        }
+    }
+#endif
+
     // The backend renderer if we're frontend-only
     IFFmpegRenderer* m_Backend;
     AVHWDeviceType m_HwDeviceType;
