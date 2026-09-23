@@ -112,6 +112,15 @@ private:
 
 #if defined(Q_OS_LINUX)
     std::unique_ptr<FrameExtrapolator> m_FrameExtrapolator;
+
+    // Ahead-of-time extrapolation prepares a full-size RGB frame offscreen so
+    // the deadline path does not need to run motion warp or color conversion.
+    // This state is intentionally dormant until the preparation/present helpers
+    // are wired in by later commits.
+    pl_tex m_PreparedSyntheticTexture = nullptr;
+    pl_frame m_PreparedSyntheticFrame = {};
+    uint64_t m_PreparedSyntheticTargetUs = 0;
+    bool m_HasPreparedSyntheticFrame = false;
 #endif
 
     // The libplacebo rendering state
