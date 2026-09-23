@@ -4,6 +4,7 @@
 
 #if defined(Q_OS_LINUX) && defined(HAVE_LIBPLACEBO_VULKAN)
 
+#include <algorithm>
 #include <cstdint>
 
 #include <libplacebo/dispatch.h>
@@ -34,7 +35,93 @@ public:
     // planes are still in use by an older prepared frame.
     bool buildPreparedSyntheticFrame(pl_frame& currentFrame,
                                      uint64_t frameIntervalUs,
-                                     pl_frame* syntheticFrame);
+                                     pl_frame* syntheticFrame)
+    {
+        if (!m_ResourcesReady || !m_HasMotion || m_SyntheticSinceLastReal ||
+                m_MotionPairIntervalUs == 0 || frameIntervalUs == 0 ||
+                currentFrame.num_planes != m_PlaneCount || syntheticFrame == nullptr) {
+            return false;
+        }
+
+        const double temporalScale = (double)frameIntervalUs /
+                (double)m_MotionPairIntervalUs;
+        if (temporalScale < 0.35 || temporalScale > 1.50) {
+            return false;
+        }
+
+        // Never queue a second prediction behind an older prepared frame. The
+        // deadline path must either find an already prepared image or skip this
+        // opportunity; background prediction must not become a GPU backlog that
+        // delays real-frame rendering.
+        for (int i = 0; i < m_PlaneCount; ++i) {
+            if (m_SyntheticPlanes[i] == nullptr ||
+                    pl_tex_poll(m_Gpu, m_SyntheticPlanes[i], 0)) {
+                return false;
+            }
+        }
+
+        struct AcquireGuard {
+            pl_gpu gpu;
+            pl_frame* frame;
+            bool ok = false;
+            bool release = false;
+
+            AcquireGuard(pl_gpu gpu_, pl_frame& frame_) :
+                gpu(gpu_), frame(&frame_)
+            {
+                if (frame_.acquire == nullptr) {
+                    ok = true;
+                    return;
+                }
+                if (frame_.release == nullptr) {
+                    return;
+                }
+                ok = frame_.acquire(gpu_, &frame_);
+                release = ok;
+            }
+
+            ~AcquireGuard()
+            {
+                if (release) {
+                    frame->release(gpu, frame);
+                }
+            }
+        } frameGuard(m_Gpu, currentFrame);
+
+        if (!frameGuard.ok) {
+            return false;
+        }
+
+        // This prediction represents exactly the next expected real-frame
+        // interval. Normalize motion fields spanning more/less than one RTP
+        // interval before projecting them forward.
+        const float alpha = (float)std::clamp(temporalScale, 0.4, 1.25);
+
+        for (int i = 0; i < currentFrame.num_planes; ++i) {
+            pl_tex source = currentFrame.planes[i].texture;
+            if (source == nullptr ||
+                    source->params.w != m_PlaneWidths[i] ||
+                    source->params.h != m_PlaneHeights[i] ||
+                    currentFrame.planes[i].components != m_PlaneComponents[i]) {
+                return false;
+            }
+
+            if (!dispatchWarp(source, m_SyntheticPlanes[i], alpha)) {
+                return false;
+            }
+        }
+
+        *syntheticFrame = currentFrame;
+        for (int i = 0; i < syntheticFrame->num_planes; ++i) {
+            syntheticFrame->planes[i].texture = m_SyntheticPlanes[i];
+        }
+
+        // These textures are owned by FrameExtrapolator rather than FFmpeg.
+        syntheticFrame->acquire = nullptr;
+        syntheticFrame->release = nullptr;
+        syntheticFrame->user_data = nullptr;
+        return true;
+    }
 
     // Non-blocking readiness check. If analysis is still executing, this returns
     // false so the pacer preserves normal hold/repeat behavior.
