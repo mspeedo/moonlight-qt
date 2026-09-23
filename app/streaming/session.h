@@ -198,7 +198,8 @@ private:
                        bool enableTransportBuffer = false,
                        int transportBufferMs = 0,
                        bool enableFrameExtrapolation = false,
-                       int frameExtrapolationGraceMs = 2);
+                       int frameExtrapolationGraceMs = 2,
+                       bool enableFrameExtrapolationQualityTelemetry = false);
 
     static
     void clStageStarting(int stage);

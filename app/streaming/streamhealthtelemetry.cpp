@@ -12,6 +12,7 @@ extern "C" {
 }
 
 #include <atomic>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 
@@ -41,6 +42,13 @@ std::atomic<std::uint64_t> g_FrameExtrapolationRejectTiming { 0 };
 std::atomic<std::uint64_t> g_FrameExtrapolationRejectGpuBusy { 0 };
 std::atomic<std::uint64_t> g_FrameExtrapolationRejectState { 0 };
 std::atomic<std::uint64_t> g_FrameExtrapolated { 0 };
+std::atomic<std::uint64_t> g_FrameExtrapolationQualityGeneration { 1 };
+std::atomic<std::uint64_t> g_FrameExtrapolationQualitySamples { 0 };
+std::atomic<std::uint64_t> g_FrameExtrapolationQualityMotionSamples { 0 };
+std::atomic<std::uint64_t> g_FrameExtrapolationQualitySyntheticMaeTotal { 0 };
+std::atomic<std::uint64_t> g_FrameExtrapolationQualityHoldMaeTotal { 0 };
+std::atomic<std::uint64_t> g_FrameExtrapolationQualityBetterFractionTotal { 0 };
+std::atomic<std::uint64_t> g_FrameExtrapolationQualitySkips { 0 };
 
 void updateMaximum(std::atomic<std::uint64_t>& maximum, std::uint64_t value)
 {
@@ -77,6 +85,13 @@ void reset()
     g_FrameExtrapolationRejectGpuBusy.store(0, std::memory_order_relaxed);
     g_FrameExtrapolationRejectState.store(0, std::memory_order_relaxed);
     g_FrameExtrapolated.store(0, std::memory_order_relaxed);
+    g_FrameExtrapolationQualityGeneration.fetch_add(1, std::memory_order_relaxed);
+    g_FrameExtrapolationQualitySamples.store(0, std::memory_order_relaxed);
+    g_FrameExtrapolationQualityMotionSamples.store(0, std::memory_order_relaxed);
+    g_FrameExtrapolationQualitySyntheticMaeTotal.store(0, std::memory_order_relaxed);
+    g_FrameExtrapolationQualityHoldMaeTotal.store(0, std::memory_order_relaxed);
+    g_FrameExtrapolationQualityBetterFractionTotal.store(0, std::memory_order_relaxed);
+    g_FrameExtrapolationQualitySkips.store(0, std::memory_order_relaxed);
 }
 
 void noteDecodeUnit(std::uint32_t frameNumber)
@@ -179,6 +194,56 @@ void frameExtrapolationRejectState()
     g_FrameExtrapolationRejectState.fetch_add(1, std::memory_order_relaxed);
 }
 
+std::uint64_t frameExtrapolationQualityGeneration()
+{
+    return g_FrameExtrapolationQualityGeneration.load(std::memory_order_relaxed);
+}
+
+void frameExtrapolationQualitySample(std::uint64_t generation,
+                                     float syntheticMae,
+                                     float holdMae,
+                                     float betterFraction)
+{
+    if (generation != g_FrameExtrapolationQualityGeneration.load(std::memory_order_relaxed) ||
+            !std::isfinite(syntheticMae) || !std::isfinite(holdMae) ||
+            !std::isfinite(betterFraction)) {
+        return;
+    }
+
+    syntheticMae = qBound(0.0f, syntheticMae, 1.0f);
+    holdMae = qBound(0.0f, holdMae, 1.0f);
+    betterFraction = qBound(0.0f, betterFraction, 1.0f);
+
+    g_FrameExtrapolationQualitySamples.fetch_add(1, std::memory_order_relaxed);
+
+    // Ignore nearly static samples for the improvement ratio. Dividing by a
+    // near-zero hold error would make tiny quantization differences look like
+    // huge positive or negative prediction gains. 1/1024 normalized luma is
+    // below one 8-bit code value and still captures subtle real motion.
+    constexpr float kMinimumMotionMae = 1.0f / 1024.0f;
+    if (holdMae < kMinimumMotionMae) {
+        return;
+    }
+
+    constexpr double kMaeScale = 1000000000.0;
+    constexpr double kFractionScale = 1000000.0;
+    g_FrameExtrapolationQualityMotionSamples.fetch_add(1, std::memory_order_relaxed);
+    g_FrameExtrapolationQualitySyntheticMaeTotal.fetch_add(
+            static_cast<std::uint64_t>(syntheticMae * kMaeScale + 0.5),
+            std::memory_order_relaxed);
+    g_FrameExtrapolationQualityHoldMaeTotal.fetch_add(
+            static_cast<std::uint64_t>(holdMae * kMaeScale + 0.5),
+            std::memory_order_relaxed);
+    g_FrameExtrapolationQualityBetterFractionTotal.fetch_add(
+            static_cast<std::uint64_t>(betterFraction * kFractionScale + 0.5),
+            std::memory_order_relaxed);
+}
+
+void frameExtrapolationQualitySkip()
+{
+    g_FrameExtrapolationQualitySkips.fetch_add(1, std::memory_order_relaxed);
+}
+
 void frameExtrapolated()
 {
     g_FrameExtrapolated.fetch_add(1, std::memory_order_relaxed);
@@ -222,6 +287,29 @@ void formatOverlayLines(char* output, std::size_t length)
             static_cast<double>(g_FrameExtrapolationSubmitTotalUs.load(
                     std::memory_order_relaxed)) / static_cast<double>(submitCount) / 1000.0;
 
+    const std::uint64_t qualitySamples =
+            g_FrameExtrapolationQualitySamples.load(std::memory_order_relaxed);
+    const std::uint64_t qualityMotionSamples =
+            g_FrameExtrapolationQualityMotionSamples.load(std::memory_order_relaxed);
+    const std::uint64_t qualitySyntheticTotal =
+            g_FrameExtrapolationQualitySyntheticMaeTotal.load(std::memory_order_relaxed);
+    const std::uint64_t qualityHoldTotal =
+            g_FrameExtrapolationQualityHoldMaeTotal.load(std::memory_order_relaxed);
+    const std::uint64_t qualityBetterTotal =
+            g_FrameExtrapolationQualityBetterFractionTotal.load(std::memory_order_relaxed);
+    const double qualitySyntheticMae = qualityMotionSamples == 0 ? 0.0 :
+            static_cast<double>(qualitySyntheticTotal) /
+            static_cast<double>(qualityMotionSamples) / 1000000000.0;
+    const double qualityHoldMae = qualityMotionSamples == 0 ? 0.0 :
+            static_cast<double>(qualityHoldTotal) /
+            static_cast<double>(qualityMotionSamples) / 1000000000.0;
+    const double qualityGainPercent = qualityHoldTotal == 0 ? 0.0 :
+            (1.0 - static_cast<double>(qualitySyntheticTotal) /
+                   static_cast<double>(qualityHoldTotal)) * 100.0;
+    const double qualityBetterPercent = qualityMotionSamples == 0 ? 0.0 :
+            static_cast<double>(qualityBetterTotal) /
+            static_cast<double>(qualityMotionSamples) / 1000000.0 * 100.0;
+
     std::snprintf(output,
                   length,
                   "Stream health\n"
@@ -231,6 +319,7 @@ void formatOverlayLines(char* output, std::size_t length)
                   "Frame extrapolation: %s | presented %llu\n"
                   "  deadline misses %llu | opportunities %llu | analysis busy skips %llu\n"
                   "  timing: wake avg %.2f max %.2f ms | submit avg %.2f max %.2f ms | real wins %llu\n"
+                  "  quality: motion %llu/%llu | luma MAE synth %.4f hold %.4f | gain %.1f%% | better motion cells %.1f%% | skips %llu\n"
                   "  rejects: no motion %llu | timing %llu | GPU busy %llu | state %llu",
                   recoveredFrames,
                   failedFrames,
@@ -256,6 +345,14 @@ void formatOverlayLines(char* output, std::size_t length)
                       std::memory_order_relaxed)) / 1000.0,
                   static_cast<unsigned long long>(
                       g_FrameExtrapolationCancelledByReal.load(std::memory_order_relaxed)),
+                  static_cast<unsigned long long>(qualityMotionSamples),
+                  static_cast<unsigned long long>(qualitySamples),
+                  qualitySyntheticMae,
+                  qualityHoldMae,
+                  qualityGainPercent,
+                  qualityBetterPercent,
+                  static_cast<unsigned long long>(
+                      g_FrameExtrapolationQualitySkips.load(std::memory_order_relaxed)),
                   static_cast<unsigned long long>(
                       g_FrameExtrapolationRejectNoMotion.load(std::memory_order_relaxed)),
                   static_cast<unsigned long long>(

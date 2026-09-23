@@ -18,7 +18,7 @@ extern "C" {
 class FrameExtrapolator
 {
 public:
-    FrameExtrapolator(pl_log log, pl_gpu gpu);
+    FrameExtrapolator(pl_log log, pl_gpu gpu, bool enableQualityMeasurement);
     ~FrameExtrapolator();
 
     bool initialize();
@@ -36,6 +36,12 @@ public:
                                      uint64_t frameIntervalUs,
                                      pl_frame* syntheticFrame);
 
+    // Compare the synthetic candidate and held real frame against the decoded
+    // real frame that the synthetic frame replaced. All work and readback are
+    // asynchronous; this function never waits for the GPU.
+    bool evaluateGroundTruthQuality(pl_frame& groundTruthFrame);
+    bool isQualityMeasurementEnabled() const { return m_QualityMeasurementEnabled; }
+
     // Non-blocking readiness check. If analysis is still executing, this returns
     // false so the pacer preserves normal hold/repeat behavior.
     bool canExtrapolate(uint64_t targetTimeUs, uint64_t frameIntervalUs);
@@ -48,10 +54,14 @@ public:
 
 private:
     bool ensureResources(const pl_frame& frame);
+    bool ensureQualityResources();
     bool createTexture(pl_tex* texture, int width, int height, int components);
+    bool createQualityMetricTexture();
     void destroyResources();
 
     bool dispatchDownsample(pl_tex source, pl_tex target, int scale);
+    bool dispatchQualityGrid(pl_tex source, pl_tex target);
+    bool dispatchQualityMetric();
     bool dispatchSceneMetric(pl_tex current, pl_tex previous);
     bool dispatchCoarseMotion(pl_tex current, pl_tex previous);
     bool dispatchFineMotion(pl_tex current, pl_tex previous);
@@ -70,6 +80,7 @@ private:
 
     pl_log m_Log;
     pl_gpu m_Gpu;
+    bool m_QualityMeasurementEnabled = false;
     pl_dispatch m_Dispatch = nullptr;
     uint64_t m_LastRealRenderTimeUs = 0;
     int64_t m_LastRealPts = AV_NOPTS_VALUE;
@@ -95,11 +106,24 @@ private:
     pl_tex m_SceneMetric = nullptr;
     pl_tex m_SyntheticPlanes[PL_MAX_PLANES] = {};
 
+    // Tiny diagnostic-only textures. The baseline grid snapshots the exact real
+    // frame used as the source of the prepared candidate. Synthetic and ground
+    // truth grids are produced only after a synthetic frame has actually been
+    // presented and its matching real frame later arrives.
+    pl_tex m_QualityBaselineGrid = nullptr;
+    pl_tex m_QualitySyntheticGrid = nullptr;
+    pl_tex m_QualityGroundTruthGrid = nullptr;
+    pl_tex m_QualityMetric = nullptr;
+    int m_QualityGridWidth = 0;
+    int m_QualityGridHeight = 0;
+
     int m_HistoryIndex = 0;
     int m_MotionAgeFrames = 0;
     bool m_HasHistory = false;
     bool m_HasMotion = false;
     bool m_ResourcesReady = false;
+    bool m_QualityResourcesReady = false;
+    bool m_HasQualityBaseline = false;
     bool m_SyntheticSinceLastReal = false;
 };
 

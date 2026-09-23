@@ -516,7 +516,7 @@ SDL_Surface* OverlayManager::getUpdatedOverlaySurface(OverlayType type)
 #ifdef HAVE_LATENCY_PROBE
 void OverlayManager::appendDebugTelemetry(char* text, std::size_t length, std::uint64_t nowUs)
 {
-    char healthLines[512];
+    char healthLines[768];
     StreamHealthTelemetry::formatOverlayLines(healthLines, sizeof(healthLines));
 
     const size_t currentLength = SDL_strlen(text);

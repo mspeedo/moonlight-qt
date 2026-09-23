@@ -562,7 +562,8 @@ bool PlVkRenderer::initialize(PDECODER_PARAMETERS params)
     if (params->enableFrameExtrapolation && !params->testOnly &&
             !params->enableVsync && !params->enableFramePacing) {
         m_FrameExtrapolator = std::make_unique<FrameExtrapolator>(
-                    m_Log, m_Vulkan->gpu);
+                    m_Log, m_Vulkan->gpu,
+                    params->enableFrameExtrapolationQualityTelemetry);
         if (!m_FrameExtrapolator->initialize()) {
             SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                         "Frame extrapolation initialization failed; continuing without it");
@@ -570,7 +571,9 @@ bool PlVkRenderer::initialize(PDECODER_PARAMETERS params)
         }
         else {
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                        "Experimental frame extrapolation enabled");
+                        "Experimental frame extrapolation enabled%s",
+                        params->enableFrameExtrapolationQualityTelemetry ?
+                            " with quality telemetry" : "");
         }
     }
     else if (params->enableFrameExtrapolation && !params->testOnly) {
@@ -1468,6 +1471,31 @@ bool PlVkRenderer::renderExtrapolatedFrame(uint64_t targetTimeUs,
     Q_UNUSED(targetTimeUs)
     Q_UNUSED(frameIntervalUs)
     return false;
+#endif
+}
+
+void PlVkRenderer::evaluateExtrapolatedFrameQuality(AVFrame* frame)
+{
+#if defined(Q_OS_LINUX)
+    if (m_FrameExtrapolator == nullptr ||
+            !m_FrameExtrapolator->isQualityMeasurementEnabled()) {
+        return;
+    }
+    if (frame == nullptr) {
+        StreamHealthTelemetry::frameExtrapolationQualitySkip();
+        return;
+    }
+
+    pl_frame mappedFrame;
+    if (!mapAvFrameToPlacebo(frame, &mappedFrame)) {
+        StreamHealthTelemetry::frameExtrapolationQualitySkip();
+        return;
+    }
+
+    m_FrameExtrapolator->evaluateGroundTruthQuality(mappedFrame);
+    unmapAvFrameFromPlacebo(frame, &mappedFrame);
+#else
+    Q_UNUSED(frame)
 #endif
 }
 

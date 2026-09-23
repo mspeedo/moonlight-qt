@@ -31,6 +31,16 @@ void frameExtrapolationRejectTiming();
 void frameExtrapolationRejectGpuBusy();
 void frameExtrapolationRejectState();
 
+// Ground-truth quality diagnostics. The generation token prevents an
+// asynchronous GPU readback from a previous session from contaminating the
+// current session counters. Errors are normalized luma MAE in [0, 1].
+std::uint64_t frameExtrapolationQualityGeneration();
+void frameExtrapolationQualitySample(std::uint64_t generation,
+                                     float syntheticMae,
+                                     float holdMae,
+                                     float betterFraction);
+void frameExtrapolationQualitySkip();
+
 // Called only after a synthetic frame has been successfully submitted by the
 // Vulkan extrapolation path. Failed trigger/analysis attempts are not counted.
 void frameExtrapolated();

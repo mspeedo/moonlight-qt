@@ -280,7 +280,8 @@ bool Session::chooseDecoder(StreamingPreferences::VideoDecoderSelection vds,
                             SDL_Window* window, int videoFormat, int width, int height,
                             int frameRate, bool enableVsync, bool enableFramePacing, bool testOnly, IVideoDecoder*& chosenDecoder,
                             bool preferMailbox, bool enableTransportBuffer, int transportBufferMs,
-                            bool enableFrameExtrapolation, int frameExtrapolationGraceMs)
+                            bool enableFrameExtrapolation, int frameExtrapolationGraceMs,
+                            bool enableFrameExtrapolationQualityTelemetry)
 {
     DECODER_PARAMETERS params;
 
@@ -301,6 +302,8 @@ bool Session::chooseDecoder(StreamingPreferences::VideoDecoderSelection vds,
     params.transportBufferMs = qBound(0, transportBufferMs, 30);
     params.enableFrameExtrapolation = !testOnly && enableFrameExtrapolation;
     params.frameExtrapolationGraceMs = qBound(0, frameExtrapolationGraceMs, 5);
+    params.enableFrameExtrapolationQualityTelemetry =
+            !testOnly && enableFrameExtrapolation && enableFrameExtrapolationQualityTelemetry;
     params.testOnly = testOnly;
     params.vds = vds;
     params.renderer = renderer;
@@ -2227,7 +2230,8 @@ void Session::exec()
                                    m_Preferences->enableTransportBuffer,
                                    m_Preferences->transportBufferMs,
                                    m_Preferences->enableFrameExtrapolation,
-                                   m_Preferences->frameExtrapolationGraceMs)) {
+                                   m_Preferences->frameExtrapolationGraceMs,
+                                   m_Preferences->enableFrameExtrapolationQualityTelemetry)) {
                     SDL_UnlockMutex(m_DecoderLock);
                     SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                                  "Failed to recreate decoder after reset");

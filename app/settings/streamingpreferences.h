@@ -139,6 +139,7 @@ public:
     Q_PROPERTY(int transportBufferMs MEMBER transportBufferMs NOTIFY transportBufferMsChanged)
     Q_PROPERTY(bool enableFrameExtrapolation MEMBER enableFrameExtrapolation NOTIFY enableFrameExtrapolationChanged)
     Q_PROPERTY(int frameExtrapolationGraceMs MEMBER frameExtrapolationGraceMs NOTIFY frameExtrapolationGraceMsChanged)
+    Q_PROPERTY(bool enableFrameExtrapolationQualityTelemetry MEMBER enableFrameExtrapolationQualityTelemetry NOTIFY enableFrameExtrapolationQualityTelemetryChanged)
     Q_PROPERTY(bool connectionWarnings MEMBER connectionWarnings NOTIFY connectionWarningsChanged)
     Q_PROPERTY(bool configurationWarnings MEMBER configurationWarnings NOTIFY configurationWarningsChanged)
     Q_PROPERTY(bool richPresence MEMBER richPresence NOTIFY richPresenceChanged)
@@ -189,6 +190,7 @@ public:
     int transportBufferMs;
     bool enableFrameExtrapolation;
     int frameExtrapolationGraceMs;
+    bool enableFrameExtrapolationQualityTelemetry;
     bool connectionWarnings;
     bool configurationWarnings;
     bool richPresence;
@@ -244,6 +246,7 @@ signals:
     void transportBufferMsChanged();
     void enableFrameExtrapolationChanged();
     void frameExtrapolationGraceMsChanged();
+    void enableFrameExtrapolationQualityTelemetryChanged();
     void connectionWarningsChanged();
     void configurationWarningsChanged();
     void richPresenceChanged();

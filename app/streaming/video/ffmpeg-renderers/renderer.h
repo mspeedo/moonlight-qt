@@ -188,6 +188,12 @@ public:
         return false;
     }
 
+    // Called only for the decoded real frame whose timestamp was replaced by
+    // an already-presented synthetic frame. Renderers may use it as ground
+    // truth for diagnostics, but must never present this frame.
+    virtual void evaluateExtrapolatedFrameQuality(AVFrame*) {
+    }
+
     // Returns the closest available CPU timestamp to the real frame's
     // successful presentation submission. Pacer uses this to avoid anchoring
     // the next deadline after speculative preparation work.

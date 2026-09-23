@@ -54,6 +54,7 @@ public:
     virtual void setFrameExtrapolationInterval(uint64_t frameIntervalUs) override;
     virtual bool prepareExtrapolatedFrame(uint64_t targetTimeUs, uint64_t frameIntervalUs) override;
     virtual bool renderExtrapolatedFrame(uint64_t targetTimeUs, uint64_t frameIntervalUs) override;
+    virtual void evaluateExtrapolatedFrameQuality(AVFrame* frame) override;
     virtual uint64_t getLastRealFrameSubmissionTimeUs() const override;
     virtual bool testRenderFrame(AVFrame* frame) override;
     virtual void waitToRender() override;

@@ -316,6 +316,15 @@ int Pacer::renderThread(void* context)
                     if (ptsOffset <= 2) {
                         AVFrame* replacedFrame = me->m_RenderQueue.dequeue();
                         me->m_FrameQueueLock.unlock();
+
+                        // Older catch-up frames may also be discarded here, but
+                        // only the frame whose RTP timestamp matches the
+                        // synthetic target is valid ground truth for quality.
+                        if (ptsOffset >= -2) {
+                            me->m_VsyncRenderer->evaluateExtrapolatedFrameQuality(
+                                    replacedFrame);
+                        }
+
                         av_frame_free(&replacedFrame);
                         me->m_VideoStats->pacerDroppedFrames++;
                         StreamPipelineTelemetry::pacerDrop();

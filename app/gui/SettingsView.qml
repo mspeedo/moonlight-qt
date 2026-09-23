@@ -1768,6 +1768,23 @@ Flickable {
                 }
 
                 CheckBox {
+                    id: frameExtrapolationQualityTelemetryCheck
+                    hoverEnabled: true
+                    width: parent.width
+                    visible: Qt.platform.os === "linux"
+                    enabled: frameExtrapolationCheck.checked
+                    text: qsTr("Extrapolation quality telemetry")
+                    font.pointSize: 12
+                    checked: StreamingPreferences.enableFrameExtrapolationQualityTelemetry
+                    onCheckedChanged: StreamingPreferences.enableFrameExtrapolationQualityTelemetry = checked
+
+                    ToolTip.delay: 1000
+                    ToolTip.timeout: 10000
+                    ToolTip.visible: hovered
+                    ToolTip.text: qsTr("Measures synthetic-frame quality against late real ground-truth frames. Adds small diagnostic GPU work and should be disabled for pure timing tests. Takes effect on the next stream.")
+                }
+
+                CheckBox {
                     id: networkBufferCheck
                     hoverEnabled: true
                     width: parent.width

@@ -9,6 +9,27 @@
 
 namespace {
 
+struct QualityReadback
+{
+    std::uint64_t generation = 0;
+    alignas(16) float values[4] = {};
+};
+
+void qualityReadbackComplete(void* opaque)
+{
+    QualityReadback* readback = static_cast<QualityReadback*>(opaque);
+    if (readback == nullptr) {
+        return;
+    }
+
+    StreamHealthTelemetry::frameExtrapolationQualitySample(
+            readback->generation,
+            readback->values[0],
+            readback->values[1],
+            readback->values[2]);
+    delete readback;
+}
+
 class FrameAcquireGuard
 {
 public:
@@ -49,9 +70,10 @@ private:
 
 }
 
-FrameExtrapolator::FrameExtrapolator(pl_log log, pl_gpu gpu) :
+FrameExtrapolator::FrameExtrapolator(pl_log log, pl_gpu gpu, bool enableQualityMeasurement) :
     m_Log(log),
-    m_Gpu(gpu)
+    m_Gpu(gpu),
+    m_QualityMeasurementEnabled(enableQualityMeasurement)
 {
 }
 
@@ -97,6 +119,69 @@ bool FrameExtrapolator::createTexture(pl_tex* texture, int width, int height, in
     return *texture != nullptr;
 }
 
+bool FrameExtrapolator::createQualityMetricTexture()
+{
+    // Require an exact float32 host representation so the asynchronous 1x1
+    // readback can be interpreted directly as four floats without conversion.
+    const enum pl_fmt_caps caps = (enum pl_fmt_caps)
+            (PL_FMT_CAP_STORABLE | PL_FMT_CAP_HOST_READABLE);
+    pl_fmt format = pl_find_fmt(m_Gpu, PL_FMT_FLOAT, 4, 32, 32, caps);
+    if (format == nullptr) {
+        return false;
+    }
+
+    struct pl_tex_params params = {};
+    params.w = 1;
+    params.h = 1;
+    params.format = format;
+    params.storable = true;
+    params.host_readable = true;
+
+    m_QualityMetric = pl_tex_create(m_Gpu, &params);
+    return m_QualityMetric != nullptr;
+}
+
+bool FrameExtrapolator::ensureQualityResources()
+{
+    if (m_QualityResourcesReady) {
+        return true;
+    }
+
+    if (!m_QualityMeasurementEnabled || m_SourceWidth <= 0 ||
+            m_SourceHeight <= 0 || m_Gpu == nullptr ||
+            !m_Gpu->limits.callbacks) {
+        return false;
+    }
+
+    // A tiny aspect-aware grid is enough to answer the important question:
+    // did the synthetic frame move luma toward the real future frame, or was
+    // holding the previous real frame just as good?
+    m_QualityGridWidth = 32;
+    m_QualityGridHeight = std::clamp(
+            (m_QualityGridWidth * m_SourceHeight + m_SourceWidth / 2) / m_SourceWidth,
+            12,
+            32);
+
+    if (!createTexture(&m_QualityBaselineGrid,
+                       m_QualityGridWidth, m_QualityGridHeight, 1) ||
+            !createTexture(&m_QualitySyntheticGrid,
+                           m_QualityGridWidth, m_QualityGridHeight, 1) ||
+            !createTexture(&m_QualityGroundTruthGrid,
+                           m_QualityGridWidth, m_QualityGridHeight, 1) ||
+            !createQualityMetricTexture()) {
+        pl_tex_destroy(m_Gpu, &m_QualityBaselineGrid);
+        pl_tex_destroy(m_Gpu, &m_QualitySyntheticGrid);
+        pl_tex_destroy(m_Gpu, &m_QualityGroundTruthGrid);
+        pl_tex_destroy(m_Gpu, &m_QualityMetric);
+        m_QualityGridWidth = 0;
+        m_QualityGridHeight = 0;
+        return false;
+    }
+
+    m_QualityResourcesReady = true;
+    return true;
+}
+
 void FrameExtrapolator::destroyResources()
 {
     if (m_Gpu == nullptr) {
@@ -116,7 +201,16 @@ void FrameExtrapolator::destroyResources()
         pl_tex_destroy(m_Gpu, &m_SyntheticPlanes[i]);
     }
 
+    pl_tex_destroy(m_Gpu, &m_QualityBaselineGrid);
+    pl_tex_destroy(m_Gpu, &m_QualitySyntheticGrid);
+    pl_tex_destroy(m_Gpu, &m_QualityGroundTruthGrid);
+    pl_tex_destroy(m_Gpu, &m_QualityMetric);
+
     m_ResourcesReady = false;
+    m_QualityResourcesReady = false;
+    m_HasQualityBaseline = false;
+    m_QualityGridWidth = 0;
+    m_QualityGridHeight = 0;
     m_HasHistory = false;
     m_HasMotion = false;
     m_MotionAgeFrames = 0;
@@ -199,6 +293,14 @@ bool FrameExtrapolator::ensureResources(const pl_frame& frame)
     }
 
     m_ResourcesReady = true;
+    // Quality measurement is optional diagnostics. Extrapolation remains fully
+    // functional if the GPU lacks asynchronous host-readable storage textures.
+    if (m_QualityMeasurementEnabled && !ensureQualityResources()) {
+        // Quality telemetry is optional. If this GPU cannot provide the tiny
+        // asynchronous readback resources, disable only the diagnostic path.
+        m_QualityMeasurementEnabled = false;
+        StreamHealthTelemetry::frameExtrapolationQualitySkip();
+    }
     return true;
 }
 
@@ -330,6 +432,120 @@ bool FrameExtrapolator::dispatchDownsample(pl_tex source, pl_tex target, int sca
                       nullptr,
                       scale == 4 ? body4 : body2,
                       &descriptor,
+                      1);
+}
+
+bool FrameExtrapolator::dispatchQualityGrid(pl_tex source, pl_tex target)
+{
+    if (source == nullptr || target == nullptr || source->params.format == nullptr) {
+        return false;
+    }
+
+    pl_shader_desc descriptor = {};
+    descriptor.desc.name = "source_luma";
+    descriptor.desc.type = PL_DESC_SAMPLED_TEX;
+    descriptor.binding.object = (void*)source;
+    descriptor.binding.sample_mode =
+            (source->params.format->caps & PL_FMT_CAP_LINEAR) ?
+                PL_TEX_SAMPLE_LINEAR : PL_TEX_SAMPLE_NEAREST;
+
+    // Each output texel represents one coarse cell of the full image. A 4x4
+    // stratified average covers the whole cell rather than sampling a single
+    // point, so fast edges and fine benchmark texture don't dominate the score.
+    const char* body = R"(
+        ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+        ivec2 gridSize = imageSize(out_image);
+        vec2 cellMin = vec2(p) / vec2(gridSize);
+        vec2 cellSize = vec2(1.0) / vec2(gridSize);
+        float sum = 0.0;
+        for (int oy = 0; oy < 4; ++oy) {
+            for (int ox = 0; ox < 4; ++ox) {
+                vec2 sub = (vec2(ox, oy) + vec2(0.5)) * 0.25;
+                vec2 uv = clamp(cellMin + sub * cellSize,
+                                vec2(0.0), vec2(1.0));
+                sum += textureLod(source_luma, uv, 0.0).r;
+            }
+        }
+        color = vec4(sum * (1.0 / 16.0), 0.0, 0.0, 1.0);
+    )";
+
+    return runCompute(target,
+                      "frame extrapolation quality grid",
+                      nullptr,
+                      body,
+                      &descriptor,
+                      1);
+}
+
+bool FrameExtrapolator::dispatchQualityMetric()
+{
+    if (m_QualityBaselineGrid == nullptr || m_QualitySyntheticGrid == nullptr ||
+            m_QualityGroundTruthGrid == nullptr || m_QualityMetric == nullptr) {
+        return false;
+    }
+
+    pl_shader_desc descriptors[3] = {};
+    descriptors[0].desc.name = "baseline_grid";
+    descriptors[0].desc.type = PL_DESC_SAMPLED_TEX;
+    descriptors[0].binding.object = (void*)m_QualityBaselineGrid;
+    descriptors[0].binding.sample_mode = PL_TEX_SAMPLE_NEAREST;
+    descriptors[1].desc.name = "synthetic_grid";
+    descriptors[1].desc.type = PL_DESC_SAMPLED_TEX;
+    descriptors[1].binding.object = (void*)m_QualitySyntheticGrid;
+    descriptors[1].binding.sample_mode = PL_TEX_SAMPLE_NEAREST;
+    descriptors[2].desc.name = "truth_grid";
+    descriptors[2].desc.type = PL_DESC_SAMPLED_TEX;
+    descriptors[2].binding.object = (void*)m_QualityGroundTruthGrid;
+    descriptors[2].binding.sample_mode = PL_TEX_SAMPLE_NEAREST;
+
+    const char* body = R"(
+        ivec2 gridSize = textureSize(truth_grid, 0);
+        float syntheticError = 0.0;
+        float holdError = 0.0;
+        float betterMotionCells = 0.0;
+        float motionCells = 0.0;
+        int samples = 0;
+
+        for (int y = 0; y < gridSize.y; ++y) {
+            for (int x = 0; x < gridSize.x; ++x) {
+                ivec2 p = ivec2(x, y);
+                float baseline = texelFetch(baseline_grid, p, 0).r;
+                float synthetic = texelFetch(synthetic_grid, p, 0).r;
+                float truth = texelFetch(truth_grid, p, 0).r;
+                float synthDiff = abs(synthetic - truth);
+                float holdDiff = abs(baseline - truth);
+                syntheticError += synthDiff;
+                holdError += holdDiff;
+
+                // Static cells where both candidates are effectively identical
+                // should not dilute the spatial success ratio. Only count cells
+                // where holding the old real frame has measurable error.
+                if (holdDiff >= (1.0 / 1024.0)) {
+                    motionCells += 1.0;
+                    betterMotionCells += synthDiff < holdDiff ? 1.0 : 0.0;
+                }
+                samples++;
+            }
+        }
+
+        float invSamples = 1.0 / max(float(samples), 1.0);
+        float betterFraction = motionCells > 0.0 ?
+                betterMotionCells / motionCells : 0.0;
+        color = vec4(syntheticError * invSamples,
+                     holdError * invSamples,
+                     betterFraction,
+                     1.0);
+    )";
+
+    return runCompute(m_QualityMetric,
+                      "frame extrapolation ground-truth quality metric",
+                      nullptr,
+                      body,
+                      descriptors,
+                      3,
+                      nullptr,
+                      0,
+                      1,
                       1);
 }
 
@@ -646,6 +862,12 @@ bool FrameExtrapolator::submitRealFrame(const AVFrame* frame,
                                         pl_frame& mappedFrame,
                                         uint64_t renderTimeUs)
 {
+    // A newly submitted real frame supersedes any diagnostic baseline belonging
+    // to the previous speculative candidate. If that candidate was actually
+    // presented, Pacer evaluates its exact matching ground-truth frame before
+    // this method is reached.
+    m_HasQualityBaseline = false;
+
     // pl_render_image() has already released a mapped Vulkan AVFrame by the
     // time this post-render analysis runs. Re-acquire it before directly
     // sampling its textures so FFmpeg/libplacebo semaphore and layout ownership
@@ -823,6 +1045,18 @@ bool FrameExtrapolator::buildPreparedSyntheticFrame(pl_frame& currentFrame,
         }
     }
 
+    // While the real source frame is already acquired, opportunistically queue
+    // a tiny aspect-aware luma signature for ground-truth scoring. This avoids
+    // an extra acquire/release cycle and adds only a 32-wide diagnostic grid.
+    // If the reusable grid is still busy, extrapolation proceeds unchanged and
+    // this candidate simply won't have a quality sample.
+    if (m_QualityMeasurementEnabled && m_QualityResourcesReady &&
+            !pl_tex_poll(m_Gpu, m_QualityBaselineGrid, 0) &&
+            dispatchQualityGrid(currentFrame.planes[0].texture,
+                                m_QualityBaselineGrid)) {
+        m_HasQualityBaseline = true;
+    }
+
     *syntheticFrame = currentFrame;
     for (int i = 0; i < syntheticFrame->num_planes; ++i) {
         syntheticFrame->planes[i].texture = m_SyntheticPlanes[i];
@@ -832,6 +1066,86 @@ bool FrameExtrapolator::buildPreparedSyntheticFrame(pl_frame& currentFrame,
     syntheticFrame->acquire = nullptr;
     syntheticFrame->release = nullptr;
     syntheticFrame->user_data = nullptr;
+    return true;
+}
+
+bool FrameExtrapolator::evaluateGroundTruthQuality(pl_frame& groundTruthFrame)
+{
+    if (!m_QualityMeasurementEnabled) {
+        return false;
+    }
+
+    const bool canMeasure = m_SyntheticSinceLastReal &&
+            m_HasQualityBaseline &&
+            m_QualityResourcesReady &&
+            groundTruthFrame.num_planes > 0 &&
+            groundTruthFrame.planes[0].texture != nullptr &&
+            m_SyntheticPlanes[0] != nullptr;
+
+    // Consume the baseline on the first exact ground-truth opportunity whether
+    // measurement succeeds or not. A later real frame would no longer represent
+    // the timestamp that the synthetic frame replaced.
+    m_HasQualityBaseline = false;
+
+    if (!canMeasure) {
+        StreamHealthTelemetry::frameExtrapolationQualitySkip();
+        return false;
+    }
+
+    pl_tex groundTruth = groundTruthFrame.planes[0].texture;
+    if (groundTruth->params.w != m_PlaneWidths[0] ||
+            groundTruth->params.h != m_PlaneHeights[0]) {
+        StreamHealthTelemetry::frameExtrapolationQualitySkip();
+        return false;
+    }
+
+    // Reusable diagnostic targets must be completely idle. This makes the
+    // quality path opportunistic rather than allowing readbacks to accumulate
+    // and perturb later real-frame rendering.
+    if (pl_tex_poll(m_Gpu, m_SyntheticPlanes[0], 0) ||
+            pl_tex_poll(m_Gpu, m_QualityBaselineGrid, 0) ||
+            pl_tex_poll(m_Gpu, m_QualitySyntheticGrid, 0) ||
+            pl_tex_poll(m_Gpu, m_QualityGroundTruthGrid, 0) ||
+            pl_tex_poll(m_Gpu, m_QualityMetric, 0)) {
+        StreamHealthTelemetry::frameExtrapolationQualitySkip();
+        return false;
+    }
+
+    FrameAcquireGuard frameGuard(m_Gpu, groundTruthFrame);
+    if (!frameGuard.ok()) {
+        StreamHealthTelemetry::frameExtrapolationQualitySkip();
+        return false;
+    }
+
+    // This is a separate diagnostic frame from the normal motion-analysis
+    // dispatches. All commands are queued asynchronously and no GPU wait occurs.
+    pl_dispatch_reset_frame(m_Dispatch);
+
+    if (!dispatchQualityGrid(m_SyntheticPlanes[0], m_QualitySyntheticGrid) ||
+            !dispatchQualityGrid(groundTruth, m_QualityGroundTruthGrid) ||
+            !dispatchQualityMetric()) {
+        StreamHealthTelemetry::frameExtrapolationQualitySkip();
+        return false;
+    }
+
+    QualityReadback* readback = new QualityReadback();
+    readback->generation = StreamHealthTelemetry::frameExtrapolationQualityGeneration();
+
+    pl_tex_transfer_params transfer = {};
+    transfer.tex = m_QualityMetric;
+    transfer.ptr = readback->values;
+    // Force libplacebo to use its staging path rather than importing this tiny
+    // heap allocation as host memory. The callback keeps the transfer fully
+    // asynchronous while avoiding host-pointer alignment/import edge cases.
+    transfer.no_import = true;
+    transfer.callback = qualityReadbackComplete;
+    transfer.priv = readback;
+    if (!pl_tex_download(m_Gpu, &transfer)) {
+        delete readback;
+        StreamHealthTelemetry::frameExtrapolationQualitySkip();
+        return false;
+    }
+
     return true;
 }
 
