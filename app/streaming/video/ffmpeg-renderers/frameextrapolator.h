@@ -58,12 +58,16 @@ private:
     bool dispatchDownsample(pl_tex source, pl_tex target, int scale);
     bool dispatchQualityGrid(pl_tex source, pl_tex target);
     bool dispatchQualityMetric();
-    bool dispatchWarpDiagnosticMetric(float staleMotionFactor);
-    bool queueWarpDiagnosticReadback();
+    bool dispatchAffineDiagnosticMetric();
+    bool queueAffineDiagnosticReadback();
     bool dispatchSceneMetric(pl_tex current, pl_tex previous);
-    bool dispatchCoarseMotion(pl_tex current, pl_tex previous);
+    bool dispatchGlobalTranslationCosts(pl_tex current, pl_tex previous);
+    bool dispatchGlobalTranslationSelect();
     bool dispatchFineMotion(pl_tex current, pl_tex previous);
-    bool dispatchWarp(pl_tex source, pl_tex target, float alpha);
+    bool dispatchAffineHypotheses();
+    bool dispatchAffineModel();
+    bool dispatchAffineHoldMask();
+    bool dispatchAffineWarp(pl_tex source, pl_tex target, float alpha);
 
     bool runCompute(pl_tex target,
                     const char* description,
@@ -99,8 +103,12 @@ private:
 
     pl_tex m_FineLuma[2] = {};
     pl_tex m_CoarseLuma[2] = {};
-    pl_tex m_CoarseMotion = nullptr;
+    pl_tex m_GlobalTranslationCosts = nullptr;
+    pl_tex m_GlobalTranslation = nullptr;
     pl_tex m_FineMotion = nullptr;
+    pl_tex m_AffineHypotheses = nullptr;
+    pl_tex m_AffineModel = nullptr;
+    pl_tex m_AffineHoldMask = nullptr;
     pl_tex m_SceneMetric = nullptr;
     pl_tex m_SyntheticPlanes[PL_MAX_PLANES] = {};
 
@@ -112,7 +120,7 @@ private:
     pl_tex m_QualitySyntheticGrid = nullptr;
     pl_tex m_QualityGroundTruthGrid = nullptr;
     pl_tex m_QualityMetric = nullptr;
-    pl_tex m_WarpDiagnosticMetric = nullptr;
+    pl_tex m_AffineDiagnosticMetric = nullptr;
     int m_QualityGridWidth = 0;
     int m_QualityGridHeight = 0;
 
@@ -123,7 +131,7 @@ private:
     bool m_ResourcesReady = false;
     bool m_QualityResourcesReady = false;
     bool m_HasQualityBaseline = false;
-    bool m_HasWarpDiagnostic = false;
+    bool m_HasAffineDiagnostic = false;
     bool m_SyntheticSinceLastReal = false;
 };
 

@@ -41,12 +41,12 @@ void frameExtrapolationQualitySample(std::uint64_t generation,
                                      float betterFraction,
                                      float syntheticHoldMae);
 void frameExtrapolationQualitySkip();
-void frameExtrapolationWarpSample(std::uint64_t generation,
-                                  float motionMagnitudePx,
-                                  float finalConfidence,
-                                  float gatePassFraction,
-                                  float movingFraction);
-void frameExtrapolationWarpSkip();
+void frameExtrapolationAffineSample(std::uint64_t generation,
+                                    float motionMagnitudePx,
+                                    float supportFraction,
+                                    float extrapolatedFraction,
+                                    float heldFraction);
+void frameExtrapolationAffineSkip();
 
 // Called only after a synthetic frame has been successfully submitted by the
 // Vulkan extrapolation path. Failed trigger/analysis attempts are not counted.
