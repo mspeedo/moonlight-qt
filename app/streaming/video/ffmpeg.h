@@ -182,7 +182,7 @@ private:
 
 #if defined(Q_OS_LINUX)
 // ffmpeg.cpp creates exactly one SDL thread: FFDecoder. Route that creation
-// through the stream-scoped GameMode wrapper. The wrapper keeps the working
-// CAP_SYS_NICE host-helper priority path for FFDecoder and PacerRender.
+// through the stream-scoped wrapper so GameMode registration and the
+// CAP_SYS_NICE host-helper priority path can be controlled independently.
 #define SDL_CreateThread(...) GameModeControl::createStreamingThread(__VA_ARGS__)
 #endif

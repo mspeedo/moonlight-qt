@@ -144,7 +144,8 @@ public:
     Q_PROPERTY(bool detectNetworkBlocking MEMBER detectNetworkBlocking NOTIFY detectNetworkBlockingChanged)
     Q_PROPERTY(bool showPerformanceOverlay MEMBER showPerformanceOverlay NOTIFY showPerformanceOverlayChanged)
     Q_PROPERTY(bool enablePipelineTelemetryWhileOsdHidden MEMBER enablePipelineTelemetryWhileOsdHidden NOTIFY enablePipelineTelemetryWhileOsdHiddenChanged)
-    Q_PROPERTY(bool enableGameModeAndThreadPriority MEMBER enableGameModeAndThreadPriority NOTIFY enableGameModeAndThreadPriorityChanged)
+    Q_PROPERTY(bool enableGameMode MEMBER enableGameMode NOTIFY enableGameModeChanged)
+    Q_PROPERTY(bool enableHighPriorityStreamingThreads MEMBER enableHighPriorityStreamingThreads NOTIFY enableHighPriorityStreamingThreadsChanged)
     Q_PROPERTY(AudioConfig audioConfig MEMBER audioConfig NOTIFY audioConfigChanged)
     Q_PROPERTY(VideoCodecConfig videoCodecConfig MEMBER videoCodecConfig NOTIFY videoCodecConfigChanged)
     Q_PROPERTY(bool enableHdr MEMBER enableHdr NOTIFY enableHdrChanged)
@@ -191,7 +192,8 @@ public:
     bool detectNetworkBlocking;
     bool showPerformanceOverlay;
     bool enablePipelineTelemetryWhileOsdHidden;
-    bool enableGameModeAndThreadPriority;
+    bool enableGameMode;
+    bool enableHighPriorityStreamingThreads;
     bool swapMouseButtons;
     bool muteOnFocusLoss;
     bool backgroundGamepad;
@@ -243,7 +245,8 @@ signals:
     void detectNetworkBlockingChanged();
     void showPerformanceOverlayChanged();
     void enablePipelineTelemetryWhileOsdHiddenChanged();
-    void enableGameModeAndThreadPriorityChanged();
+    void enableGameModeChanged();
+    void enableHighPriorityStreamingThreadsChanged();
     void mouseButtonsChanged();
     void muteOnFocusLossChanged();
     void backgroundGamepadChanged();
