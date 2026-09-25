@@ -47,6 +47,25 @@ public:
         return m_NeedsVideoSampleFast.load(std::memory_order_relaxed);
     }
 
+    bool benchmarkInProgress()
+    {
+        SDL_AtomicLock(&m_Lock);
+        const bool active =
+                m_BenchmarkStarting || m_HelperRunning || m_AutoBenchmark;
+        SDL_AtomicUnlock(&m_Lock);
+        return active;
+    }
+
+    bool hasFrozenBenchmarkResults()
+    {
+        SDL_AtomicLock(&m_Lock);
+        const bool frozen = m_BenchmarkRan &&
+                !m_BenchmarkStarting && !m_HelperRunning && !m_AutoBenchmark &&
+                m_FrozenStatsTimestamp != 0;
+        SDL_AtomicUnlock(&m_Lock);
+        return frozen;
+    }
+
     void onCadenceWait(uint64_t sequence, uint64_t waitUs)
     {
         const double waitMs = static_cast<double>(waitUs) / 1000.0;
@@ -93,7 +112,8 @@ public:
                 m_BenchmarkStarting || m_HelperRunning || m_AutoBenchmark;
         if (!enabled && benchmarkInProgress && !forceDisable) {
             // Hiding the OSD must not perturb an already-started benchmark. Keep
-            // the event watch, timer, helper, video sampling, and telemetry alive.
+            // the event watch, timer, helper, and video sampling alive. Full
+            // pipeline-telemetry collection is managed separately by OverlayManager.
             // A/Y diagnostics are visibility-gated below; B remains available to
             // stop the hidden benchmark.
             m_PhysicalYHeld = false;
@@ -160,9 +180,8 @@ public:
         }
 
         if (enabled) {
-            // Pipeline telemetry runs for the whole stream. Enabling the OSD only
-            // enables benchmark controls and display work; it must not reset the
-            // already accumulated stream statistics.
+            // OverlayManager owns the pipeline-telemetry collection policy.
+            // Enabling the probe here only installs benchmark controls.
             SDL_AddEventWatch(controllerEventWatch, this);
         }
         else {

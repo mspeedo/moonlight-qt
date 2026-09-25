@@ -1,6 +1,8 @@
 #include "overlaymanager.h"
 #include "path.h"
+#include "settings/streamingpreferences.h"
 
+#include <array>
 #include <chrono>
 #include <memory>
 
@@ -23,6 +25,7 @@ constexpr int kTelemetryGraphPlotHeight = 88;
 constexpr int kTelemetryGraphRowGap = 8;
 constexpr int kTelemetryGraphPanelPadding = 8;
 constexpr int kTelemetryGraphSurfaceGap = 24;
+constexpr std::size_t kTelemetryGraphSurfacePoolSize = 3;
 constexpr float kTelemetryGraphScaleStepMs = 5.0f;
 constexpr float kTelemetryGraphMinScaleMs = 5.0f;
 void blitGraphLabel(SDL_Surface* destination,
@@ -170,6 +173,27 @@ void drawTelemetryGraph(SDL_Surface* surface,
 
 using SurfacePtr = std::unique_ptr<SDL_Surface, decltype(&SDL_FreeSurface)>;
 
+struct GraphSurfacePool {
+    std::mutex mutex;
+    std::array<SDL_Surface*, kTelemetryGraphSurfacePoolSize> freeSurfaces {};
+
+    ~GraphSurfacePool()
+    {
+        for (SDL_Surface* surface : freeSurfaces) {
+            if (surface != nullptr) {
+                surface->userdata = nullptr;
+                SDL_FreeSurface(surface);
+            }
+        }
+    }
+};
+
+GraphSurfacePool& graphSurfacePool()
+{
+    static GraphSurfacePool pool;
+    return pool;
+}
+
 struct GraphCache {
     SurfacePtr background {nullptr, SDL_FreeSurface};
     std::array<float, 7> scales {};
@@ -262,10 +286,9 @@ SDL_Surface* renderTelemetryGraphs(TTF_Font* font, SDL_Color color,
         }
     }
 
-    // Upload takes ownership asynchronously, so never overwrite a surface still
-    // being read by the GPU transfer. Only this small panel is allocated at 20 Hz.
-    SDL_Surface* surface = SDL_CreateRGBSurfaceWithFormat(
-            0, width, height, 32, SDL_PIXELFORMAT_ARGB8888);
+    // Upload takes ownership asynchronously, so a surface only becomes reusable
+    // after libplacebo invokes its transfer-completion callback.
+    SDL_Surface* surface = Overlay::acquireDebugGraphSurface(width, height);
     if (surface == nullptr) {
         return nullptr;
     }
@@ -324,6 +347,66 @@ SDL_Surface* combineDebugOverlaySurfaces(SDL_Surface* textSurface,
 }
 
 } // namespace
+
+SDL_Surface* Overlay::acquireDebugGraphSurface(int width, int height)
+{
+    GraphSurfacePool& pool = graphSurfacePool();
+    {
+        std::lock_guard<std::mutex> lock(pool.mutex);
+        for (SDL_Surface*& candidate : pool.freeSurfaces) {
+            if (candidate == nullptr) {
+                continue;
+            }
+
+            SDL_Surface* surface = candidate;
+            candidate = nullptr;
+            if (surface->w == width && surface->h == height &&
+                    surface->format->format == SDL_PIXELFORMAT_ARGB8888) {
+                return surface;
+            }
+
+            surface->userdata = nullptr;
+            SDL_FreeSurface(surface);
+        }
+    }
+
+    SDL_Surface* surface = SDL_CreateRGBSurfaceWithFormat(
+            0, width, height, 32, SDL_PIXELFORMAT_ARGB8888);
+    if (surface != nullptr) {
+        // Mark only graph-upload surfaces. Other overlay surfaces continue to
+        // use their existing free-on-upload-complete behavior.
+        surface->userdata = &pool;
+    }
+    return surface;
+}
+
+bool Overlay::recycleDebugGraphSurface(SDL_Surface* surface)
+{
+    if (surface == nullptr) {
+        return false;
+    }
+
+    GraphSurfacePool& pool = graphSurfacePool();
+    if (surface->userdata != &pool) {
+        return false;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(pool.mutex);
+        for (SDL_Surface*& candidate : pool.freeSurfaces) {
+            if (candidate == nullptr) {
+                candidate = surface;
+                return true;
+            }
+        }
+    }
+
+    // More than three transfers in flight is allowed; only the excess surface
+    // falls back to the old free behavior rather than growing the pool.
+    surface->userdata = nullptr;
+    SDL_FreeSurface(surface);
+    return true;
+}
 #endif
 
 OverlayManager::OverlayManager() :
@@ -333,11 +416,16 @@ OverlayManager::OverlayManager() :
     memset(m_Overlays, 0, sizeof(m_Overlays));
 
 #ifdef HAVE_LATENCY_PROBE
-    // OverlayManager is per streaming Session. Stream-health counters and
-    // pipeline telemetry therefore begin fresh for every stream, independently
-    // of whether the debug OSD is visible.
+    // Stream-health counters remain session-wide. Full per-frame pipeline
+    // telemetry is opt-in while the OSD is hidden to avoid continuous timing
+    // and ring-buffer work on battery-powered clients.
     StreamHealthTelemetry::reset();
-    StreamPipelineTelemetry::start();
+    if (StreamingPreferences::get()->enablePipelineTelemetryWhileOsdHidden) {
+        StreamPipelineTelemetry::start();
+    }
+    else {
+        StreamPipelineTelemetry::clear();
+    }
     StreamPipelineTelemetry::setStateChangedCallback(telemetryStateChanged, this);
 #endif
 
@@ -800,20 +888,64 @@ void OverlayManager::setOverlayState(OverlayType type, bool enabled)
 
 #ifdef HAVE_LATENCY_PROBE
     if (type == OverlayType::OverlayDebug && stateChanged) {
-        setDebugOverlayWorkerEnabled(enabled);
+        const bool collectWhileHidden =
+                StreamingPreferences::get()->enablePipelineTelemetryWhileOsdHidden;
+        LatencyProbe& probe = LatencyProbe::instance();
 
         if (enabled) {
             Session* session = Session::get();
             LatencyBenchmarkControl::configure(session != nullptr ? session->getComputer() : nullptr);
-        }
-        const bool benchmarkWasActive = LatencyProbe::instance().setEnabled(enabled);
 
-        if (!enabled &&
-                (benchmarkWasActive || !StreamPipelineTelemetry::isActiveFast())) {
-            // Leave continuous stream telemetry untouched when the OSD was only
-            // viewed. Restart only after an active benchmark, or after B froze
-            // a completed benchmark run.
-            StreamPipelineTelemetry::start();
+            // Update OSD visibility first, then inspect benchmark state. A benchmark
+            // stopped while the OSD was hidden deliberately leaves both the input
+            // benchmark and pipeline telemetry frozen. Reopening the OSD must show
+            // that frozen snapshot rather than restarting collection.
+            probe.setEnabled(true);
+            const bool benchmarkInProgress = probe.benchmarkInProgress();
+            const bool frozenBenchmark = probe.hasFrozenBenchmarkResults();
+
+            if (benchmarkInProgress) {
+                // Benchmark collection has priority over the hidden-telemetry
+                // preference. It must remain live regardless of OSD visibility.
+                if (!StreamPipelineTelemetry::isActiveFast()) {
+                    StreamPipelineTelemetry::resume();
+                }
+            }
+            else if (!frozenBenchmark &&
+                     !StreamPipelineTelemetry::isActiveFast()) {
+                // Ordinary visible OSD telemetry starts a fresh window. Frozen
+                // benchmark results are intentionally preserved until OSD hide.
+                StreamPipelineTelemetry::start();
+            }
+
+            setDebugOverlayWorkerEnabled(true);
+        }
+        else {
+            setDebugOverlayWorkerEnabled(false);
+
+            // During a running benchmark, setEnabled(false) intentionally keeps
+            // the probe alive so B and video sampling continue while hidden.
+            // Do not let the ordinary hidden-telemetry preference stop collection.
+            probe.setEnabled(false);
+            const bool benchmarkInProgress = probe.benchmarkInProgress();
+
+            if (benchmarkInProgress) {
+                if (!StreamPipelineTelemetry::isActiveFast()) {
+                    StreamPipelineTelemetry::resume();
+                }
+            }
+            else if (collectWhileHidden) {
+                // Hiding the OSD dismisses any frozen benchmark/manual snapshot.
+                // With hidden collection enabled, this exactly preserves the old
+                // continuous-telemetry transition: restart only if currently frozen.
+                if (!StreamPipelineTelemetry::isActiveFast()) {
+                    StreamPipelineTelemetry::start();
+                }
+            }
+            else if (StreamPipelineTelemetry::isActiveFast()) {
+                // No benchmark is running and hidden collection is disabled.
+                StreamPipelineTelemetry::stop();
+            }
         }
     }
 #endif

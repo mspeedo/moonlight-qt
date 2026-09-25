@@ -18,6 +18,13 @@ enum OverlayType {
     OverlayMax
 };
 
+#if defined(HAVE_LIBPLACEBO_VULKAN) && defined(Q_OS_LINUX)
+// Graph surfaces are recycled only after the asynchronous Vulkan upload has
+// finished. recycleDebugGraphSurface() returns false for ordinary SDL surfaces.
+SDL_Surface* acquireDebugGraphSurface(int width, int height);
+bool recycleDebugGraphSurface(SDL_Surface* surface);
+#endif
+
 class IOverlayRenderer
 {
 public:

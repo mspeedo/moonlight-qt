@@ -1880,6 +1880,23 @@ Flickable {
                                   qsTr("You can toggle it at any time while streaming using Ctrl+Alt+Shift+S or Select+L1+R1+X.") + "\n\n" +
                                   qsTr("The performance overlay is not supported on Steam Link or Raspberry Pi.")
                 }
+
+                CheckBox {
+                    id: pipelineTelemetryHiddenCheck
+                    visible: Qt.platform.os === "linux"
+                    width: parent.width
+                    text: qsTr("Enable full pipeline telemetry while OSD is hidden")
+                    font.pointSize: 12
+                    checked: StreamingPreferences.enablePipelineTelemetryWhileOsdHidden
+                    onCheckedChanged: {
+                        StreamingPreferences.enablePipelineTelemetryWhileOsdHidden = checked
+                    }
+
+                    ToolTip.delay: 1000
+                    ToolTip.timeout: 7000
+                    ToolTip.visible: hovered
+                    ToolTip.text: qsTr("Continuously collects detailed per-frame pipeline timing while the performance OSD is hidden, preserving graph history at the cost of additional CPU activity and power use. When disabled, pipeline telemetry starts when the OSD is shown. This setting takes effect on the next stream.")
+                }
             }
         }
     }
