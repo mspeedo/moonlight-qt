@@ -14,11 +14,11 @@ namespace StreamPipelineTelemetry {
 constexpr std::size_t kGraphColumns = 480;
 
 struct MetricSnapshot {
-    bool valid = false;
+    bool averageValid = false;
     double averageMs = 0.0;
-    double maximumMs = 0.0;
-    bool runValid = false;
-    double runMaximumMs = 0.0;
+    bool windowValid = false;
+    double average10sMs = 0.0;
+    double maximum10sMs = 0.0;
 };
 
 struct Snapshot {
@@ -121,6 +121,9 @@ void pacerDrop();
 
 void clear();
 void start();
+// Resume collection without clearing history or counters. Also refresh the OSD
+// when already active, so benchmark-only statistics can restart independently.
+void resume();
 void stop();
 
 // Decoder wrappers use this to associate the DECODE_UNIT returned by Common C

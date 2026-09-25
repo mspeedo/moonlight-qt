@@ -5,6 +5,7 @@
 #include <memory>
 
 #if defined(HAVE_LIBPLACEBO_VULKAN) && defined(Q_OS_LINUX)
+#include "streaming/displaypresentlatency.h"
 #include "streaming/latencybenchmarkcontrol.h"
 #include "streaming/latencyprobe.h"
 #include "streaming/streamhealthtelemetry.h"
@@ -24,43 +25,6 @@ constexpr int kTelemetryGraphPanelPadding = 8;
 constexpr int kTelemetryGraphSurfaceGap = 24;
 constexpr float kTelemetryGraphScaleStepMs = 5.0f;
 constexpr float kTelemetryGraphMinScaleMs = 5.0f;
-constexpr std::size_t kPipelineMetricLabelWidth = 34;
-constexpr std::size_t kPipelineMetricValueWidth = 7;
-
-void hidePipelineRunMaximum(char* output)
-{
-    if (output == nullptr) {
-        return;
-    }
-
-    constexpr std::size_t runMaximumOffset =
-            kPipelineMetricLabelWidth + 1 +
-            kPipelineMetricValueWidth + 1 +
-            kPipelineMetricValueWidth + 1;
-    constexpr char hiddenValue[] = "    N/A";
-
-    for (char* line = output; *line != '\0';) {
-        char* nextLine = SDL_strchr(line, '\n');
-        const std::size_t lineLength = nextLine != nullptr ?
-                static_cast<std::size_t>(nextLine - line) : SDL_strlen(line);
-
-        // Pipeline metric rows are the only lines with the two-space indent and
-        // fixed-width value columns. Mask the run-wide maximum while retaining
-        // AVG10s/MAX10s for continuous hitch analysis.
-        if (lineLength >= runMaximumOffset + kPipelineMetricValueWidth &&
-                line[0] == ' ' && line[1] == ' ') {
-            SDL_memcpy(line + runMaximumOffset,
-                       hiddenValue,
-                       kPipelineMetricValueWidth);
-        }
-
-        if (nextLine == nullptr) {
-            break;
-        }
-        line = nextLine + 1;
-    }
-}
-
 void blitGraphLabel(SDL_Surface* destination,
                     TTF_Font* font,
                     const char* text,
@@ -208,7 +172,7 @@ using SurfacePtr = std::unique_ptr<SDL_Surface, decltype(&SDL_FreeSurface)>;
 
 struct GraphCache {
     SurfacePtr background {nullptr, SDL_FreeSurface};
-    std::array<float, 5> scales {};
+    std::array<float, 6> scales {};
 };
 
 SDL_Surface* renderTelemetryGraphs(TTF_Font* font, SDL_Color color,
@@ -225,13 +189,17 @@ SDL_Surface* renderTelemetryGraphs(TTF_Font* font, SDL_Color color,
         bool drawFramePeriod;
     };
 
+    StreamPipelineTelemetry::GraphSeries displayPresent;
+    DisplayPresentLatency::graphSnapshot(displayPresent);
     const GraphRow rows[] = {
         {"Host frame interval", &graphs.hostFrameInterval, true},
         {"First packet interval", &graphs.firstPacketInterval, true},
         {"Complete frame interval", &graphs.completeFrameInterval, true},
-        {"First packet -> complete", &graphs.firstPacketToComplete, false},
         {"Present interval", &graphs.presentInterval, true},
+        {"First packet -> complete", &graphs.firstPacketToComplete, false},
+        {"Input -> display present", &displayPresent, false},
     };
+    const std::size_t rowCount = sizeof(rows) / sizeof(rows[0]);
 
     const int fontHeight = TTF_FontHeight(font);
     const int titleHeight = fontHeight + 6;
@@ -240,10 +208,10 @@ SDL_Surface* renderTelemetryGraphs(TTF_Font* font, SDL_Color color,
     const int width = kTelemetryGraphPanelPadding * 2 +
             static_cast<int>(StreamPipelineTelemetry::kGraphColumns);
     const int height = kTelemetryGraphPanelPadding * 2 + titleHeight +
-            static_cast<int>(sizeof(rows) / sizeof(rows[0])) * rowHeight;
+            static_cast<int>(rowCount) * rowHeight;
 
-    std::array<float, 5> scales;
-    for (std::size_t i = 0; i < scales.size(); ++i) {
+    std::array<float, 6> scales {};
+    for (std::size_t i = 0; i < rowCount; ++i) {
         scales[i] = graphScaleMaxMs(*rows[i].series);
     }
     if (!cache.background || cache.scales != scales) {
@@ -260,7 +228,7 @@ SDL_Surface* renderTelemetryGraphs(TTF_Font* font, SDL_Color color,
         blitGraphLabel(background, font, "10s history",
                        kTelemetryGraphPanelPadding, kTelemetryGraphPanelPadding, color);
         int y = kTelemetryGraphPanelPadding + titleHeight;
-        for (std::size_t i = 0; i < scales.size(); ++i) {
+        for (std::size_t i = 0; i < rowCount; ++i) {
             char label[96];
             SDL_snprintf(label, sizeof(label), "%s (0-%.0f ms)",
                          rows[i].label, static_cast<double>(scales[i]));
@@ -282,7 +250,7 @@ SDL_Surface* renderTelemetryGraphs(TTF_Font* font, SDL_Color color,
     SDL_BlitSurface(cache.background.get(), nullptr, surface, nullptr);
     SDL_SetSurfaceBlendMode(surface, SDL_BLENDMODE_BLEND);
     int y = kTelemetryGraphPanelPadding + titleHeight + labelHeight;
-    for (std::size_t i = 0; i < scales.size(); ++i) {
+    for (std::size_t i = 0; i < rowCount; ++i) {
         drawTelemetryGraph(surface, kTelemetryGraphPanelPadding, y,
                            *rows[i].series, scales[i], graphs.framePeriodMs,
                            rows[i].drawFramePeriod, color, false);
@@ -442,7 +410,7 @@ void OverlayManager::appendDebugTelemetry(char* text, std::size_t length, std::u
     }
     SDL_strlcat(text, healthLines, length);
 
-    char latencyLine[192];
+    char latencyLine[512];
     LatencyProbe::instance().formatOverlayLine(latencyLine, sizeof(latencyLine));
 
     // Keep the input-latency block contiguous. The probe owns the detailed
@@ -469,20 +437,12 @@ void OverlayManager::appendDebugTelemetry(char* text, std::size_t length, std::u
         }
     }
 
-    const bool showPipelineRunMaximum =
-            SDL_strcmp(telemetryStatus, "BENCHMARK") == 0 ||
-            SDL_strcmp(telemetryStatus, "FROZEN (benchmark)") == 0;
-
     SDL_strlcat(text, "\n\n", length);
     SDL_strlcat(text, latencyLine, length);
 
     char pipelineLines[1024];
     StreamPipelineTelemetry::formatOverlayLines(pipelineLines, sizeof(pipelineLines), nowUs);
     if (pipelineLines[0] != '\0') {
-        if (!showPipelineRunMaximum) {
-            hidePipelineRunMaximum(pipelineLines);
-        }
-
         SDL_strlcat(text, "\n\n", length);
         if (telemetryStatus[0] != '\0') {
             SDL_strlcat(text, "Telemetry: ", length);

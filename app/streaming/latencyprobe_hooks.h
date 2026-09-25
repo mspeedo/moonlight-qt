@@ -8,6 +8,7 @@
 #ifdef HAVE_LIBPLACEBO_VULKAN
 
 #include "latencyprobe.h"
+#include "presentationtimingprobe.h"
 #include "streampipelinetelemetry.h"
 #include "streamhealthtelemetry.h"
 
@@ -35,6 +36,7 @@ struct SampleSlot {
     uint8_t rgba[4] = {};
     uint64_t serial = 0;
     uint64_t submitTimestamp = 0;
+    uint64_t presentId = 0;
     std::atomic<bool> pending { false };
 };
 
@@ -79,6 +81,7 @@ inline void sampleComplete(void* opaque)
     auto* slot = static_cast<SampleSlot*>(opaque);
     const uint64_t serial = slot->serial;
     const uint64_t submitTimestamp = slot->submitTimestamp;
+    const uint64_t presentId = slot->presentId;
 
     const float r = slot->rgba[0] / 255.0f;
     const float g = slot->rgba[1] / 255.0f;
@@ -86,7 +89,15 @@ inline void sampleComplete(void* opaque)
     const float luma = 0.2126f * r + 0.7152f * g + 0.0722f * b;
 
     slot->pending.store(false, std::memory_order_release);
+
+    // Preserve the original benchmark callback first and untouched: it consumes
+    // the exact submit-return timestamp captured for this sampled frame.
     LatencyProbe::instance().onVideoSample(serial, submitTimestamp, luma);
+
+    // The additive metric resolves the same sampled frame against asynchronous
+    // present-wait confirmation. Missing confirmation simply produces no second
+    // sample and never changes the original benchmark result.
+    PresentationTimingProbe::deliverVideoSample(serial, presentId, luma);
 }
 
 inline bool ensureDetectorResources(RendererContext* ctx, SampleSlot* slot)
@@ -151,7 +162,8 @@ inline bool ensureDetectorResources(RendererContext* ctx, SampleSlot* slot)
 inline bool scheduleSample(RendererContext* ctx,
                            const pl_frame& image,
                            uint64_t serial,
-                           uint64_t submitTimestamp)
+                           uint64_t submitTimestamp,
+                           uint64_t presentId)
 {
     SampleSlot* slot = nullptr;
     for (auto& candidate : ctx->slots) {
@@ -176,6 +188,7 @@ inline bool scheduleSample(RendererContext* ctx,
 
     slot->serial = serial;
     slot->submitTimestamp = submitTimestamp;
+    slot->presentId = presentId;
 
     const float sourceLeft = image.crop.x0 < image.crop.x1 ? image.crop.x0 : image.crop.x1;
     const float sourceRight = image.crop.x0 < image.crop.x1 ? image.crop.x1 : image.crop.x0;
@@ -320,24 +333,36 @@ inline bool swapchainStartFrame(pl_swapchain swapchain, pl_swapchain_frame* outF
 
 inline bool swapchainSubmitFrame(pl_swapchain swapchain)
 {
-    const bool result = pl_swapchain_submit_frame(swapchain);
-
     const bool matchingFrame = g_PendingFrame.swapchain == swapchain;
     const bool sampleRequested = matchingFrame &&
             g_PendingFrame.sampleRequested &&
             g_PendingFrame.renderer != nullptr;
 
-    // Preserve the frozen input benchmark's t1 ordering: its SDL timestamp stays
-    // the first benchmark clock sampled after a successful real swapchain submit.
+    // The additive timing bridge tags only benchmark-sampled presents. It does
+    // not wait on the render thread.
+    PresentationTimingProbe::setCaptureNextPresent(sampleRequested);
+    const bool result = pl_swapchain_submit_frame(swapchain);
+
+    // Preserve the original benchmark's t1 ordering exactly: this remains the
+    // first benchmark clock sampled after a successful real swapchain submit.
     const uint64_t submitTimestamp = result && sampleRequested ?
                 SDL_GetPerformanceCounter() : 0;
 
-    // Phase 1 uses LiGetMicroseconds() so it shares the Common C clock domain.
-    // Keep this immediately after the pre-existing input t1 capture. On the vast
-    // majority of frames no input sample is pending, so only the TLS predicate
-    // sits between the real submit return and this timestamp.
+    // Preserve the existing pipeline-present timestamp immediately after the
+    // original input-benchmark t1, before any display-confirmation bookkeeping.
     if (result && StreamPipelineTelemetry::presentPendingFast()) {
         StreamPipelineTelemetry::presentSuccess(LiGetMicroseconds());
+    }
+
+    const uint64_t presentId = result && sampleRequested ?
+            PresentationTimingProbe::lastPresentId() : 0;
+    PresentationTimingProbe::setCaptureNextPresent(false);
+
+    // Everything below belongs only to the additive metric and runs after both
+    // pre-existing presentation timestamps have already been captured. Waiting
+    // itself happens on the dedicated PresentationTimingProbe worker.
+    if (result && presentId != 0) {
+        PresentationTimingProbe::queuePresentWait(presentId);
     }
 
     PendingFrame pending = {};
@@ -361,12 +386,10 @@ inline bool swapchainSubmitFrame(pl_swapchain swapchain)
 
     const uint64_t serial = context->nextSerial++;
 
-    // The 1x1 detector render is deliberately queued only after the actual
-    // swapchain frame has been submitted. This keeps detector GPU work out of
-    // the measured frame's presentation path. Carry the exact submission
-    // timestamp with this sample so the asynchronous callback needs no history
-    // lookup or later frame association.
-    scheduleSample(context, pending.image, serial, submitTimestamp);
+    // The original 1x1 detector path and submit timestamp are retained. The
+    // additional presentId lets the same sampled image be paired with the
+    // asynchronous present-wait completion without changing input->submit.
+    scheduleSample(context, pending.image, serial, submitTimestamp, presentId);
 
     return result;
 }
@@ -429,6 +452,10 @@ inline int avcodecReceiveFrame(AVCodecContext* context, AVFrame* frame)
 // These wrappers are defined after all real libplacebo declarations and after
 // the wrapper function bodies above. Calls in Moonlight's C++ sources are
 // therefore redirected without changing upstream plvk.cpp itself.
+#define pl_vulkan_create(log, params) \
+    PresentationTimingProbe::vulkanCreate((log), (params))
+#define pl_vulkan_destroy(vk) \
+    PresentationTimingProbe::vulkanDestroy((vk))
 #define pl_renderer_create(log, gpu) \
     LatencyProbeHooks::rendererCreate((log), (gpu))
 #define pl_renderer_destroy(renderer) \
@@ -439,6 +466,8 @@ inline int avcodecReceiveFrame(AVCodecContext* context, AVFrame* frame)
     LatencyProbeHooks::swapchainStartFrame((swapchain), (frame))
 #define pl_swapchain_submit_frame(swapchain) \
     LatencyProbeHooks::swapchainSubmitFrame((swapchain))
+#define pl_swapchain_destroy(swapchain) \
+    PresentationTimingProbe::swapchainDestroy((swapchain))
 #define LiWaitForNextVideoFrame(frameHandle, decodeUnit) \
     LatencyProbeHooks::waitForNextVideoFrame((frameHandle), (decodeUnit))
 #define LiPollNextVideoFrame(frameHandle, decodeUnit) \
