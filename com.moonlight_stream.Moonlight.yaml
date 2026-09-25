@@ -111,13 +111,13 @@ modules:
   - name: ffmpeg
     build-options:
       config-opts:
-        - --fatal-warnings
         - --disable-stripping
         - --enable-pic
         - --enable-lto
         - --enable-shared
         - --disable-static
         - --disable-all
+        - --disable-autodetect
         - --enable-avcodec
         - --enable-avformat
         - --enable-swscale
