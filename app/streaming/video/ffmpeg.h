@@ -1,6 +1,10 @@
 #pragma once
 
+#include <array>
+#include <condition_variable>
+#include <cstdint>
 #include <functional>
+#include <mutex>
 #include <QQueue>
 #include <set>
 
@@ -95,6 +99,8 @@ private:
     static bool isSeparateTestDecoderRequired(const AVCodec* decoder);
 
     void reset();
+    void resetTransportBufferState();
+    bool waitForTransportBuffer(const DECODE_UNIT* du, DECODE_UNIT& decodeUnit);
 
     void writeBuffer(PLENTRY entry, int& offset);
 
@@ -134,6 +140,29 @@ private:
     TestMode m_CurrentTestMode;
     SDL_Thread* m_DecoderThread;
     SDL_atomic_t m_DecoderThreadShouldQuit;
+
+    struct TransportTransitSample {
+        std::uint64_t completedUs = 0;
+        std::int64_t offsetUs = 0;
+    };
+
+    static constexpr std::uint64_t kTransportBaselineWindowUs = 2'000'000;
+    static constexpr std::uint64_t kTransportBaselineRiseUsPerSecond = 5'000;
+    static constexpr std::size_t kTransportTransitCapacity = 1024;
+
+    bool m_TransportBufferEnabled;
+    std::uint64_t m_TransportBufferUs;
+    bool m_TransportClockInitialized;
+    std::uint32_t m_TransportLastRtpTimestamp;
+    std::uint64_t m_TransportSourceTicks;
+    bool m_TransportBaselineInitialized;
+    std::int64_t m_TransportBaselineOffsetUs;
+    std::uint64_t m_TransportBaselineUpdateUs;
+    std::array<TransportTransitSample, kTransportTransitCapacity> m_TransportTransitSamples;
+    std::size_t m_TransportTransitNext;
+    std::size_t m_TransportTransitCount;
+    std::mutex m_TransportWaitMutex;
+    std::condition_variable m_TransportWaitCv;
 
     // Data buffers in the queued DU are not valid
     QQueue<DECODE_UNIT> m_FrameInfoQueue;

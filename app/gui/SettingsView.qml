@@ -1731,6 +1731,41 @@ Flickable {
                 }
 
                 CheckBox {
+                    id: networkBufferCheck
+                    hoverEnabled: true
+                    width: parent.width
+                    text: qsTr("Network buffer")
+                    font.pointSize: 12
+                    checked: StreamingPreferences.enableTransportBuffer
+                    onCheckedChanged: StreamingPreferences.enableTransportBuffer = checked
+
+                    ToolTip.delay: 1000
+                    ToolTip.timeout: 10000
+                    ToolTip.visible: hovered
+                    ToolTip.text: qsTr("Adds a configurable latency reserve before video decoding to absorb network delivery spikes while preserving the host frame cadence. Takes effect on the next stream.")
+                }
+
+                RowLayout {
+                    width: parent.width
+                    enabled: networkBufferCheck.checked
+
+                    Label {
+                        text: qsTr("Network buffer delay (ms)")
+                        font.pointSize: 12
+                        Layout.fillWidth: true
+                    }
+
+                    SpinBox {
+                        id: networkBufferDelay
+                        from: 0
+                        to: 30
+                        editable: true
+                        value: StreamingPreferences.transportBufferMs
+                        onValueModified: StreamingPreferences.transportBufferMs = value
+                    }
+                }
+
+                CheckBox {
                     id: enableYUV444
                     width: parent.width
                     text: qsTr("Enable YUV 4:4:4")

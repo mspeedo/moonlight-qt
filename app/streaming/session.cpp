@@ -279,7 +279,7 @@ bool Session::chooseDecoder(StreamingPreferences::VideoDecoderSelection vds,
                             StreamingPreferences::RendererSelection renderer,
                             SDL_Window* window, int videoFormat, int width, int height,
                             int frameRate, bool enableVsync, bool enableFramePacing, bool testOnly, IVideoDecoder*& chosenDecoder,
-                            bool preferMailbox)
+                            bool preferMailbox, bool enableTransportBuffer, int transportBufferMs)
 {
     DECODER_PARAMETERS params;
 
@@ -296,6 +296,8 @@ bool Session::chooseDecoder(StreamingPreferences::VideoDecoderSelection vds,
     params.enableVsync = enableVsync;
     params.preferMailbox = preferMailbox;
     params.enableFramePacing = enableFramePacing;
+    params.enableTransportBuffer = !testOnly && enableTransportBuffer;
+    params.transportBufferMs = qBound(0, transportBufferMs, 30);
     params.testOnly = testOnly;
     params.vds = vds;
     params.renderer = renderer;
@@ -2218,7 +2220,9 @@ void Session::exec()
                                    enableVsync && m_Preferences->framePacing,
                                    false,
                                    s_ActiveSession->m_VideoDecoder,
-                                   m_Preferences->preferMailbox)) {
+                                   m_Preferences->preferMailbox,
+                                   m_Preferences->enableTransportBuffer,
+                                   m_Preferences->transportBufferMs)) {
                     SDL_UnlockMutex(m_DecoderLock);
                     SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                                  "Failed to recreate decoder after reset");

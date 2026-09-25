@@ -172,7 +172,7 @@ using SurfacePtr = std::unique_ptr<SDL_Surface, decltype(&SDL_FreeSurface)>;
 
 struct GraphCache {
     SurfacePtr background {nullptr, SDL_FreeSurface};
-    std::array<float, 6> scales {};
+    std::array<float, 7> scales {};
 };
 
 SDL_Surface* renderTelemetryGraphs(TTF_Font* font, SDL_Color color,
@@ -187,17 +187,33 @@ SDL_Surface* renderTelemetryGraphs(TTF_Font* font, SDL_Color color,
         const char* label;
         const StreamPipelineTelemetry::GraphSeries* series;
         bool drawFramePeriod;
+        bool dynamicLabel;
     };
 
     StreamPipelineTelemetry::GraphSeries displayPresent;
     DisplayPresentLatency::graphSnapshot(displayPresent);
+
+    int queuedFrames = LiGetPendingVideoFrames();
+    if (queuedFrames < 0) {
+        queuedFrames = 0;
+    }
+    else if (queuedFrames > 15) {
+        queuedFrames = 15;
+    }
+
+    char networkBufferLabel[128];
+    SDL_snprintf(networkBufferLabel, sizeof(networkBufferLabel),
+                 "Network buffer (0-%.0f ms) | queue %d/15",
+                 graphs.networkBufferConfiguredMs, queuedFrames);
+
     const GraphRow rows[] = {
-        {"Host frame interval", &graphs.hostFrameInterval, true},
-        {"First packet interval", &graphs.firstPacketInterval, true},
-        {"Complete frame interval", &graphs.completeFrameInterval, true},
-        {"Present interval", &graphs.presentInterval, true},
-        {"First packet -> complete", &graphs.firstPacketToComplete, false},
-        {"Input -> display present", &displayPresent, false},
+        {"Host frame interval", &graphs.hostFrameInterval, true, false},
+        {"First packet interval", &graphs.firstPacketInterval, true, false},
+        {"Complete frame interval", &graphs.completeFrameInterval, true, false},
+        {"Present interval", &graphs.presentInterval, true, false},
+        {"First packet -> complete", &graphs.firstPacketToComplete, false, false},
+        {networkBufferLabel, &graphs.networkBufferReserve, false, true},
+        {"Input -> display present", &displayPresent, false, false},
     };
     const std::size_t rowCount = sizeof(rows) / sizeof(rows[0]);
 
@@ -210,9 +226,12 @@ SDL_Surface* renderTelemetryGraphs(TTF_Font* font, SDL_Color color,
     const int height = kTelemetryGraphPanelPadding * 2 + titleHeight +
             static_cast<int>(rowCount) * rowHeight;
 
-    std::array<float, 6> scales {};
+    std::array<float, 7> scales {};
     for (std::size_t i = 0; i < rowCount; ++i) {
         scales[i] = graphScaleMaxMs(*rows[i].series);
+    }
+    if (graphs.networkBufferConfiguredMs > 0.0) {
+        scales[5] = static_cast<float>(graphs.networkBufferConfiguredMs);
     }
     if (!cache.background || cache.scales != scales) {
         cache.background.reset(SDL_CreateRGBSurfaceWithFormat(
@@ -229,10 +248,13 @@ SDL_Surface* renderTelemetryGraphs(TTF_Font* font, SDL_Color color,
                        kTelemetryGraphPanelPadding, kTelemetryGraphPanelPadding, color);
         int y = kTelemetryGraphPanelPadding + titleHeight;
         for (std::size_t i = 0; i < rowCount; ++i) {
-            char label[96];
-            SDL_snprintf(label, sizeof(label), "%s (0-%.0f ms)",
-                         rows[i].label, static_cast<double>(scales[i]));
-            blitGraphLabel(background, font, label, kTelemetryGraphPanelPadding, y, color);
+            if (!rows[i].dynamicLabel) {
+                char label[96];
+                SDL_snprintf(label, sizeof(label), "%s (0-%.0f ms)",
+                             rows[i].label, static_cast<double>(scales[i]));
+                blitGraphLabel(background, font, label,
+                               kTelemetryGraphPanelPadding, y, color);
+            }
             y += labelHeight;
             drawTelemetryGraph(background, kTelemetryGraphPanelPadding, y,
                                *rows[i].series, scales[i], 0, false, color, true);
@@ -251,6 +273,11 @@ SDL_Surface* renderTelemetryGraphs(TTF_Font* font, SDL_Color color,
     SDL_SetSurfaceBlendMode(surface, SDL_BLENDMODE_BLEND);
     int y = kTelemetryGraphPanelPadding + titleHeight + labelHeight;
     for (std::size_t i = 0; i < rowCount; ++i) {
+        if (rows[i].dynamicLabel) {
+            blitGraphLabel(surface, font, rows[i].label,
+                           kTelemetryGraphPanelPadding, y - labelHeight, color);
+        }
+
         drawTelemetryGraph(surface, kTelemetryGraphPanelPadding, y,
                            *rows[i].series, scales[i], graphs.framePeriodMs,
                            rows[i].drawFramePeriod, color, false);

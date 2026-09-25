@@ -177,7 +177,10 @@ public:
         return result;
     }
 
-    bool fillGraph(std::uint64_t nowUs, GraphSeries& graph) const
+    bool fillGraph(std::uint64_t nowUs,
+                   GraphSeries& graph,
+                   bool fillDurationSpan = true,
+                   bool keepMinimum = false) const
     {
         graph = {};
         const GraphWindow window = graphWindowForTime(nowUs);
@@ -204,7 +207,7 @@ public:
 
             std::uint64_t firstBucket;
             std::uint64_t lastBucket;
-            if (durationUs == 0) {
+            if (!fillDurationSpan || durationUs == 0) {
                 const std::uint64_t pointUs = completedUs == 0 ? 0 : completedUs - 1;
                 firstBucket = lastBucket = graphBucketForTime(pointUs);
             }
@@ -236,7 +239,9 @@ public:
 
             const float durationMs = static_cast<float>(durationUs) / 1000.0f;
             for (std::size_t column = firstColumn; column <= lastColumn; ++column) {
-                if (!graph.valid[column] || durationMs > graph.maximumMs[column]) {
+                if (!graph.valid[column] ||
+                        (keepMinimum ? durationMs < graph.maximumMs[column] :
+                                       durationMs > graph.maximumMs[column])) {
                     graph.maximumMs[column] = durationMs;
                     graph.valid[column] = 1;
                 }
@@ -378,6 +383,7 @@ MetricRing g_DecodeStartToDecoded;
 MetricRing g_DecodedToRenderStart;
 MetricRing g_RenderStartToPresent;
 MetricRing g_PresentInterval;
+MetricRing g_NetworkBufferReserve;
 EventRing g_HostFrameDiscontinuities;
 std::array<DecodeStartSlot, kRingCapacity> g_DecodeStarts;
 std::array<DecodedTimestampSlot, kRingCapacity> g_DecodedTimestamps;
@@ -398,6 +404,8 @@ thread_local std::uint64_t g_PresentGeneration = 0;
 std::atomic<std::uint64_t> g_Generation {1};
 std::atomic<std::uint64_t> g_FrozenNowUs {0};
 std::atomic<std::uint64_t> g_Frames {0};
+std::atomic<std::uint64_t> g_NetworkBufferReserveUs {0};
+std::atomic<std::uint64_t> g_NetworkBufferConfiguredUs {0};
 
 void syncDecodeGeneration()
 {
@@ -454,9 +462,12 @@ void resetClientState()
     g_DecodedToRenderStart.reset();
     g_RenderStartToPresent.reset();
     g_PresentInterval.reset();
+    g_NetworkBufferReserve.reset();
     g_HostFrameDiscontinuities.reset();
     g_FrozenNowUs.store(0, std::memory_order_relaxed);
     g_Frames.store(0, std::memory_order_relaxed);
+    g_NetworkBufferReserveUs.store(0, std::memory_order_relaxed);
+    g_NetworkBufferConfiguredUs.store(0, std::memory_order_relaxed);
     resetTimingState();
 }
 
@@ -775,6 +786,19 @@ void pacerDrop()
     StreamHealthTelemetry::pacerFrameDrop();
 }
 
+void recordNetworkBufferReserve(std::uint64_t completedUs,
+                                std::uint64_t reserveUs,
+                                std::uint64_t configuredUs)
+{
+    if (!g_Active.load(std::memory_order_acquire)) {
+        return;
+    }
+
+    g_NetworkBufferReserve.add(completedUs, reserveUs);
+    g_NetworkBufferReserveUs.store(reserveUs, std::memory_order_relaxed);
+    g_NetworkBufferConfiguredUs.store(configuredUs, std::memory_order_relaxed);
+}
+
 void presentSuccess(std::uint64_t presentUs)
 {
     if (!g_Active.load(std::memory_order_relaxed) ||
@@ -865,6 +889,12 @@ GraphSnapshot graphSnapshot(std::uint64_t nowUs)
     result.hasData |= g_CompleteFrameInterval.fillGraph(nowUs, result.completeFrameInterval);
     result.hasData |= g_FirstPacketToComplete.fillGraph(nowUs, result.firstPacketToComplete);
     result.hasData |= g_PresentInterval.fillGraph(nowUs, result.presentInterval);
+    result.hasData |= g_NetworkBufferReserve.fillGraph(
+            nowUs, result.networkBufferReserve, false, true);
+    result.networkBufferReserveMs =
+            static_cast<double>(g_NetworkBufferReserveUs.load(std::memory_order_relaxed)) / 1000.0;
+    result.networkBufferConfiguredMs =
+            static_cast<double>(g_NetworkBufferConfiguredUs.load(std::memory_order_relaxed)) / 1000.0;
 
     const MetricSnapshot hostCadence = g_HostFrameInterval.snapshot(nowUs);
     if (hostCadence.windowValid) {

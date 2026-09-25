@@ -2,6 +2,7 @@
 #include "ffmpeg.h"
 #include "utils.h"
 #include "streaming/session.h"
+#include "streaming/streampipelinetelemetry.h"
 
 #include <chrono>
 #include <thread>
@@ -239,7 +240,17 @@ FFmpegVideoDecoder::FFmpegVideoDecoder(bool testOnly)
       m_NeedsSpsFixup(false),
       m_TestOnly(testOnly),
       m_CurrentTestMode(TestMode::TestFrameOnly),
-      m_DecoderThread(nullptr)
+      m_DecoderThread(nullptr),
+      m_TransportBufferEnabled(false),
+      m_TransportBufferUs(0),
+      m_TransportClockInitialized(false),
+      m_TransportLastRtpTimestamp(0),
+      m_TransportSourceTicks(0),
+      m_TransportBaselineInitialized(false),
+      m_TransportBaselineOffsetUs(0),
+      m_TransportBaselineUpdateUs(0),
+      m_TransportTransitNext(0),
+      m_TransportTransitCount(0)
 {
     SDL_zero(m_ActiveWndVideoStats);
     SDL_zero(m_LastWndVideoStats);
@@ -272,6 +283,7 @@ void FFmpegVideoDecoder::reset()
     // It might be touching things we're about to free.
     if (m_DecoderThread != nullptr) {
         SDL_AtomicSet(&m_DecoderThreadShouldQuit, 1);
+        m_TransportWaitCv.notify_all();
         LiWakeWaitForVideoFrame();
         SDL_WaitThread(m_DecoderThread, NULL);
         SDL_AtomicSet(&m_DecoderThreadShouldQuit, 0);
@@ -280,6 +292,7 @@ void FFmpegVideoDecoder::reset()
 
     m_FramesIn = m_FramesOut = 0;
     m_FrameInfoQueue.clear();
+    resetTransportBufferState();
 
     delete m_Pacer;
     m_Pacer = nullptr;
@@ -480,6 +493,158 @@ bool FFmpegVideoDecoder::createFrontendRenderer(PDECODER_PARAMETERS params, bool
     return true;
 }
 
+void FFmpegVideoDecoder::resetTransportBufferState()
+{
+    m_TransportClockInitialized = false;
+    m_TransportLastRtpTimestamp = 0;
+    m_TransportSourceTicks = 0;
+    m_TransportBaselineInitialized = false;
+    m_TransportBaselineOffsetUs = 0;
+    m_TransportBaselineUpdateUs = 0;
+    m_TransportTransitSamples.fill(TransportTransitSample {});
+    m_TransportTransitNext = 0;
+    m_TransportTransitCount = 0;
+}
+
+bool FFmpegVideoDecoder::waitForTransportBuffer(const DECODE_UNIT* du, DECODE_UNIT& decodeUnit)
+{
+    // Common C and the dequeue telemetry hooks retain the original timestamps.
+    // Only the decoder's metadata copy excludes the intentional buffer hold.
+    decodeUnit = du != nullptr ? *du : DECODE_UNIT {};
+
+    if (!m_TransportBufferEnabled || m_TransportBufferUs == 0 || du == nullptr ||
+            du->enqueueTimeUs == 0) {
+        return true;
+    }
+
+    const std::uint64_t completedUs = du->enqueueTimeUs;
+
+    if (!m_TransportClockInitialized) {
+        m_TransportClockInitialized = true;
+        m_TransportLastRtpTimestamp = du->rtpTimestamp;
+        m_TransportSourceTicks = 0;
+    }
+    else {
+        // Unsigned subtraction unwraps the normal 32-bit RTP timestamp wrap.
+        // A genuine timestamp discontinuity also remains safe: the current
+        // transit sample becomes the new lower-envelope baseline, so we never
+        // wait more than the configured buffer after frame completion.
+        const std::uint32_t deltaTicks =
+                du->rtpTimestamp - m_TransportLastRtpTimestamp;
+        m_TransportLastRtpTimestamp = du->rtpTimestamp;
+        m_TransportSourceTicks += deltaTicks;
+    }
+
+    const std::uint64_t sourceUs =
+            (m_TransportSourceTicks * 1'000'000ULL) / 90'000ULL;
+    const std::int64_t transitOffsetUs =
+            static_cast<std::int64_t>(completedUs) -
+            static_cast<std::int64_t>(sourceUs);
+
+    TransportTransitSample& sample =
+            m_TransportTransitSamples[m_TransportTransitNext];
+    sample.completedUs = completedUs;
+    sample.offsetUs = transitOffsetUs;
+    m_TransportTransitNext =
+            (m_TransportTransitNext + 1) % kTransportTransitCapacity;
+    if (m_TransportTransitCount < kTransportTransitCapacity) {
+        m_TransportTransitCount++;
+    }
+
+    // Use the recent minimum transit offset as the path baseline. Positive
+    // network/FEC/reassembly jitter therefore consumes configured headroom,
+    // while sender-side frame interval changes remain encoded in sourceUs.
+    const std::uint64_t cutoffUs =
+            completedUs > kTransportBaselineWindowUs ?
+            completedUs - kTransportBaselineWindowUs : 0;
+    std::int64_t windowBaselineOffsetUs = transitOffsetUs;
+    for (std::size_t i = 0; i < m_TransportTransitCount; ++i) {
+        const TransportTransitSample& candidate = m_TransportTransitSamples[i];
+        if (candidate.completedUs >= cutoffUs &&
+                candidate.completedUs <= completedUs &&
+                candidate.offsetUs < windowBaselineOffsetUs) {
+            windowBaselineOffsetUs = candidate.offsetUs;
+        }
+    }
+
+    if (!m_TransportBaselineInitialized) {
+        m_TransportBaselineInitialized = true;
+        m_TransportBaselineOffsetUs = windowBaselineOffsetUs;
+    }
+    else if (windowBaselineOffsetUs < m_TransportBaselineOffsetUs) {
+        // A newly observed lower path delay is safe to adopt immediately. This
+        // reduces latency rather than adding a visible playout pause.
+        m_TransportBaselineOffsetUs = windowBaselineOffsetUs;
+    }
+    else if (completedUs > m_TransportBaselineUpdateUs) {
+        // When the lower envelope moves later (clock drift or a persistent path
+        // delay increase), restore buffer headroom gradually. A hard baseline
+        // jump would manufacture a one-frame hitch even though transport is now
+        // stable at the new delay.
+        const std::uint64_t elapsedUs = completedUs - m_TransportBaselineUpdateUs;
+        const std::int64_t allowedRiseUs = static_cast<std::int64_t>(
+                (elapsedUs * kTransportBaselineRiseUsPerSecond) / 1'000'000ULL);
+        const std::int64_t neededRiseUs =
+                windowBaselineOffsetUs - m_TransportBaselineOffsetUs;
+        if (allowedRiseUs >= neededRiseUs) {
+            m_TransportBaselineOffsetUs = windowBaselineOffsetUs;
+        }
+        else if (allowedRiseUs > 0) {
+            m_TransportBaselineOffsetUs += allowedRiseUs;
+        }
+    }
+    m_TransportBaselineUpdateUs = completedUs;
+
+    std::int64_t targetSignedUs =
+            static_cast<std::int64_t>(sourceUs) +
+            m_TransportBaselineOffsetUs +
+            static_cast<std::int64_t>(m_TransportBufferUs);
+    if (targetSignedUs <= 0) {
+        return true;
+    }
+
+    std::uint64_t targetUs = static_cast<std::uint64_t>(targetSignedUs);
+
+    // The current frame participates in the baseline calculation, so this bound
+    // should already hold mathematically. Keep it explicit as a hard latency
+    // invariant: a completed frame is never intentionally held longer than B.
+    const std::uint64_t latestTargetUs = completedUs + m_TransportBufferUs;
+    if (targetUs > latestTargetUs) {
+        targetUs = latestTargetUs;
+    }
+
+    const std::uint64_t reserveUs =
+            targetUs > completedUs ? targetUs - completedUs : 0;
+    StreamPipelineTelemetry::recordNetworkBufferReserve(
+            completedUs, reserveUs, m_TransportBufferUs);
+
+    // Exclude the full scheduled hold, including time already spent in Common
+    // C's queue. Time after eligibility (decoder backlog and wake-up overshoot)
+    // remains part of the decode statistic. Shift both endpoints equally so the
+    // reassembly duration is unchanged when submitDecodeUnit() accounts for it.
+    decodeUnit.enqueueTimeUs += reserveUs;
+    decodeUnit.receiveTimeUs += reserveUs;
+
+    std::unique_lock<std::mutex> lock(m_TransportWaitMutex);
+    for (;;) {
+        if (SDL_AtomicGet(&m_DecoderThreadShouldQuit)) {
+            return false;
+        }
+
+        const std::uint64_t nowUs = LiGetMicroseconds();
+        if (nowUs >= targetUs) {
+            return true;
+        }
+
+        m_TransportWaitCv.wait_for(
+                lock,
+                std::chrono::microseconds(targetUs - nowUs),
+                [this]() {
+                    return SDL_AtomicGet(&m_DecoderThreadShouldQuit) != 0;
+                });
+    }
+}
+
 bool FFmpegVideoDecoder::completeInitialization(const AVCodec* decoder, enum AVPixelFormat requiredFormat, PDECODER_PARAMETERS params, TestMode testMode, bool useAlternateFrontend)
 {
     // In test-only mode, we should only see test frames
@@ -496,6 +661,17 @@ bool FFmpegVideoDecoder::completeInitialization(const AVCodec* decoder, enum AVP
     m_StreamFps = params->frameRate;
     m_VideoFormat = params->videoFormat;
     m_CurrentTestMode = testMode;
+
+    m_TransportBufferUs =
+            static_cast<std::uint64_t>(qBound(0, params->transportBufferMs, 30)) * 1000ULL;
+    m_TransportBufferEnabled =
+            !m_TestOnly && params->enableTransportBuffer && m_TransportBufferUs != 0;
+    resetTransportBufferState();
+    if (m_TransportBufferEnabled) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "Network buffer enabled: %llu ms",
+                    static_cast<unsigned long long>(m_TransportBufferUs / 1000ULL));
+    }
 
     // Don't bother initializing Pacer if we're not actually going to render
     if (testMode != TestMode::TestFrameOnly) {
@@ -1886,7 +2062,13 @@ void FFmpegVideoDecoder::decoderThreadProc()
                 continue;
             }
 
-            LiCompleteVideoFrame(handle, submitDecodeUnit(du));
+            DECODE_UNIT decodeUnit;
+            if (!waitForTransportBuffer(du, decodeUnit)) {
+                LiCompleteVideoFrame(handle, DR_OK);
+                continue;
+            }
+
+            LiCompleteVideoFrame(handle, submitDecodeUnit(&decodeUnit));
         }
 
         if (m_FramesIn != m_FramesOut) {
@@ -2051,9 +2233,9 @@ void FFmpegVideoDecoder::decoderThreadProc()
                         // Data buffers in the DU are not valid here!
                         DECODE_UNIT du = m_FrameInfoQueue.dequeue();
 
-                        // Count time in avcodec_send_packet() and avcodec_receive_frame()
-                        // as time spent decoding. Also count time spent in the decode unit
-                        // queue because that's directly caused by decoder latency.
+                        // Count time in avcodec_send_packet(), avcodec_receive_frame(),
+                        // and decoder backlog. The metadata copy excludes intentional
+                        // network buffering while retaining post-deadline queue delay.
                         m_ActiveWndVideoStats.totalDecodeTimeUs += (LiGetMicroseconds() - du.enqueueTimeUs);
 
                         // Store the presentation time (90 kHz timebase)
@@ -2077,8 +2259,14 @@ void FFmpegVideoDecoder::decoderThreadProc()
                             LiWaitForNextVideoFrame(&handle, &du) :
                             LiPollNextVideoFrame(&handle, &du);
                     if (haveInput) {
+                        DECODE_UNIT decodeUnit;
+                        if (!waitForTransportBuffer(du, decodeUnit)) {
+                            LiCompleteVideoFrame(handle, DR_OK);
+                            break;
+                        }
+
                         // FIXME: Handle EAGAIN on avcodec_send_packet() properly?
-                        LiCompleteVideoFrame(handle, submitDecodeUnit(du));
+                        LiCompleteVideoFrame(handle, submitDecodeUnit(&decodeUnit));
                     }
                     else if (waitForInputOnEagain) {
                         // Leave through the existing AVFrame cleanup below;
