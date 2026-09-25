@@ -170,5 +170,17 @@ modules:
     sources:
       - type: git
         url: https://github.com/mspeedo/moonlight-qt.git
-        branch: vrr
         disable-shallow-clone: true
+        disable-submodules: true
+      - type: git
+        url: https://github.com/mspeedo/moonlight-common-c.git
+        branch: master
+        dest: moonlight-common-c/moonlight-common-c
+      - type: git
+        url: https://github.com/cgutman/qmdnsengine.git
+        commit: 920c097ffa742e2968290f15d4dde6693aec02e5
+        dest: qmdnsengine/qmdnsengine
+      - type: git
+        url: https://github.com/gabomdq/SDL_GameControllerDB.git
+        commit: 8d9fefd7b810f2541f78cc7a8ccbd185bc84c7a5
+        dest: app/SDL_GameControllerDB

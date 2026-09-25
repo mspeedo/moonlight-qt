@@ -32,3 +32,31 @@ CONFIG(release, debug|release) {
 QMAKE_CFLAGS   += $$(CFLAGS)
 QMAKE_CXXFLAGS += $$(CXXFLAGS)
 QMAKE_LFLAGS   += $$(LDFLAGS)
+
+# Keep the Moonlight latency-probe renderer hooks out of upstream plvk.cpp.
+# This only activates for the app project on Linux; the header itself is inert
+# unless HAVE_LIBPLACEBO_VULKAN is defined.
+unix:!macx:exists($$_PRO_FILE_PWD_/streaming/latencyprobe_hooks.h) {
+    QMAKE_CXXFLAGS += -include $$_PRO_FILE_PWD_/streaming/latencyprobe_hooks.h
+}
+
+# The private Sunshine benchmark control client is app-local and Linux-only,
+# just like the libplacebo latency probe that consumes it.
+unix:!macx:exists($$_PRO_FILE_PWD_/streaming/latencybenchmarkcontrol.cpp) {
+    SOURCES += $$_PRO_FILE_PWD_/streaming/latencybenchmarkcontrol.cpp
+    HEADERS += $$_PRO_FILE_PWD_/streaming/latencybenchmarkcontrol.h
+}
+
+# Stream-health counters are session-lifetime diagnostics and remain independent
+# of whether the automatic latency benchmark is running.
+unix:!macx:exists($$_PRO_FILE_PWD_/streaming/streamhealthtelemetry.cpp) {
+    SOURCES += $$_PRO_FILE_PWD_/streaming/streamhealthtelemetry.cpp
+    HEADERS += $$_PRO_FILE_PWD_/streaming/streamhealthtelemetry.h
+}
+
+# Phase 1 stream-pipeline telemetry stays in a downstream-only unit and is
+# activated only while the automatic latency benchmark is running.
+unix:!macx:exists($$_PRO_FILE_PWD_/streaming/streampipelinetelemetry.cpp) {
+    SOURCES += $$_PRO_FILE_PWD_/streaming/streampipelinetelemetry.cpp
+    HEADERS += $$_PRO_FILE_PWD_/streaming/streampipelinetelemetry.h
+}
