@@ -10,6 +10,7 @@ extern "C" {
 #include <cstdio>
 #include <cstdint>
 #include <string>
+#include <mutex>
 
 namespace StreamPipelineTelemetry {
 namespace {
@@ -18,12 +19,85 @@ constexpr std::uint64_t kWindowUs = 10'000'000;
 constexpr std::size_t kRingCapacity = 2048;
 constexpr std::size_t kDecodeQueueCapacity = 64;
 constexpr int kMetricLabelWidth = 34;
+std::mutex g_StateChangeMutex;
+std::mutex g_StateCallbackMutex;
+std::atomic<std::uint64_t> g_DisplayRevision {0};
+StateChangedCallback g_StateCallback = nullptr;
+void* g_StateCallbackContext = nullptr;
+
+void notifyStateChanged()
+{
+    g_DisplayRevision.fetch_add(1, std::memory_order_release);
+    std::lock_guard<std::mutex> lock(g_StateCallbackMutex);
+    if (g_StateCallback != nullptr) {
+        g_StateCallback(g_StateCallbackContext);
+    }
+}
 
 struct SampleSlot {
     std::atomic<std::uint64_t> serial {0};
     std::atomic<std::uint64_t> completedUs {0};
     std::atomic<std::uint64_t> durationUs {0};
 };
+
+struct GraphWindow {
+    std::uint64_t firstBucket = 0;
+    std::uint64_t lastBucket = 0;
+    std::size_t firstColumn = 0;
+};
+
+std::uint64_t graphBucketForTime(std::uint64_t timestampUs)
+{
+    // Decompose before multiplying so this stays overflow-safe for the full
+    // uint64_t clock range while retaining the exact 480-buckets-per-10s grid.
+    const std::uint64_t wholeWindows = timestampUs / kWindowUs;
+    const std::uint64_t offsetUs = timestampUs % kWindowUs;
+    return wholeWindows * static_cast<std::uint64_t>(kGraphColumns) +
+            (offsetUs * static_cast<std::uint64_t>(kGraphColumns)) / kWindowUs;
+}
+
+GraphWindow graphWindowForTime(std::uint64_t nowUs)
+{
+    // Treat graph buckets as half-open time ranges. At an exact bucket boundary,
+    // keep the just-completed bucket at the right edge instead of showing a new
+    // zero-width future bucket.
+    const std::uint64_t lastTimeUs = nowUs == 0 ? 0 : nowUs - 1;
+    const std::uint64_t lastBucket = graphBucketForTime(lastTimeUs);
+
+    GraphWindow window;
+    window.lastBucket = lastBucket;
+    if (lastBucket >= kGraphColumns - 1) {
+        window.firstBucket = lastBucket - (kGraphColumns - 1);
+    }
+    else {
+        // This only matters during the first ~10 seconds of system uptime. Keep
+        // the available history right-aligned just like a mature 10-second view.
+        window.firstBucket = 0;
+        window.firstColumn = static_cast<std::size_t>(
+                (kGraphColumns - 1) - lastBucket);
+    }
+    return window;
+}
+
+bool graphColumnForBucket(const GraphWindow& window,
+                          std::uint64_t absoluteBucket,
+                          std::size_t& column)
+{
+    if (absoluteBucket < window.firstBucket ||
+            absoluteBucket > window.lastBucket) {
+        return false;
+    }
+
+    const std::uint64_t relativeBucket = absoluteBucket - window.firstBucket;
+    const std::uint64_t mappedColumn =
+            static_cast<std::uint64_t>(window.firstColumn) + relativeBucket;
+    if (mappedColumn >= kGraphColumns) {
+        return false;
+    }
+
+    column = static_cast<std::size_t>(mappedColumn);
+    return true;
+}
 
 class MetricRing {
 public:
@@ -112,13 +186,14 @@ public:
     bool fillGraph(std::uint64_t nowUs, GraphSeries& graph) const
     {
         graph = {};
-        const std::uint64_t windowStartUs = nowUs > kWindowUs ? nowUs - kWindowUs : 0;
+        const GraphWindow window = graphWindowForTime(nowUs);
         bool hasData = false;
 
-        // The OSD worker reads the same lock-free slots used by snapshot(). Each
-        // horizontal bucket covers an equal slice of the shared 10-second time
-        // window, and keeps the maximum so a one-frame hitch can never be averaged
-        // away by neighboring normal frames.
+        // Samples keep their original completion timestamp and duration. Map both
+        // endpoints onto an absolute time grid, then fill every bucket overlapped
+        // by the completed interval. This makes a long hitch backfill the blank
+        // columns that elapsed while it was still in progress, while fixed bucket
+        // boundaries keep historical holes stable as the graph scrolls.
         for (const auto& slot : m_Slots) {
             const std::uint64_t serialBefore = slot.serial.load(std::memory_order_acquire);
             if (serialBefore == 0) {
@@ -129,25 +204,48 @@ public:
             const std::uint64_t durationUs = slot.durationUs.load(std::memory_order_relaxed);
             const std::uint64_t serialAfter = slot.serial.load(std::memory_order_acquire);
 
-            if (serialBefore != serialAfter || serialAfter == 0) {
-                continue;
-            }
-            if (completedUs > nowUs || nowUs - completedUs > kWindowUs ||
-                    completedUs < windowStartUs) {
+            if (serialBefore != serialAfter || serialAfter == 0 || completedUs > nowUs) {
                 continue;
             }
 
-            const std::uint64_t offsetUs = completedUs - windowStartUs;
-            std::size_t bucket = static_cast<std::size_t>(
-                    (offsetUs * kGraphColumns) / kWindowUs);
-            if (bucket >= kGraphColumns) {
-                bucket = kGraphColumns - 1;
+            std::uint64_t firstBucket;
+            std::uint64_t lastBucket;
+            if (durationUs == 0) {
+                const std::uint64_t pointUs = completedUs == 0 ? 0 : completedUs - 1;
+                firstBucket = lastBucket = graphBucketForTime(pointUs);
+            }
+            else {
+                const std::uint64_t startUs =
+                        completedUs > durationUs ? completedUs - durationUs : 0;
+                const std::uint64_t endUs = completedUs == 0 ? 0 : completedUs - 1;
+                firstBucket = graphBucketForTime(startUs);
+                lastBucket = graphBucketForTime(endUs);
+            }
+
+            if (lastBucket < window.firstBucket ||
+                    firstBucket > window.lastBucket) {
+                continue;
+            }
+            if (firstBucket < window.firstBucket) {
+                firstBucket = window.firstBucket;
+            }
+            if (lastBucket > window.lastBucket) {
+                lastBucket = window.lastBucket;
+            }
+
+            std::size_t firstColumn;
+            std::size_t lastColumn;
+            if (!graphColumnForBucket(window, firstBucket, firstColumn) ||
+                    !graphColumnForBucket(window, lastBucket, lastColumn)) {
+                continue;
             }
 
             const float durationMs = static_cast<float>(durationUs) / 1000.0f;
-            if (!graph.valid[bucket] || durationMs > graph.maximumMs[bucket]) {
-                graph.maximumMs[bucket] = durationMs;
-                graph.valid[bucket] = 1;
+            for (std::size_t column = firstColumn; column <= lastColumn; ++column) {
+                if (!graph.valid[column] || durationMs > graph.maximumMs[column]) {
+                    graph.maximumMs[column] = durationMs;
+                    graph.valid[column] = 1;
+                }
             }
             hasData = true;
         }
@@ -159,6 +257,72 @@ private:
     std::array<SampleSlot, kRingCapacity> m_Slots;
     std::atomic<std::uint64_t> m_NextSerial {0};
     std::atomic<std::uint64_t> m_RunMaximumUs {0};
+};
+
+struct EventSlot {
+    std::atomic<std::uint64_t> serial {0};
+    std::atomic<std::uint64_t> timestampUs {0};
+};
+
+class EventRing {
+public:
+    void reset()
+    {
+        m_NextSerial.store(0, std::memory_order_relaxed);
+        for (auto& slot : m_Slots) {
+            slot.serial.store(0, std::memory_order_relaxed);
+            slot.timestampUs.store(0, std::memory_order_relaxed);
+        }
+    }
+
+    void add(std::uint64_t timestampUs)
+    {
+        const std::uint64_t serial = m_NextSerial.fetch_add(1, std::memory_order_relaxed) + 1;
+        EventSlot& slot = m_Slots[(serial - 1) % kRingCapacity];
+
+        slot.serial.store(0, std::memory_order_relaxed);
+        slot.timestampUs.store(timestampUs, std::memory_order_relaxed);
+        slot.serial.store(serial, std::memory_order_release);
+    }
+
+    bool applyGraphGaps(std::uint64_t nowUs, GraphSeries& graph) const
+    {
+        const GraphWindow window = graphWindowForTime(nowUs);
+        bool hasGap = false;
+
+        // Apply these after measured HOST spans. A frame-number discontinuity
+        // deliberately has no host cadence sample, so its bucket must remain blank
+        // even when another measured interval overlaps the same 20.8 ms column.
+        for (const auto& slot : m_Slots) {
+            const std::uint64_t serialBefore = slot.serial.load(std::memory_order_acquire);
+            if (serialBefore == 0) {
+                continue;
+            }
+
+            const std::uint64_t timestampUs = slot.timestampUs.load(std::memory_order_relaxed);
+            const std::uint64_t serialAfter = slot.serial.load(std::memory_order_acquire);
+            if (serialBefore != serialAfter || serialAfter == 0 || timestampUs > nowUs) {
+                continue;
+            }
+
+            const std::uint64_t pointUs = timestampUs == 0 ? 0 : timestampUs - 1;
+            const std::uint64_t bucket = graphBucketForTime(pointUs);
+            std::size_t column;
+            if (!graphColumnForBucket(window, bucket, column)) {
+                continue;
+            }
+
+            graph.valid[column] = 0;
+            graph.maximumMs[column] = 0.0f;
+            hasGap = true;
+        }
+
+        return hasGap;
+    }
+
+private:
+    std::array<EventSlot, kRingCapacity> m_Slots;
+    std::atomic<std::uint64_t> m_NextSerial {0};
 };
 
 struct DecodeStartSlot {
@@ -221,6 +385,7 @@ MetricRing g_DecodeStartToDecoded;
 MetricRing g_DecodedToRenderStart;
 MetricRing g_RenderStartToPresent;
 MetricRing g_PresentInterval;
+EventRing g_HostFrameDiscontinuities;
 std::array<DecodeStartSlot, kRingCapacity> g_DecodeStarts;
 std::array<DecodedTimestampSlot, kRingCapacity> g_DecodedTimestamps;
 
@@ -279,6 +444,7 @@ void resetClientState()
     g_DecodedToRenderStart.reset();
     g_RenderStartToPresent.reset();
     g_PresentInterval.reset();
+    g_HostFrameDiscontinuities.reset();
 
     for (auto& slot : g_DecodeStarts) {
         slot.frameNumber.store(0, std::memory_order_relaxed);
@@ -336,30 +502,61 @@ void appendMetric(char* output,
 std::atomic<bool> g_Active {false};
 thread_local RenderContextState g_RenderContext;
 
-void clear()
+void setStateChangedCallback(StateChangedCallback callback, void* context)
+{
+    std::lock_guard<std::mutex> lock(g_StateCallbackMutex);
+    g_StateCallback = callback;
+    g_StateCallbackContext = context;
+}
+
+std::uint64_t displayRevision()
+{
+    return g_DisplayRevision.load(std::memory_order_acquire);
+}
+
+std::uint64_t snapshotTimeUs()
+{
+    return g_Active.load(std::memory_order_acquire) ? LiGetMicroseconds() :
+            g_FrozenNowUs.load(std::memory_order_acquire);
+}
+
+static void resetTelemetry()
 {
     g_Active.store(false, std::memory_order_release);
-    // Invalidate decoder-thread TLS from any previous run. The decoder thread
-    // observes this lazily on its next active telemetry hook, avoiding locks or
-    // cross-thread queue manipulation at benchmark start/stop.
+    // Invalidate decoder-thread TLS lazily, without involving sample writers
+    // in OSD synchronization.
     g_Generation.fetch_add(1, std::memory_order_acq_rel);
     resetClientState();
 }
 
+void clear()
+{
+    std::lock_guard<std::mutex> lock(g_StateChangeMutex);
+    g_DisplayRevision.fetch_add(1, std::memory_order_acq_rel);
+    resetTelemetry();
+    notifyStateChanged();
+}
+
 void start()
 {
-    clear();
+    std::lock_guard<std::mutex> lock(g_StateChangeMutex);
+    g_DisplayRevision.fetch_add(1, std::memory_order_acq_rel);
+    resetTelemetry();
     g_Active.store(true, std::memory_order_release);
+    notifyStateChanged();
 }
 
 void stop()
 {
+    std::lock_guard<std::mutex> lock(g_StateChangeMutex);
+    g_DisplayRevision.fetch_add(1, std::memory_order_acq_rel);
     if (g_Active.exchange(false, std::memory_order_acq_rel)) {
         g_FrozenNowUs.store(LiGetMicroseconds(), std::memory_order_release);
     }
     g_CurrentDecodeUnit = {};
     g_DecodeQueue.clear();
     g_RenderContext = {};
+    notifyStateChanged();
 }
 
 void noteDecodeUnit(PDECODE_UNIT du)
@@ -388,10 +585,13 @@ void noteDecodeUnit(PDECODE_UNIT du)
 
     // A missing decode-unit frame means we cannot know whether an unseen host
     // timestamp existed in the gap. Invalidate only the next host-frame interval
-    // sample so network loss cannot masquerade as a host pacing hitch. The
-    // session-lifetime drop count is maintained separately by StreamHealthTelemetry.
+    // sample so network loss cannot masquerade as a host pacing hitch. Keep a
+    // graph-only marker so that unknown HOST interval stays visibly blank.
     if (networkGapBeforeCurrent) {
         g_HostFrameSequenceContinuous = false;
+        if (du->enqueueTimeUs != 0) {
+            g_HostFrameDiscontinuities.add(du->enqueueTimeUs);
+        }
     }
 
     // A nonzero host-processing value identifies a real captured frame rather
@@ -551,8 +751,8 @@ void renderEnd()
 
 void pacerDrop()
 {
-    // Pacer calls this at the same two catch-up drop sites as its stock
-    // pacerDroppedFrames counter. Keep this session-lifetime and independent of
+    // Pacer calls this alongside its catch-up pacerDroppedFrames counter.
+    // Keep this session-lifetime and independent of
     // benchmark start/stop.
     StreamHealthTelemetry::pacerFrameDrop();
 }
@@ -590,13 +790,14 @@ void presentSuccess(std::uint64_t presentUs)
     g_RenderContext = {};
 }
 
-Snapshot snapshot()
+Snapshot snapshot(std::uint64_t nowUs)
 {
     Snapshot result;
-    const bool active = g_Active.load(std::memory_order_acquire);
-    std::uint64_t nowUs = active ? LiGetMicroseconds() : g_FrozenNowUs.load(std::memory_order_acquire);
     if (nowUs == 0) {
-        nowUs = LiGetMicroseconds();
+        nowUs = snapshotTimeUs();
+        if (nowUs == 0) {
+            nowUs = LiGetMicroseconds();
+        }
     }
 
     result.hostFrameInterval = g_HostFrameInterval.snapshot(nowUs);
@@ -624,7 +825,7 @@ Snapshot snapshot()
     return result;
 }
 
-GraphSnapshot graphSnapshot()
+GraphSnapshot graphSnapshot(std::uint64_t nowUs)
 {
     GraphSnapshot result;
     const bool active = g_Active.load(std::memory_order_acquire);
@@ -633,12 +834,14 @@ GraphSnapshot graphSnapshot()
         return result;
     }
 
-    std::uint64_t nowUs = active ? LiGetMicroseconds() : frozenNowUs;
     if (nowUs == 0) {
-        nowUs = LiGetMicroseconds();
+        nowUs = active ? LiGetMicroseconds() : frozenNowUs;
     }
 
-    result.hasData |= g_HostFrameInterval.fillGraph(nowUs, result.hostFrameInterval);
+    const bool hostData = g_HostFrameInterval.fillGraph(nowUs, result.hostFrameInterval);
+    const bool hostGap =
+            g_HostFrameDiscontinuities.applyGraphGaps(nowUs, result.hostFrameInterval);
+    result.hasData |= hostData || hostGap;
     result.hasData |= g_FirstPacketInterval.fillGraph(nowUs, result.firstPacketInterval);
     result.hasData |= g_CompleteFrameInterval.fillGraph(nowUs, result.completeFrameInterval);
     result.hasData |= g_FirstPacketToComplete.fillGraph(nowUs, result.firstPacketToComplete);
@@ -652,7 +855,7 @@ GraphSnapshot graphSnapshot()
     return result;
 }
 
-void formatOverlayLines(char* output, std::size_t length)
+void formatOverlayLines(char* output, std::size_t length, std::uint64_t nowUs)
 {
     if (length == 0) {
         return;
@@ -667,7 +870,7 @@ void formatOverlayLines(char* output, std::size_t length)
         return;
     }
 
-    const Snapshot stats = snapshot();
+    const Snapshot stats = snapshot(nowUs);
     if (!g_Active.load(std::memory_order_acquire) && !stats.hasData) {
         return;
     }

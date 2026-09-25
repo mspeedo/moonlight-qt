@@ -133,8 +133,14 @@ void decodedFrame(AVFrame* frame, std::uint64_t decodedUs);
 void presentSuccess(std::uint64_t presentUs);
 #endif
 
-Snapshot snapshot();
-GraphSnapshot graphSnapshot();
-void formatOverlayLines(char* output, std::size_t length);
+// OSD-only control-plane state. Odd revisions mean a reset/freeze is in progress.
+// The callback is serialized with registration/removal; never called by sample writers.
+using StateChangedCallback = void (*)(void*);
+void setStateChangedCallback(StateChangedCallback callback, void* context);
+std::uint64_t displayRevision();
+std::uint64_t snapshotTimeUs();
+Snapshot snapshot(std::uint64_t nowUs = 0);
+GraphSnapshot graphSnapshot(std::uint64_t nowUs = 0);
+void formatOverlayLines(char* output, std::size_t length, std::uint64_t nowUs = 0);
 
 } // namespace StreamPipelineTelemetry

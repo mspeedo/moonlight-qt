@@ -46,6 +46,10 @@ public:
     virtual void waitToRender() override;
     virtual void cleanupRenderContext() override;
     virtual void notifyOverlayUpdated(Overlay::OverlayType) override;
+#if defined(HAVE_LIBPLACEBO_VULKAN) && defined(Q_OS_LINUX)
+    bool supportsDebugGraph() const override { return true; }
+    bool updateDebugOverlay(SDL_Surface* text, SDL_Surface* graph) override;
+#endif
     virtual bool notifyWindowChanged(PWINDOW_STATE_CHANGE_INFO) override;
     virtual int getRendererAttributes() override;
     virtual int getDecoderColorspace() override;
@@ -116,6 +120,15 @@ private:
     pl_swapchain_frame m_SwapchainFrame = {};
     bool m_HasPendingSwapchainFrame = false;
 
+    // The telemetry panel is private to this renderer, not a new OverlayType.
+#if defined(HAVE_LIBPLACEBO_VULKAN) && defined(Q_OS_LINUX)
+    static constexpr int kGraphOverlay = Overlay::OverlayMax;
+    static constexpr int kOverlayCount = Overlay::OverlayMax + 1;
+    bool m_DebugOverlayVisible = false; // protected by m_OverlayLock
+#else
+    static constexpr int kOverlayCount = Overlay::OverlayMax;
+#endif
+
     // Overlay state
     SDL_SpinLock m_OverlayLock = 0;
     struct {
@@ -137,7 +150,7 @@ private:
         // as long as hasStagingOverlay is false.
         bool hasStagingOverlay;
         pl_overlay stagingOverlay;
-    } m_Overlays[Overlay::OverlayMax] = {};
+    } m_Overlays[kOverlayCount] = {};
 
     // Device context used for hwaccel decoders
     AVBufferRef* m_HwDeviceCtx = nullptr;

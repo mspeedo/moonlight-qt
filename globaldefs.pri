@@ -33,6 +33,11 @@ QMAKE_CFLAGS   += $$(CFLAGS)
 QMAKE_CXXFLAGS += $$(CXXFLAGS)
 QMAKE_LFLAGS   += $$(LDFLAGS)
 
+# Native GameMode pidfd registration uses the session bus on Linux.
+unix:!macx:exists($$_PRO_FILE_PWD_/streaming/gamemodecontrol.h) {
+    QT += dbus
+}
+
 # Keep the Moonlight latency-probe renderer hooks out of upstream plvk.cpp.
 # This only activates for the app project on Linux; the header itself is inert
 # unless HAVE_LIBPLACEBO_VULKAN is defined.

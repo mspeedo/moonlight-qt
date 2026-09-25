@@ -47,10 +47,11 @@ jobs:
           sudo apt-get install -y flatpak flatpak-builder
           flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
 
-      - name: Pin Moonlight source to selected revision
+      - name: Pin Moonlight and Common C source revisions
         shell: bash
         env:
           SOURCE_SHA: ${{ steps.source.outputs.sha }}
+          COMMON_C_SHA: e834dd74b35963167efb3b31be87c7fe85cf0701
         run: |
           python3 - <<'PY'
           import os
@@ -58,32 +59,47 @@ jobs:
 
           manifest = Path("com.moonlight_stream.Moonlight.yaml")
           lines = manifest.read_text().splitlines(keepends=True)
-          source_url = "        url: https://github.com/mspeedo/moonlight-qt.git\n"
 
-          try:
-              url_index = lines.index(source_url)
-          except ValueError:
-              raise SystemExit("Unable to locate the Moonlight git source in the Flatpak manifest")
+          def pin_git_source(lines, url, commit):
+              source_url = f"        url: {url}\n"
+              try:
+                  url_index = lines.index(source_url)
+              except ValueError:
+                  raise SystemExit(f"Unable to locate git source in Flatpak manifest: {url}")
 
-          source_end = len(lines)
-          for i in range(url_index + 1, len(lines)):
-              if lines[i].startswith("      - type: "):
-                  source_end = i
-                  break
+              source_end = len(lines)
+              for i in range(url_index + 1, len(lines)):
+                  if lines[i].startswith("      - type: "):
+                      source_end = i
+                      break
 
-          source_options = [
-              line for line in lines[url_index + 1:source_end]
-              if not line.startswith("        branch: ")
-              and not line.startswith("        commit: ")
-          ]
+              source_options = [
+                  line for line in lines[url_index + 1:source_end]
+                  if not line.startswith("        branch: ")
+                  and not line.startswith("        commit: ")
+              ]
 
-          lines = (
-              lines[:url_index + 1]
-              + [f"        commit: {os.environ['SOURCE_SHA']}\n"]
-              + source_options
-              + lines[source_end:]
+              return (
+                  lines[:url_index + 1]
+                  + [f"        commit: {commit}\n"]
+                  + source_options
+                  + lines[source_end:]
+              )
+
+          lines = pin_git_source(
+              lines,
+              "https://github.com/mspeedo/moonlight-qt.git",
+              os.environ["SOURCE_SHA"],
           )
+          lines = pin_git_source(
+              lines,
+              "https://github.com/mspeedo/moonlight-common-c.git",
+              os.environ["COMMON_C_SHA"],
+          )
+
           manifest.write_text("".join(lines))
+          print(f"Pinned Moonlight Qt to {os.environ['SOURCE_SHA']}")
+          print(f"Pinned Moonlight Common C to {os.environ['COMMON_C_SHA']}")
           PY
 
       - name: Build Flatpak

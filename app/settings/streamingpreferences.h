@@ -126,6 +126,7 @@ public:
     Q_PROPERTY(bool unlockBitrate MEMBER unlockBitrate NOTIFY unlockBitrateChanged)
     Q_PROPERTY(bool autoAdjustBitrate MEMBER autoAdjustBitrate NOTIFY autoAdjustBitrateChanged)
     Q_PROPERTY(bool enableVsync MEMBER enableVsync NOTIFY enableVsyncChanged)
+    Q_PROPERTY(bool preferMailbox MEMBER preferMailbox NOTIFY preferMailboxChanged)
     Q_PROPERTY(bool gameOptimizations MEMBER gameOptimizations NOTIFY gameOptimizationsChanged)
     Q_PROPERTY(bool playAudioOnHost MEMBER playAudioOnHost NOTIFY playAudioOnHostChanged)
     Q_PROPERTY(bool multiController MEMBER multiController NOTIFY multiControllerChanged)
@@ -140,6 +141,7 @@ public:
     Q_PROPERTY(bool gamepadMouse MEMBER gamepadMouse NOTIFY gamepadMouseChanged)
     Q_PROPERTY(bool detectNetworkBlocking MEMBER detectNetworkBlocking NOTIFY detectNetworkBlockingChanged)
     Q_PROPERTY(bool showPerformanceOverlay MEMBER showPerformanceOverlay NOTIFY showPerformanceOverlayChanged)
+    Q_PROPERTY(bool enableGameModeAndThreadPriority MEMBER enableGameModeAndThreadPriority NOTIFY enableGameModeAndThreadPriorityChanged)
     Q_PROPERTY(AudioConfig audioConfig MEMBER audioConfig NOTIFY audioConfigChanged)
     Q_PROPERTY(VideoCodecConfig videoCodecConfig MEMBER videoCodecConfig NOTIFY videoCodecConfigChanged)
     Q_PROPERTY(bool enableHdr MEMBER enableHdr NOTIFY enableHdrChanged)
@@ -168,6 +170,7 @@ public:
     bool unlockBitrate;
     bool autoAdjustBitrate;
     bool enableVsync;
+    bool preferMailbox;
     bool gameOptimizations;
     bool playAudioOnHost;
     bool multiController;
@@ -182,6 +185,7 @@ public:
     bool gamepadMouse;
     bool detectNetworkBlocking;
     bool showPerformanceOverlay;
+    bool enableGameModeAndThreadPriority;
     bool swapMouseButtons;
     bool muteOnFocusLoss;
     bool backgroundGamepad;
@@ -207,6 +211,7 @@ signals:
     void unlockBitrateChanged();
     void autoAdjustBitrateChanged();
     void enableVsyncChanged();
+    void preferMailboxChanged();
     void gameOptimizationsChanged();
     void playAudioOnHostChanged();
     void multiControllerChanged();
@@ -229,6 +234,7 @@ signals:
     void gamepadMouseChanged();
     void detectNetworkBlockingChanged();
     void showPerformanceOverlayChanged();
+    void enableGameModeAndThreadPriorityChanged();
     void mouseButtonsChanged();
     void muteOnFocusLossChanged();
     void backgroundGamepadChanged();

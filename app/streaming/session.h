@@ -10,6 +10,7 @@
 #include "video/decoder.h"
 #include "audio/renderers/renderer.h"
 #include "video/overlaymanager.h"
+#include "threadpriority.h"
 
 class SupportedVideoFormatList : public QList<int>
 {
@@ -193,7 +194,7 @@ private:
                        SDL_Window* window, int videoFormat, int width, int height,
                        int frameRate, bool enableVsync, bool enableFramePacing,
                        bool testOnly,
-                       IVideoDecoder*& chosenDecoder);
+                       IVideoDecoder*& chosenDecoder, bool preferMailbox = false);
 
     static
     void clStageStarting(int stage);

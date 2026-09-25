@@ -11,8 +11,9 @@
 
 // End-to-end Moonlight input-to-present latency benchmark.
 //
-// The probe exists only while the debug/performance OSD is visible, but merely
-// showing the OSD does not launch the host helper or sample video. A normal
+// The probe is normally controlled by debug/performance OSD visibility, but an
+// already-started benchmark deliberately remains active if the OSD is hidden.
+// Merely showing the OSD does not launch the host helper or sample video. A normal
 // physical A press/release is left completely untouched. Holding physical A for
 // kBenchmarkHoldMs activates the benchmark: Moonlight first releases A through
 // its ordinary SDL/input path, gives that queued release one benchmark timer tick
@@ -22,7 +23,9 @@
 // A pulse that must produce a real black/white transition. That first transition
 // is discarded; only subsequent synthetic A pulses contribute latency samples.
 // Releasing physical A leaves the run active. Physical B-down stops the run
-// (including helper startup) and sends best-effort STOP.
+// (including helper startup) even while the OSD is hidden. Holding physical Y for
+// kTelemetryHoldMs toggles manual pipeline-telemetry freeze/resume only while the
+// OSD is visible, without altering ordinary short Y presses.
 class LatencyProbe
 {
 public:
@@ -43,18 +46,33 @@ public:
         return m_NeedsVideoSampleFast.load(std::memory_order_relaxed);
     }
 
-    void setEnabled(bool enabled)
+    bool setEnabled(bool enabled, bool forceDisable = false)
     {
         bool stateChanged = false;
         bool restoreAState = false;
         bool restorePhysicalA = false;
         bool requestStop = false;
-        bool stopStreamTelemetry = false;
+        bool benchmarkWasActive = false;
         SDL_JoystickID restoreController = 0;
         SDL_TimerID holdTimerToRemove = 0;
+        SDL_TimerID telemetryHoldTimerToRemove = 0;
         SDL_TimerID benchmarkTimerToRemove = 0;
 
         SDL_AtomicLock(&m_Lock);
+        m_OsdVisible = enabled;
+
+        const bool benchmarkInProgress =
+                m_BenchmarkStarting || m_HelperRunning || m_AutoBenchmark;
+        if (!enabled && benchmarkInProgress && !forceDisable) {
+            // Hiding the OSD must not perturb an already-started benchmark. Keep
+            // the event watch, timer, helper, video sampling, and telemetry alive.
+            // A/Y diagnostics are visibility-gated below; B remains available to
+            // stop the hidden benchmark.
+            m_PhysicalYHeld = false;
+            SDL_AtomicUnlock(&m_Lock);
+            return false;
+        }
+
         if (m_Enabled != enabled) {
             stateChanged = true;
 
@@ -67,10 +85,12 @@ public:
                         (m_PhysicalAHeld || m_AutoButtonDown);
                 restoreController = m_BenchmarkControllerId;
                 requestStop = m_BenchmarkStarting || m_HelperRunning || m_AutoBenchmark;
-                stopStreamTelemetry = m_AutoBenchmark;
+                benchmarkWasActive = m_AutoBenchmark;
                 holdTimerToRemove = m_HoldTimer;
+                telemetryHoldTimerToRemove = m_TelemetryHoldTimer;
                 benchmarkTimerToRemove = m_BenchmarkTimer;
                 m_HoldTimer = 0;
+                m_TelemetryHoldTimer = 0;
                 m_BenchmarkTimer = 0;
             }
 
@@ -84,6 +104,7 @@ public:
             m_RunMaximumMs = 0.0;
 
             m_PhysicalAHeld = false;
+            m_PhysicalYHeld = false;
             m_StopRequested = false;
             m_BenchmarkStarting = false;
             m_StartRequestPending = false;
@@ -92,6 +113,8 @@ public:
             m_HelperRunning = false;
             m_ValidationPending = false;
             m_AutoBenchmark = false;
+            m_BenchmarkRan = false;
+            m_ManualTelemetryFrozen = false;
             m_AutoButtonDown = false;
             m_AutoDownTick = 0;
             m_AutoNextDownTick = 0;
@@ -102,15 +125,13 @@ public:
         SDL_AtomicUnlock(&m_Lock);
 
         if (!stateChanged) {
-            return;
+            return false;
         }
 
         if (enabled) {
-            StreamPipelineTelemetry::clear();
-
-            // Idle OSD cost is only the controller event watch. The hold timer is
-            // armed lazily on a real A-down, and the 17 ms timer exists only once
-            // the 750 ms hold actually activates the benchmark.
+            // Pipeline telemetry runs for the whole stream. Enabling the OSD only
+            // enables benchmark controls and display work; it must not reset the
+            // already accumulated stream statistics.
             SDL_AddEventWatch(controllerEventWatch, this);
         }
         else {
@@ -118,6 +139,9 @@ public:
 
             if (holdTimerToRemove != 0) {
                 SDL_RemoveTimer(holdTimerToRemove);
+            }
+            if (telemetryHoldTimerToRemove != 0) {
+                SDL_RemoveTimer(telemetryHoldTimerToRemove);
             }
             if (benchmarkTimerToRemove != 0) {
                 SDL_RemoveTimer(benchmarkTimerToRemove);
@@ -127,13 +151,12 @@ public:
                 pushSyntheticAEvent(restoreController, restorePhysicalA);
             }
 
-            if (stopStreamTelemetry) {
-                StreamPipelineTelemetry::stop();
-            }
             if (requestStop) {
                 LatencyBenchmarkControl::stopAsync();
             }
         }
+
+        return benchmarkWasActive;
     }
 
     // Called from the asynchronous Vulkan readback callback. Luma is normalized
@@ -218,6 +241,22 @@ public:
             SDL_strlcat(output, " (B to stop)", length);
         }
 
+        if (m_AutoBenchmark) {
+            SDL_strlcat(output, "\nTelemetry: BENCHMARK", length);
+        }
+        else if (m_BenchmarkRan && !StreamPipelineTelemetry::isActiveFast()) {
+            SDL_strlcat(output, "\nTelemetry: FROZEN (benchmark)", length);
+        }
+        else if (m_ManualTelemetryFrozen) {
+            SDL_strlcat(output, "\nTelemetry: FROZEN (hold Y to resume)", length);
+        }
+        else if (m_BenchmarkStarting || m_HelperRunning) {
+            SDL_strlcat(output, "\nTelemetry: LIVE (benchmark starting)", length);
+        }
+        else {
+            SDL_strlcat(output, "\nTelemetry: LIVE (hold Y to freeze)", length);
+        }
+
         if (hasAverage) {
             char result[128];
             std::snprintf(result, sizeof(result),
@@ -239,11 +278,13 @@ public:
 private:
     static constexpr uint64_t kTimeoutMs = 500;
 
-    // Hold A for this long to enter benchmark mode. Synthetic A-down intervals
-    // jitter by one 17 ms timer tick around a 272 ms mean (255/272/289 ms),
-    // preventing samples from locking to a repeating stream-cadence phase.
-    // The 51 ms release gap is three 17 ms timer ticks.
+    // Hold A/Y long enough that ordinary gameplay taps never activate benchmark
+    // or telemetry-control behavior. Synthetic A-down intervals jitter by one
+    // 17 ms timer tick around a 272 ms mean (255/272/289 ms), preventing samples
+    // from locking to a repeating stream-cadence phase. The 51 ms release gap is
+    // three 17 ms timer ticks.
     static constexpr Uint32 kBenchmarkHoldMs = 750;
+    static constexpr Uint32 kTelemetryHoldMs = 750;
     static constexpr Uint32 kHelperStartupDelayMs = 2000;
     static constexpr Uint32 kBenchmarkPeriodMs = 272;
     static constexpr Uint32 kBenchmarkPressMs = 51;
@@ -289,10 +330,17 @@ private:
                 probe->onPhysicalAEvent(event->type == SDL_CONTROLLERBUTTONDOWN,
                                         event->cbutton.which);
             }
+            else if (event->cbutton.button == SDL_CONTROLLER_BUTTON_Y) {
+                probe->onPhysicalYEvent(event->type == SDL_CONTROLLERBUTTONDOWN,
+                                        event->cbutton.which);
+            }
             else if (event->type == SDL_CONTROLLERBUTTONDOWN &&
                      event->cbutton.button == SDL_CONTROLLER_BUTTON_B) {
                 SDL_AtomicLock(&probe->m_Lock);
-                if (probe->m_Enabled) {
+                if (probe->m_Enabled &&
+                        (probe->m_BenchmarkStarting ||
+                         probe->m_HelperRunning ||
+                         probe->m_AutoBenchmark)) {
                     probe->m_StopRequested = true;
                 }
                 SDL_AtomicUnlock(&probe->m_Lock);
@@ -305,6 +353,12 @@ private:
     static Uint32 SDLCALL holdTimerCallback(Uint32, void* userdata)
     {
         static_cast<LatencyProbe*>(userdata)->holdTimerFired();
+        return 0;
+    }
+
+    static Uint32 SDLCALL telemetryHoldTimerCallback(Uint32, void* userdata)
+    {
+        static_cast<LatencyProbe*>(userdata)->telemetryHoldTimerFired();
         return 0;
     }
 
@@ -339,14 +393,15 @@ private:
 
         SDL_AtomicLock(&m_Lock);
 
-        if (!m_Enabled) {
+        const bool benchmarkInProgress =
+                m_BenchmarkStarting || m_HelperRunning || m_AutoBenchmark;
+        if (!m_Enabled || (!m_OsdVisible && !benchmarkInProgress)) {
             SDL_AtomicUnlock(&m_Lock);
             return;
         }
 
         // Keep synthetic pulses bound to the controller that started the run.
-        if ((m_BenchmarkStarting || m_HelperRunning || m_AutoBenchmark) &&
-                controllerId != m_BenchmarkControllerId) {
+        if (benchmarkInProgress && controllerId != m_BenchmarkControllerId) {
             SDL_AtomicUnlock(&m_Lock);
             return;
         }
@@ -358,7 +413,8 @@ private:
             if (!m_PhysicalAHeld) {
                 m_PhysicalAHeld = true;
                 m_BenchmarkControllerId = controllerId;
-                if (!m_BenchmarkStarting && !m_HelperRunning && !m_AutoBenchmark &&
+                if (m_OsdVisible &&
+                        !m_BenchmarkStarting && !m_HelperRunning && !m_AutoBenchmark &&
                         m_HoldTimer == 0) {
                     m_StopRequested = false;
                     armHoldTimer = true;
@@ -390,7 +446,7 @@ private:
 
             bool keepTimer = false;
             SDL_AtomicLock(&m_Lock);
-            if (m_Enabled && m_PhysicalAHeld &&
+            if (m_Enabled && m_OsdVisible && m_PhysicalAHeld &&
                     !m_BenchmarkStarting && !m_HelperRunning && !m_AutoBenchmark &&
                     m_HoldTimer == 0) {
                 m_HoldTimer = timer;
@@ -404,11 +460,108 @@ private:
         }
     }
 
+    void onPhysicalYEvent(bool pressed, SDL_JoystickID controllerId)
+    {
+        bool armHoldTimer = false;
+        SDL_TimerID holdTimerToRemove = 0;
+
+        SDL_AtomicLock(&m_Lock);
+
+        if (!m_Enabled || !m_OsdVisible) {
+            SDL_AtomicUnlock(&m_Lock);
+            return;
+        }
+
+        if (pressed) {
+            if (!m_PhysicalYHeld) {
+                m_PhysicalYHeld = true;
+                m_TelemetryControllerId = controllerId;
+                if (!m_BenchmarkStarting && !m_HelperRunning && !m_AutoBenchmark &&
+                        !m_BenchmarkRan && m_TelemetryHoldTimer == 0) {
+                    armHoldTimer = true;
+                }
+            }
+        }
+        else if (controllerId == m_TelemetryControllerId) {
+            m_PhysicalYHeld = false;
+            if (m_TelemetryHoldTimer != 0) {
+                holdTimerToRemove = m_TelemetryHoldTimer;
+                m_TelemetryHoldTimer = 0;
+            }
+        }
+
+        SDL_AtomicUnlock(&m_Lock);
+
+        if (holdTimerToRemove != 0) {
+            SDL_RemoveTimer(holdTimerToRemove);
+        }
+
+        if (armHoldTimer) {
+            SDL_TimerID timer = SDL_AddTimer(kTelemetryHoldMs,
+                                             telemetryHoldTimerCallback,
+                                             this);
+            if (timer == 0) {
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                            "Latency probe: unable to arm telemetry hold timer");
+                return;
+            }
+
+            bool keepTimer = false;
+            SDL_AtomicLock(&m_Lock);
+            if (m_Enabled && m_OsdVisible && m_PhysicalYHeld &&
+                    m_TelemetryControllerId == controllerId &&
+                    !m_BenchmarkStarting && !m_HelperRunning && !m_AutoBenchmark &&
+                    !m_BenchmarkRan && m_TelemetryHoldTimer == 0) {
+                m_TelemetryHoldTimer = timer;
+                keepTimer = true;
+            }
+            SDL_AtomicUnlock(&m_Lock);
+
+            if (!keepTimer) {
+                SDL_RemoveTimer(timer);
+            }
+        }
+    }
+
+    void telemetryHoldTimerFired()
+    {
+        bool freezeTelemetry = false;
+        bool resumeTelemetry = false;
+
+        SDL_AtomicLock(&m_Lock);
+        m_TelemetryHoldTimer = 0;
+        if (m_Enabled && m_OsdVisible && m_PhysicalYHeld &&
+                !m_BenchmarkStarting && !m_HelperRunning && !m_AutoBenchmark &&
+                !m_BenchmarkRan) {
+            if (StreamPipelineTelemetry::isActiveFast()) {
+                m_ManualTelemetryFrozen = true;
+                freezeTelemetry = true;
+            }
+            else if (m_ManualTelemetryFrozen) {
+                m_ManualTelemetryFrozen = false;
+                resumeTelemetry = true;
+            }
+        }
+        SDL_AtomicUnlock(&m_Lock);
+
+        if (freezeTelemetry) {
+            StreamPipelineTelemetry::stop();
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "Pipeline telemetry manually frozen");
+        }
+        else if (resumeTelemetry) {
+            StreamPipelineTelemetry::start();
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "Pipeline telemetry manually resumed");
+        }
+    }
+
     void holdTimerFired()
     {
         SDL_AtomicLock(&m_Lock);
         m_HoldTimer = 0;
-        const bool eligible = m_Enabled && m_PhysicalAHeld && !m_StopRequested &&
+        const bool eligible = m_Enabled && m_OsdVisible &&
+                m_PhysicalAHeld && !m_StopRequested &&
                 !m_BenchmarkStarting && !m_HelperRunning && !m_AutoBenchmark;
         SDL_AtomicUnlock(&m_Lock);
 
@@ -428,7 +581,7 @@ private:
         const Uint32 nowTick = SDL_GetTicks();
 
         SDL_AtomicLock(&m_Lock);
-        if (m_Enabled && m_PhysicalAHeld && !m_StopRequested &&
+        if (m_Enabled && m_OsdVisible && m_PhysicalAHeld && !m_StopRequested &&
                 !m_BenchmarkStarting && !m_HelperRunning && !m_AutoBenchmark &&
                 m_BenchmarkTimer == 0) {
             m_BenchmarkTimer = timer;
@@ -551,6 +704,8 @@ private:
                 // A classified post-delay baseline is only a candidate helper.
                 // The first A-driven transition validates it and is discarded.
                 m_AutoBenchmark = true;
+                m_BenchmarkRan = true;
+                m_ManualTelemetryFrozen = false;
                 m_ValidationPending = true;
                 m_AutoButtonDown = false;
                 m_AutoDownTick = 0;
@@ -773,6 +928,7 @@ private:
     SDL_SpinLock m_Lock = 0;
     std::atomic<bool> m_NeedsVideoSampleFast { false };
     bool m_Enabled = false;
+    bool m_OsdVisible = false;
     bool m_WaitingForTransition = false;
     bool m_HasResult = false;
     VisualState m_Baseline = VisualState::Unknown;
@@ -782,10 +938,13 @@ private:
     double m_RunMaximumMs = 0.0;
 
     SDL_TimerID m_HoldTimer = 0;
+    SDL_TimerID m_TelemetryHoldTimer = 0;
     SDL_TimerID m_BenchmarkTimer = 0;
     bool m_PhysicalAHeld = false;
+    bool m_PhysicalYHeld = false;
     bool m_StopRequested = false;
     SDL_JoystickID m_BenchmarkControllerId = 0;
+    SDL_JoystickID m_TelemetryControllerId = 0;
     bool m_BenchmarkStarting = false;
     bool m_StartRequestPending = false;
     Uint32 m_StartRequestAfterTick = 0;
@@ -793,6 +952,8 @@ private:
     bool m_HelperRunning = false;
     bool m_ValidationPending = false;
     bool m_AutoBenchmark = false;
+    bool m_BenchmarkRan = false;
+    bool m_ManualTelemetryFrozen = false;
     bool m_AutoButtonDown = false;
     Uint32 m_AutoDownTick = 0;
     Uint32 m_AutoNextDownTick = 0;

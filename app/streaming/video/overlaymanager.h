@@ -24,6 +24,13 @@ public:
     virtual ~IOverlayRenderer() = default;
 
     virtual void notifyOverlayUpdated(OverlayType type) = 0;
+
+#if defined(HAVE_LIBPLACEBO_VULKAN) && defined(Q_OS_LINUX)
+    virtual bool supportsDebugGraph() const { return false; }
+    // Supported renderers consume both surfaces, including on failure. Null text
+    // means graph-only update; both null means hide. Publish a pair atomically.
+    virtual bool updateDebugOverlay(SDL_Surface*, SDL_Surface*) { return false; }
+#endif
 };
 
 class OverlayManager
@@ -55,10 +62,11 @@ private:
     bool ensureDebugOverlayWorker();
     void stopDebugOverlayWorker();
     void setDebugOverlayWorkerEnabled(bool enabled);
-    void invalidateDebugOverlayUpdate();
     bool queueDebugOverlayUpdate();
-    void appendDebugTelemetry(char* text, std::size_t length);
-    void publishDebugOverlaySurface(SDL_Surface* newSurface, std::uint64_t generation);
+    static void telemetryStateChanged(void* opaque);
+    void appendDebugTelemetry(char* text, std::size_t length, std::uint64_t nowUs);
+    bool publishDebugOverlaySurfaces(SDL_Surface* text, SDL_Surface* graph,
+                                     std::uint64_t generation, std::uint64_t revision);
 #endif
 
     struct {
@@ -82,6 +90,10 @@ private:
     bool m_DebugOverlayStop = false;
     bool m_DebugOverlayPending = false;
     bool m_DebugOverlayEnabled = false;
+    bool m_DebugOverlayAttached = false;
+    bool m_DebugOverlaySplit = false;
+    bool m_DebugOverlayReady = false;
+    bool m_DebugOverlayStatePending = false;
     std::uint64_t m_DebugOverlayGeneration = 0;
     char m_DebugOverlayPendingText[4096] = {};
 #endif

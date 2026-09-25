@@ -1,6 +1,10 @@
 #include "streamingpreferences.h"
 #include "utils.h"
 
+#if defined(Q_OS_LINUX)
+#include "streaming/threadpriority.h"
+#endif
+
 #include <QSettings>
 #include <QTranslator>
 #include <QCoreApplication>
@@ -19,6 +23,7 @@
 #define SER_AUTOADJUSTBITRATE "autoadjustbitrate"
 #define SER_FULLSCREEN "fullscreen"
 #define SER_VSYNC "vsync"
+#define SER_PREFER_MAILBOX "prefermailbox"
 #define SER_GAMEOPTS "gameopts"
 #define SER_HOSTAUDIO "hostaudio"
 #define SER_MULTICONT "multicontroller"
@@ -43,6 +48,7 @@
 #define SER_PACKETSIZE "packetsize"
 #define SER_DETECTNETBLOCKING "detectnetblocking"
 #define SER_SHOWPERFOVERLAY "showperfoverlay"
+#define SER_GAMEMODE_THREAD_PRIORITY "gamemodeandthreadpriority"
 #define SER_SWAPMOUSEBUTTONS "swapmousebuttons"
 #define SER_MUTEONFOCUSLOSS "muteonfocusloss"
 #define SER_BACKGROUNDGAMEPAD "backgroundgamepad"
@@ -130,6 +136,7 @@ void StreamingPreferences::reload()
     unlockBitrate = settings.value(SER_UNLOCK_BITRATE, false).toBool();
     autoAdjustBitrate = settings.value(SER_AUTOADJUSTBITRATE, true).toBool();
     enableVsync = settings.value(SER_VSYNC, true).toBool();
+    preferMailbox = settings.value(SER_PREFER_MAILBOX, false).toBool();
     gameOptimizations = settings.value(SER_GAMEOPTS, true).toBool();
     playAudioOnHost = settings.value(SER_HOSTAUDIO, false).toBool();
     multiController = settings.value(SER_MULTICONT, true).toBool();
@@ -144,6 +151,7 @@ void StreamingPreferences::reload()
     gamepadMouse = settings.value(SER_GAMEPADMOUSE, true).toBool();
     detectNetworkBlocking = settings.value(SER_DETECTNETBLOCKING, true).toBool();
     showPerformanceOverlay = settings.value(SER_SHOWPERFOVERLAY, false).toBool();
+    enableGameModeAndThreadPriority = settings.value(SER_GAMEMODE_THREAD_PRIORITY, false).toBool();
     packetSize = settings.value(SER_PACKETSIZE, 0).toInt();
     swapMouseButtons = settings.value(SER_SWAPMOUSEBUTTONS, false).toBool();
     muteOnFocusLoss = settings.value(SER_MUTEONFOCUSLOSS, false).toBool();
@@ -193,6 +201,10 @@ void StreamingPreferences::reload()
         videoCodecConfig = VCC_AUTO;
         enableHdr = true;
     }
+
+#if defined(Q_OS_LINUX)
+    ThreadPriority::setEnabled(enableGameModeAndThreadPriority);
+#endif
 }
 
 bool StreamingPreferences::retranslate()
@@ -330,6 +342,7 @@ void StreamingPreferences::save()
     settings.setValue(SER_UNLOCK_BITRATE, unlockBitrate);
     settings.setValue(SER_AUTOADJUSTBITRATE, autoAdjustBitrate);
     settings.setValue(SER_VSYNC, enableVsync);
+    settings.setValue(SER_PREFER_MAILBOX, preferMailbox);
     settings.setValue(SER_GAMEOPTS, gameOptimizations);
     settings.setValue(SER_HOSTAUDIO, playAudioOnHost);
     settings.setValue(SER_MULTICONT, multiController);
@@ -345,6 +358,7 @@ void StreamingPreferences::save()
     settings.setValue(SER_PACKETSIZE, packetSize);
     settings.setValue(SER_DETECTNETBLOCKING, detectNetworkBlocking);
     settings.setValue(SER_SHOWPERFOVERLAY, showPerformanceOverlay);
+    settings.setValue(SER_GAMEMODE_THREAD_PRIORITY, enableGameModeAndThreadPriority);
     settings.setValue(SER_AUDIOCFG, static_cast<int>(audioConfig));
     settings.setValue(SER_HDR, enableHdr);
     settings.setValue(SER_YUV444, enableYUV444);
@@ -362,6 +376,10 @@ void StreamingPreferences::save()
     settings.setValue(SER_SWAPFACEBUTTONS, swapFaceButtons);
     settings.setValue(SER_CAPTURESYSKEYS, captureSysKeysMode);
     settings.setValue(SER_KEEPAWAKE, keepAwake);
+
+#if defined(Q_OS_LINUX)
+    ThreadPriority::setEnabled(enableGameModeAndThreadPriority);
+#endif
 }
 
 int StreamingPreferences::getDefaultBitrate(int width, int height, int fps, bool yuv444)

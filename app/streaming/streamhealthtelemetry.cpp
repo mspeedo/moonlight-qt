@@ -1,11 +1,19 @@
 #include "streamhealthtelemetry.h"
 
+#include <QtGlobal>
+
+#if defined(Q_OS_LINUX)
+#include "gamemodecontrol.h"
+#include "threadpriority.h"
+#endif
+
 extern "C" {
 #include <FecFrameStats.h>
 }
 
 #include <atomic>
 #include <cstdio>
+#include <cstring>
 
 namespace StreamHealthTelemetry {
 namespace {
@@ -88,6 +96,19 @@ void formatOverlayLines(char* output, std::size_t length)
                       g_NetworkFrameDrops.load(std::memory_order_relaxed)),
                   static_cast<unsigned long long>(
                       g_PacerFrameDrops.load(std::memory_order_relaxed)));
+#if defined(Q_OS_LINUX)
+    if (ThreadPriority::isEnabledFast()) {
+        char priorityLines[160];
+        ThreadPriority::formatOverlayLines(priorityLines, sizeof(priorityLines));
+
+        const std::size_t used = std::strlen(output);
+        std::snprintf(output + used,
+                      length - used,
+                      "\nGameMode: %s\n%s",
+                      GameModeControl::stateText(),
+                      priorityLines);
+    }
+#endif
 }
 
 } // namespace StreamHealthTelemetry

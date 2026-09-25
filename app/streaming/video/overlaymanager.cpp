@@ -1,6 +1,9 @@
 #include "overlaymanager.h"
 #include "path.h"
 
+#include <chrono>
+#include <memory>
+
 #if defined(HAVE_LIBPLACEBO_VULKAN) && defined(Q_OS_LINUX)
 #include "streaming/latencybenchmarkcontrol.h"
 #include "streaming/latencyprobe.h"
@@ -21,6 +24,42 @@ constexpr int kTelemetryGraphPanelPadding = 8;
 constexpr int kTelemetryGraphSurfaceGap = 24;
 constexpr float kTelemetryGraphScaleStepMs = 5.0f;
 constexpr float kTelemetryGraphMinScaleMs = 5.0f;
+constexpr std::size_t kPipelineMetricLabelWidth = 34;
+constexpr std::size_t kPipelineMetricValueWidth = 7;
+
+void hidePipelineRunMaximum(char* output)
+{
+    if (output == nullptr) {
+        return;
+    }
+
+    constexpr std::size_t runMaximumOffset =
+            kPipelineMetricLabelWidth + 1 +
+            kPipelineMetricValueWidth + 1 +
+            kPipelineMetricValueWidth + 1;
+    constexpr char hiddenValue[] = "    N/A";
+
+    for (char* line = output; *line != '\0';) {
+        char* nextLine = SDL_strchr(line, '\n');
+        const std::size_t lineLength = nextLine != nullptr ?
+                static_cast<std::size_t>(nextLine - line) : SDL_strlen(line);
+
+        // Pipeline metric rows are the only lines with the two-space indent and
+        // fixed-width value columns. Mask the run-wide maximum while retaining
+        // AVG10s/MAX10s for continuous hitch analysis.
+        if (lineLength >= runMaximumOffset + kPipelineMetricValueWidth &&
+                line[0] == ' ' && line[1] == ' ') {
+            SDL_memcpy(line + runMaximumOffset,
+                       hiddenValue,
+                       kPipelineMetricValueWidth);
+        }
+
+        if (nextLine == nullptr) {
+            break;
+        }
+        line = nextLine + 1;
+    }
+}
 
 void blitGraphLabel(SDL_Surface* destination,
                     TTF_Font* font,
@@ -87,7 +126,8 @@ void drawTelemetryGraph(SDL_Surface* surface,
                         float scaleMaxMs,
                         double framePeriodMs,
                         bool drawFramePeriod,
-                        SDL_Color color)
+                        SDL_Color color,
+                        bool backgroundOnly)
 {
     const Uint32 background = SDL_MapRGBA(surface->format, 0, 0, 0, 0x70);
     const Uint32 grid = SDL_MapRGBA(surface->format,
@@ -115,57 +155,67 @@ void drawTelemetryGraph(SDL_Surface* surface,
                      plotY,
                      static_cast<int>(StreamPipelineTelemetry::kGraphColumns),
                      kTelemetryGraphPlotHeight};
-    SDL_FillRect(surface, &plot, background);
+    if (backgroundOnly) {
+        SDL_FillRect(surface, &plot, background);
 
-    for (float ms = kTelemetryGraphScaleStepMs;
-         ms < scaleMaxMs;
-         ms += kTelemetryGraphScaleStepMs) {
-        const int y = graphValueToY(ms, plotY, scaleMaxMs);
-        SDL_Rect line = {plotX, y,
-                         static_cast<int>(StreamPipelineTelemetry::kGraphColumns), 1};
-        SDL_FillRect(surface, &line, grid);
-    }
-
-    if (drawFramePeriod && framePeriodMs > 0.0 &&
-            framePeriodMs < scaleMaxMs) {
-        const int y = graphValueToY(static_cast<float>(framePeriodMs), plotY, scaleMaxMs);
-        SDL_Rect line = {plotX, y,
-                         static_cast<int>(StreamPipelineTelemetry::kGraphColumns), 1};
-        SDL_FillRect(surface, &line, reference);
-    }
-
-    const int bottom = plotY + kTelemetryGraphPlotHeight - 2;
-    for (std::size_t i = 0; i < StreamPipelineTelemetry::kGraphColumns; ++i) {
-        if (!series.valid[i]) {
-            continue;
+        for (float ms = kTelemetryGraphScaleStepMs;
+             ms < scaleMaxMs;
+             ms += kTelemetryGraphScaleStepMs) {
+            const int y = graphValueToY(ms, plotY, scaleMaxMs);
+            SDL_Rect line = {plotX, y,
+                             static_cast<int>(StreamPipelineTelemetry::kGraphColumns), 1};
+            SDL_FillRect(surface, &line, grid);
         }
 
-        const int y = graphValueToY(series.maximumMs[i], plotY, scaleMaxMs);
-        SDL_Rect bar = {plotX + static_cast<int>(i),
-                        y,
-                        1,
-                        bottom - y + 1};
-        SDL_FillRect(surface, &bar, trace);
+        SDL_Rect top = {plotX, plotY,
+                        static_cast<int>(StreamPipelineTelemetry::kGraphColumns), 1};
+        SDL_Rect bottomLine = {plotX, plotY + kTelemetryGraphPlotHeight - 1,
+                               static_cast<int>(StreamPipelineTelemetry::kGraphColumns), 1};
+        SDL_Rect left = {plotX, plotY, 1, kTelemetryGraphPlotHeight};
+        SDL_Rect right = {plotX + static_cast<int>(StreamPipelineTelemetry::kGraphColumns) - 1,
+                          plotY, 1, kTelemetryGraphPlotHeight};
+        SDL_FillRect(surface, &top, border);
+        SDL_FillRect(surface, &bottomLine, border);
+        SDL_FillRect(surface, &left, border);
+        SDL_FillRect(surface, &right, border);
     }
+    else {
+        if (drawFramePeriod && framePeriodMs > 0.0 &&
+                framePeriodMs < scaleMaxMs) {
+            const int y = graphValueToY(static_cast<float>(framePeriodMs), plotY, scaleMaxMs);
+            SDL_Rect line = {plotX + 1, y,
+                             static_cast<int>(StreamPipelineTelemetry::kGraphColumns) - 2, 1};
+            SDL_FillRect(surface, &line, reference);
+        }
 
-    SDL_Rect top = {plotX, plotY,
-                    static_cast<int>(StreamPipelineTelemetry::kGraphColumns), 1};
-    SDL_Rect bottomLine = {plotX, plotY + kTelemetryGraphPlotHeight - 1,
-                           static_cast<int>(StreamPipelineTelemetry::kGraphColumns), 1};
-    SDL_Rect left = {plotX, plotY, 1, kTelemetryGraphPlotHeight};
-    SDL_Rect right = {plotX + static_cast<int>(StreamPipelineTelemetry::kGraphColumns) - 1,
-                      plotY, 1, kTelemetryGraphPlotHeight};
-    SDL_FillRect(surface, &top, border);
-    SDL_FillRect(surface, &bottomLine, border);
-    SDL_FillRect(surface, &left, border);
-    SDL_FillRect(surface, &right, border);
+        const int bottom = plotY + kTelemetryGraphPlotHeight - 2;
+        for (std::size_t i = 1; i + 1 < StreamPipelineTelemetry::kGraphColumns; ++i) {
+            if (!series.valid[i]) {
+                continue;
+            }
+
+            const int y = graphValueToY(series.maximumMs[i], plotY, scaleMaxMs);
+            SDL_Rect bar = {plotX + static_cast<int>(i),
+                            y,
+                            1,
+                            bottom - y + 1};
+            SDL_FillRect(surface, &bar, trace);
+        }
+    }
 }
 
-SDL_Surface* renderTelemetryGraphs(TTF_Font* font, SDL_Color color)
+using SurfacePtr = std::unique_ptr<SDL_Surface, decltype(&SDL_FreeSurface)>;
+
+struct GraphCache {
+    SurfacePtr background {nullptr, SDL_FreeSurface};
+    std::array<float, 5> scales {};
+};
+
+SDL_Surface* renderTelemetryGraphs(TTF_Font* font, SDL_Color color,
+                                   const StreamPipelineTelemetry::GraphSnapshot& graphs,
+                                   GraphCache& cache)
 {
-    const StreamPipelineTelemetry::GraphSnapshot graphs =
-            StreamPipelineTelemetry::graphSnapshot();
-    if (!graphs.hasData || font == nullptr) {
+    if (font == nullptr) {
         return nullptr;
     }
 
@@ -192,48 +242,51 @@ SDL_Surface* renderTelemetryGraphs(TTF_Font* font, SDL_Color color)
     const int height = kTelemetryGraphPanelPadding * 2 + titleHeight +
             static_cast<int>(sizeof(rows) / sizeof(rows[0])) * rowHeight;
 
+    std::array<float, 5> scales;
+    for (std::size_t i = 0; i < scales.size(); ++i) {
+        scales[i] = graphScaleMaxMs(*rows[i].series);
+    }
+    if (!cache.background || cache.scales != scales) {
+        cache.background.reset(SDL_CreateRGBSurfaceWithFormat(
+                0, width, height, 32, SDL_PIXELFORMAT_ARGB8888));
+        if (!cache.background) {
+            return nullptr;
+        }
+        cache.scales = scales;
+        SDL_Surface* background = cache.background.get();
+        // Copy pixels exactly, including alpha, into each upload-owned surface.
+        SDL_SetSurfaceBlendMode(background, SDL_BLENDMODE_NONE);
+        SDL_FillRect(background, nullptr, 0);
+        blitGraphLabel(background, font, "10s history",
+                       kTelemetryGraphPanelPadding, kTelemetryGraphPanelPadding, color);
+        int y = kTelemetryGraphPanelPadding + titleHeight;
+        for (std::size_t i = 0; i < scales.size(); ++i) {
+            char label[96];
+            SDL_snprintf(label, sizeof(label), "%s (0-%.0f ms)",
+                         rows[i].label, static_cast<double>(scales[i]));
+            blitGraphLabel(background, font, label, kTelemetryGraphPanelPadding, y, color);
+            y += labelHeight;
+            drawTelemetryGraph(background, kTelemetryGraphPanelPadding, y,
+                               *rows[i].series, scales[i], 0, false, color, true);
+            y += kTelemetryGraphPlotHeight + kTelemetryGraphRowGap;
+        }
+    }
+
+    // Upload takes ownership asynchronously, so never overwrite a surface still
+    // being read by the GPU transfer. Only this small panel is allocated at 20 Hz.
     SDL_Surface* surface = SDL_CreateRGBSurfaceWithFormat(
             0, width, height, 32, SDL_PIXELFORMAT_ARGB8888);
     if (surface == nullptr) {
         return nullptr;
     }
-
+    SDL_BlitSurface(cache.background.get(), nullptr, surface, nullptr);
     SDL_SetSurfaceBlendMode(surface, SDL_BLENDMODE_BLEND);
-    SDL_FillRect(surface, nullptr, SDL_MapRGBA(surface->format, 0, 0, 0, 0));
-
-    blitGraphLabel(surface,
-                   font,
-                   "10s history",
-                   kTelemetryGraphPanelPadding,
-                   kTelemetryGraphPanelPadding,
-                   color);
-
-    int y = kTelemetryGraphPanelPadding + titleHeight;
-    for (const GraphRow& row : rows) {
-        const float scaleMaxMs = graphScaleMaxMs(*row.series);
-        char label[96];
-        SDL_snprintf(label,
-                     sizeof(label),
-                     "%s (0-%.0f ms)",
-                     row.label,
-                     static_cast<double>(scaleMaxMs));
-        blitGraphLabel(surface,
-                       font,
-                       label,
-                       kTelemetryGraphPanelPadding,
-                       y,
-                       color);
-        y += labelHeight;
-
-        drawTelemetryGraph(surface,
-                           kTelemetryGraphPanelPadding,
-                           y,
-                           *row.series,
-                           scaleMaxMs,
-                           graphs.framePeriodMs,
-                           row.drawFramePeriod,
-                           color);
-        y += kTelemetryGraphPlotHeight + kTelemetryGraphRowGap;
+    int y = kTelemetryGraphPanelPadding + titleHeight + labelHeight;
+    for (std::size_t i = 0; i < scales.size(); ++i) {
+        drawTelemetryGraph(surface, kTelemetryGraphPanelPadding, y,
+                           *rows[i].series, scales[i], graphs.framePeriodMs,
+                           rows[i].drawFramePeriod, color, false);
+        y += rowHeight;
     }
 
     return surface;
@@ -285,10 +338,12 @@ OverlayManager::OverlayManager() :
     memset(m_Overlays, 0, sizeof(m_Overlays));
 
 #ifdef HAVE_LATENCY_PROBE
-    // OverlayManager is per streaming Session, so this gives the Moonlight-side
-    // stream-health counters the same lifetime as the stream rather than the
-    // latency benchmark. Common C resets its FEC counters with the RTP queue.
+    // OverlayManager is per streaming Session. Stream-health counters and
+    // pipeline telemetry therefore begin fresh for every stream, independently
+    // of whether the debug OSD is visible.
     StreamHealthTelemetry::reset();
+    StreamPipelineTelemetry::start();
+    StreamPipelineTelemetry::setStateChangedCallback(telemetryStateChanged, this);
 #endif
 
     m_Overlays[OverlayType::OverlayDebug].color = {0xD0, 0xD0, 0x00, 0xFF};
@@ -314,11 +369,10 @@ OverlayManager::~OverlayManager()
 {
 #ifdef HAVE_LATENCY_PROBE
     // LatencyProbe is process-global while OverlayManager is per streaming
-    // session. Ensure a session ending with the debug OSD still visible cannot
-    // leave its SDL event watch/timer or host helper active into the next stream.
-    if (m_Overlays[OverlayType::OverlayDebug].enabled) {
-        LatencyProbe::instance().setEnabled(false);
-    }
+    // session. Force cleanup even if an active benchmark deliberately survived
+    // hiding the OSD, so no timer/event watch/helper can leak into the next stream.
+    StreamPipelineTelemetry::setStateChangedCallback(nullptr, nullptr);
+    LatencyProbe::instance().setEnabled(false, true);
 
     // Stop the async debug-OSD worker before freeing its font or shutting down
     // SDL_ttf. The renderer has already been detached by decoder teardown.
@@ -377,7 +431,7 @@ SDL_Surface* OverlayManager::getUpdatedOverlaySurface(OverlayType type)
 }
 
 #ifdef HAVE_LATENCY_PROBE
-void OverlayManager::appendDebugTelemetry(char* text, std::size_t length)
+void OverlayManager::appendDebugTelemetry(char* text, std::size_t length, std::uint64_t nowUs)
 {
     char healthLines[320];
     StreamHealthTelemetry::formatOverlayLines(healthLines, sizeof(healthLines));
@@ -390,13 +444,51 @@ void OverlayManager::appendDebugTelemetry(char* text, std::size_t length)
 
     char latencyLine[192];
     LatencyProbe::instance().formatOverlayLine(latencyLine, sizeof(latencyLine));
+
+    // Keep the input-latency block contiguous. The probe owns the detailed
+    // telemetry state because it knows whether we're live, manually frozen, or
+    // in a benchmark state, but display that state immediately above the
+    // stream-pipeline table below.
+    char telemetryStatus[64] = {};
+    char* telemetryLine = SDL_strstr(latencyLine, "\nTelemetry: ");
+    if (telemetryLine != nullptr) {
+        char* statusStart = telemetryLine + SDL_strlen("\nTelemetry: ");
+        char* nextLine = SDL_strchr(statusStart, '\n');
+        const size_t statusLength = nextLine != nullptr ?
+                static_cast<size_t>(nextLine - statusStart) : SDL_strlen(statusStart);
+        const size_t copyLength = statusLength < sizeof(telemetryStatus) - 1 ?
+                statusLength : sizeof(telemetryStatus) - 1;
+        SDL_memcpy(telemetryStatus, statusStart, copyLength);
+        telemetryStatus[copyLength] = '\0';
+
+        if (nextLine != nullptr) {
+            SDL_memmove(telemetryLine, nextLine, SDL_strlen(nextLine) + 1);
+        }
+        else {
+            *telemetryLine = '\0';
+        }
+    }
+
+    const bool showPipelineRunMaximum =
+            SDL_strcmp(telemetryStatus, "BENCHMARK") == 0 ||
+            SDL_strcmp(telemetryStatus, "FROZEN (benchmark)") == 0;
+
     SDL_strlcat(text, "\n\n", length);
     SDL_strlcat(text, latencyLine, length);
 
     char pipelineLines[1024];
-    StreamPipelineTelemetry::formatOverlayLines(pipelineLines, sizeof(pipelineLines));
+    StreamPipelineTelemetry::formatOverlayLines(pipelineLines, sizeof(pipelineLines), nowUs);
     if (pipelineLines[0] != '\0') {
+        if (!showPipelineRunMaximum) {
+            hidePipelineRunMaximum(pipelineLines);
+        }
+
         SDL_strlcat(text, "\n\n", length);
+        if (telemetryStatus[0] != '\0') {
+            SDL_strlcat(text, "Telemetry: ", length);
+            SDL_strlcat(text, telemetryStatus, length);
+            SDL_strlcat(text, "\n", length);
+        }
         SDL_strlcat(text, pipelineLines, length);
     }
 }
@@ -483,18 +575,15 @@ void OverlayManager::setDebugOverlayWorkerEnabled(bool enabled)
         return;
     }
 
+    // Same lock order as publication: disable cannot race an upload/publication.
+    std::lock_guard<std::mutex> rendererLock(m_RendererMutex);
     std::lock_guard<std::mutex> lock(m_DebugOverlayMutex);
+    m_DebugOverlayReady = false;
+    m_DebugOverlayStatePending = false;
     m_DebugOverlayEnabled = enabled;
     m_DebugOverlayPending = false;
     ++m_DebugOverlayGeneration;
     m_DebugOverlayCondition.notify_all();
-}
-
-void OverlayManager::invalidateDebugOverlayUpdate()
-{
-    std::lock_guard<std::mutex> lock(m_DebugOverlayMutex);
-    m_DebugOverlayPending = false;
-    ++m_DebugOverlayGeneration;
 }
 
 bool OverlayManager::queueDebugOverlayUpdate()
@@ -513,92 +602,183 @@ bool OverlayManager::queueDebugOverlayUpdate()
                     m_Overlays[OverlayType::OverlayDebug].text,
                     sizeof(m_DebugOverlayPendingText));
     m_DebugOverlayPending = true;
-    ++m_DebugOverlayGeneration;
     m_DebugOverlayCondition.notify_one();
     return true;
 }
 
-void OverlayManager::publishDebugOverlaySurface(SDL_Surface* newSurface,
-                                                std::uint64_t generation)
+void OverlayManager::telemetryStateChanged(void* opaque)
 {
-    if (newSurface == nullptr) {
-        return;
+    auto* manager = static_cast<OverlayManager*>(opaque);
+    std::lock_guard<std::mutex> lock(manager->m_DebugOverlayMutex);
+    if (manager->m_DebugOverlayEnabled) {
+        manager->m_DebugOverlayStatePending = true;
+        ++manager->m_DebugOverlayGeneration;
+        manager->m_DebugOverlayCondition.notify_one();
     }
+}
 
-    SDL_Surface* oldSurface = nullptr;
-    bool published = false;
+bool OverlayManager::publishDebugOverlaySurfaces(SDL_Surface* text, SDL_Surface* graph,
+                                                std::uint64_t generation,
+                                                std::uint64_t revision)
+{
+    SurfacePtr textOwner(text, SDL_FreeSurface);
+    SurfacePtr graphOwner(graph, SDL_FreeSurface);
+    std::lock_guard<std::mutex> rendererLock(m_RendererMutex);
     {
-        // Serializing renderer callbacks also guarantees that
-        // setOverlayRenderer(nullptr) cannot race renderer destruction with this
-        // worker callback.
-        std::lock_guard<std::mutex> rendererLock(m_RendererMutex);
-
-        bool valid = false;
-        {
-            std::lock_guard<std::mutex> workerLock(m_DebugOverlayMutex);
-            valid = !m_DebugOverlayStop &&
-                    m_DebugOverlayEnabled &&
-                    generation == m_DebugOverlayGeneration;
-        }
-
-        if (valid && m_Renderer != nullptr) {
-            oldSurface = (SDL_Surface*)SDL_AtomicSetPtr(
-                (void**)&m_Overlays[OverlayType::OverlayDebug].surface,
-                newSurface);
-            m_Renderer->notifyOverlayUpdated(OverlayType::OverlayDebug);
-            published = true;
+        std::lock_guard<std::mutex> workerLock(m_DebugOverlayMutex);
+        if (m_DebugOverlayStop || !m_DebugOverlayEnabled ||
+                generation != m_DebugOverlayGeneration ||
+                revision != StreamPipelineTelemetry::displayRevision() ||
+                m_Renderer == nullptr) {
+            return false;
         }
     }
 
-    if (!published) {
-        SDL_FreeSurface(newSurface);
+    bool published = true;
+    if (m_Renderer->supportsDebugGraph()) {
+        published = m_Renderer->updateDebugOverlay(textOwner.release(), graphOwner.release());
     }
-    if (oldSurface != nullptr) {
-        SDL_FreeSurface(oldSurface);
+    else {
+        // Other Linux renderers retain their single, low-rate debug surface.
+        SDL_Surface* combined = combineDebugOverlaySurfaces(textOwner.release(), graphOwner.release());
+        SDL_Surface* old = (SDL_Surface*)SDL_AtomicSetPtr(
+                (void**)&m_Overlays[OverlayDebug].surface, combined);
+        m_Renderer->notifyOverlayUpdated(OverlayDebug);
+        SDL_FreeSurface(old);
     }
+    {
+        std::lock_guard<std::mutex> workerLock(m_DebugOverlayMutex);
+        if (generation == m_DebugOverlayGeneration) {
+            m_DebugOverlayReady = published;
+        }
+    }
+    return published;
 }
 
 void OverlayManager::debugOverlayThreadProc()
 {
+    using Clock = std::chrono::steady_clock;
+    constexpr auto graphInterval = std::chrono::milliseconds(50);
+    auto nextGraph = Clock::time_point::min();
+    bool graphLive = false;
+    std::uint64_t lastRevision = ~std::uint64_t(0);
+    std::uint64_t cacheGeneration = ~std::uint64_t(0);
+    StreamPipelineTelemetry::GraphSnapshot graphs;
+    GraphCache cache;
+    char frozenText[sizeof(m_DebugOverlayPendingText)] = {};
+    std::uint64_t frozenTextRevision = ~std::uint64_t(0);
+
     for (;;) {
         char text[sizeof(m_DebugOverlayPendingText)];
-        std::uint64_t generation = 0;
-
+        std::uint64_t generation;
+        bool textUpdate;
+        bool split;
+        bool ready;
         {
             std::unique_lock<std::mutex> lock(m_DebugOverlayMutex);
-            m_DebugOverlayCondition.wait(lock, [this]() {
-                return m_DebugOverlayStop || m_DebugOverlayPending;
-            });
-
+            const auto waitGeneration = m_DebugOverlayGeneration;
+            const auto workPending = [this, waitGeneration]() {
+                return m_DebugOverlayStop || m_DebugOverlayGeneration != waitGeneration ||
+                        (m_DebugOverlayEnabled && m_DebugOverlayAttached &&
+                         (m_DebugOverlayPending || m_DebugOverlayStatePending));
+            };
+            if (m_DebugOverlayEnabled && m_DebugOverlayAttached &&
+                    m_DebugOverlayReady && m_DebugOverlaySplit && graphLive) {
+                m_DebugOverlayCondition.wait_until(lock, nextGraph, workPending);
+            }
+            else {
+                m_DebugOverlayCondition.wait(lock, workPending);
+            }
             if (m_DebugOverlayStop) {
                 return;
             }
-
-            SDL_utf8strlcpy(text,
-                            m_DebugOverlayPendingText,
-                            sizeof(text));
+            if (!m_DebugOverlayEnabled || !m_DebugOverlayAttached) {
+                continue;
+            }
+            if (!m_DebugOverlayPending && !m_DebugOverlayStatePending && !m_DebugOverlayReady) {
+                // Enable invalidates the old surface before benchmark visibility
+                // is updated. Wait for its explicit first-text request.
+                continue;
+            }
+            textUpdate = m_DebugOverlayPending || m_DebugOverlayStatePending || !m_DebugOverlayReady;
+            ready = m_DebugOverlayReady;
+            split = m_DebugOverlaySplit;
             generation = m_DebugOverlayGeneration;
+            SDL_utf8strlcpy(text, m_DebugOverlayPendingText, sizeof(text));
             m_DebugOverlayPending = false;
+            m_DebugOverlayStatePending = false;
         }
 
-        // Everything below this point used to execute synchronously on the
-        // decoder thread before avcodec_send_packet(). Keep telemetry snapshot,
-        // text layout, rasterization, graph generation, and renderer upload off
-        // that measured path.
-        appendDebugTelemetry(text, sizeof(text));
-
-        SDL_Surface* textSurface = RenderTextOutlinedWrapped(
-            m_DebugOverlayFont,
-            text,
-            m_Overlays[OverlayType::OverlayDebug].color,
-            {0, 0, 0, 255},
-            4,
-            0);
-        SDL_Surface* graphSurface = renderTelemetryGraphs(
-            m_DebugOverlayFont,
-            m_Overlays[OverlayType::OverlayDebug].color);
-        SDL_Surface* newSurface = combineDebugOverlaySurfaces(textSurface, graphSurface);
-        publishDebugOverlaySurface(newSurface, generation);
+        const std::uint64_t revision = StreamPipelineTelemetry::displayRevision();
+        if (revision & 1) {
+            // The control-plane callback will wake us when the transition ends.
+            graphLive = false;
+            continue;
+        }
+        const bool live = StreamPipelineTelemetry::isActiveFast();
+        const bool stateChanged = revision != lastRevision;
+        const bool reopened = generation != cacheGeneration;
+        if (reopened) {
+            cache.background.reset();
+        }
+        if (!live && !stateChanged && !reopened && ready) {
+            // Frozen text and graph stay byte-for-byte unchanged. The existing
+            // one-second stats notification cannot start a graph timer or upload.
+            graphLive = false;
+            continue;
+        }
+        const bool graphUpdate = !ready || !split || stateChanged || reopened ||
+                (live && Clock::now() >= nextGraph);
+        if (!textUpdate && !graphUpdate) {
+            continue;
+        }
+        const std::uint64_t nowUs = StreamPipelineTelemetry::snapshotTimeUs();
+        if (graphUpdate) {
+            if (live || stateChanged) {
+                graphs = StreamPipelineTelemetry::graphSnapshot(nowUs);
+            }
+        }
+        SurfacePtr textSurface(nullptr, SDL_FreeSurface);
+        if (textUpdate) {
+            if (!live && frozenTextRevision == revision) {
+                SDL_utf8strlcpy(text, frozenText, sizeof(text));
+            }
+            else {
+                appendDebugTelemetry(text, sizeof(text), nowUs);
+                if (!live) {
+                    SDL_utf8strlcpy(frozenText, text, sizeof(frozenText));
+                    frozenTextRevision = revision;
+                }
+            }
+            textSurface.reset(RenderTextOutlinedWrapped(m_DebugOverlayFont, text,
+                    m_Overlays[OverlayDebug].color, {0, 0, 0, 255}, 4, 0));
+            if (!textSurface) {
+                graphLive = false;
+                continue;
+            }
+        }
+        SurfacePtr graphSurface(nullptr, SDL_FreeSurface);
+        if (graphUpdate) {
+            graphSurface.reset(renderTelemetryGraphs(m_DebugOverlayFont,
+                    m_Overlays[OverlayDebug].color, graphs, cache));
+            if (!graphSurface) {
+                graphLive = false;
+                continue;
+            }
+        }
+        // A reset/freeze during snapshot or rasterization invalidates the whole
+        // pair. Publication rechecks both control revision and renderer generation.
+        const bool published = publishDebugOverlaySurfaces(textSurface.release(),
+                graphSurface.release(), generation, revision);
+        if (published) {
+            lastRevision = revision;
+            cacheGeneration = generation;
+        }
+        graphLive = published && live;
+        if (graphUpdate) {
+            // Completion-relative deadline: never queue or catch up missed ticks.
+            nextGraph = Clock::now() + graphInterval;
+        }
     }
 }
 #endif
@@ -613,11 +793,8 @@ void OverlayManager::setOverlayTextUpdated(OverlayType type)
             return;
         }
 
-        // If the worker is unavailable, invalidate any pending result before
-        // falling back to a synchronous update.
-        invalidateDebugOverlayUpdate();
-        appendDebugTelemetry(m_Overlays[type].text,
-                             sizeof(m_Overlays[0].text));
+        // Worker failure must not move telemetry/rasterization onto the decoder.
+        return;
     }
 #endif
 
@@ -642,7 +819,15 @@ void OverlayManager::setOverlayState(OverlayType type, bool enabled)
             Session* session = Session::get();
             LatencyBenchmarkControl::configure(session != nullptr ? session->getComputer() : nullptr);
         }
-        LatencyProbe::instance().setEnabled(enabled);
+        const bool benchmarkWasActive = LatencyProbe::instance().setEnabled(enabled);
+
+        if (!enabled &&
+                (benchmarkWasActive || !StreamPipelineTelemetry::isActiveFast())) {
+            // Leave continuous stream telemetry untouched when the OSD was only
+            // viewed. Restart only after an active benchmark, or after B froze
+            // a completed benchmark run.
+            StreamPipelineTelemetry::start();
+        }
     }
 #endif
 
@@ -651,6 +836,17 @@ void OverlayManager::setOverlayState(OverlayType type, bool enabled)
             // Set the text to empty string on disable
             m_Overlays[type].text[0] = 0;
         }
+
+#ifdef HAVE_LATENCY_PROBE
+        // On debug-OSD enable, let the async worker build and publish the first
+        // complete text+graph surface. Rendering synchronously here can expose a
+        // graph-only surface because graph history exists before telemetry text
+        // has been appended. Queueing it atomically makes both appear together.
+        if (type == OverlayType::OverlayDebug && enabled) {
+            queueDebugOverlayUpdate();
+            return;
+        }
+#endif
 
         notifyOverlayUpdated(type);
     }
@@ -668,6 +864,15 @@ void OverlayManager::setOverlayRenderer(IOverlayRenderer* renderer)
     // change with worker callbacks to make that lifetime guarantee explicit.
     std::lock_guard<std::mutex> lock(m_RendererMutex);
     m_Renderer = renderer;
+#ifdef HAVE_LATENCY_PROBE
+    std::lock_guard<std::mutex> workerLock(m_DebugOverlayMutex);
+    m_DebugOverlayAttached = renderer != nullptr;
+    m_DebugOverlaySplit = renderer != nullptr && renderer->supportsDebugGraph();
+    m_DebugOverlayReady = false;
+    m_DebugOverlayStatePending = m_DebugOverlayEnabled;
+    ++m_DebugOverlayGeneration;
+    m_DebugOverlayCondition.notify_one();
+#endif
 }
 
 void OverlayManager::publishOverlaySurface(OverlayType type, SDL_Surface* newSurface)
@@ -742,14 +947,6 @@ void OverlayManager::notifyOverlayUpdated(OverlayType type)
                                                {0, 0, 0, 255},
                                                4,
                                                wrapWidth);
-#ifdef HAVE_LATENCY_PROBE
-        if (type == OverlayType::OverlayDebug) {
-            SDL_Surface* graphSurface = renderTelemetryGraphs(
-                    m_Overlays[type].font,
-                    m_Overlays[type].color);
-            newSurface = combineDebugOverlaySurfaces(newSurface, graphSurface);
-        }
-#endif
     }
 
     publishOverlaySurface(type, newSurface);

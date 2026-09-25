@@ -501,7 +501,8 @@ bool FFmpegVideoDecoder::completeInitialization(const AVCodec* decoder, enum AVP
     if (testMode != TestMode::TestFrameOnly) {
         m_Pacer = new Pacer(m_FrontendRenderer, &m_ActiveWndVideoStats);
         if (!m_Pacer->initialize(params->window, params->frameRate,
-                                 params->enableFramePacing || (params->enableVsync && (m_FrontendRenderer->getRendererAttributes() & RENDERER_ATTRIBUTE_FORCE_PACING)))) {
+                                 params->enableFramePacing || (params->enableVsync && (m_FrontendRenderer->getRendererAttributes() & RENDERER_ATTRIBUTE_FORCE_PACING)),
+                                 params->enableVsync)) {
             return false;
         }
     }
@@ -974,7 +975,7 @@ void FFmpegVideoDecoder::stringifyVideoStats(VIDEO_STATS& stats, char* output, i
                        "Average network latency: %s\n"
                        "Average decoding time: %.2f ms\n"
                        "Average frame queue delay: %.2f ms\n"
-                       "Average rendering time (including monitor V-sync latency): %.2f ms\n",
+                       "Average rendering time (including V-sync latency): %.2f ms\n",
                        (float)stats.networkDroppedFrames / stats.totalFrames * 100,
                        (float)stats.pacerDroppedFrames / stats.decodedFrames * 100,
                        rttString,
@@ -1864,6 +1865,15 @@ int FFmpegVideoDecoder::decoderThreadProcThunk(void *context)
 
 void FFmpegVideoDecoder::decoderThreadProc()
 {
+#if defined(Q_OS_LINUX) && defined(HAVE_LIBPLACEBO_VULKAN)
+    // Native Vulkan hwaccels use FFmpeg's input-driven send/receive contract.
+    // Select by the decode device, not the possibly separate Vulkan frontend.
+    const bool waitForInputOnEagain = m_HwDecodeCfg != nullptr &&
+            m_HwDecodeCfg->device_type == AV_HWDEVICE_TYPE_VULKAN;
+#else
+    const bool waitForInputOnEagain = false;
+#endif
+
     while (!SDL_AtomicGet(&m_DecoderThreadShouldQuit)) {
         if (m_FramesIn == m_FramesOut) {
             VIDEO_FRAME_HANDLE handle;
@@ -2059,11 +2069,21 @@ void FFmpegVideoDecoder::decoderThreadProc()
                     VIDEO_FRAME_HANDLE handle;
                     PDECODE_UNIT du;
 
-                    // No output data, so let's try to submit more input data,
-                    // while we're waiting for this to frame to come back.
-                    if (LiPollNextVideoFrame(&handle, &du)) {
+                    // Vulkan EAGAIN requires more encoded input, not a timed
+                    // GPU-completion retry. The queue wait returns immediately
+                    // for queued input and reset() interrupts it with
+                    // LiWakeWaitForVideoFrame(). Keep polling for other decoders.
+                    const bool haveInput = waitForInputOnEagain ?
+                            LiWaitForNextVideoFrame(&handle, &du) :
+                            LiPollNextVideoFrame(&handle, &du);
+                    if (haveInput) {
                         // FIXME: Handle EAGAIN on avcodec_send_packet() properly?
                         LiCompleteVideoFrame(handle, submitDecodeUnit(du));
+                    }
+                    else if (waitForInputOnEagain) {
+                        // Leave through the existing AVFrame cleanup below;
+                        // the outer loop checks whether shutdown was requested.
+                        break;
                     }
                     else {
                         // Poll frequently without busy-spinning while the hardware decoder is still working.
