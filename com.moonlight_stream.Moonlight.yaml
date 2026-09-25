@@ -185,6 +185,6 @@ modules:
         commit: 920c097ffa742e2968290f15d4dde6693aec02e5
         dest: qmdnsengine/qmdnsengine
       - type: git
-        url: https://github.com/gabomdq/SDL_GameControllerDB.git
-        commit: 8d9fefd7b810f2541f78cc7a8ccbd185bc84c7a5
+        url: https://github.com/mdqinc/SDL_GameControllerDB.git
+        commit: c6d6e7ecca57ff106ef63350da3cc03728d88a5f
         dest: app/SDL_GameControllerDB

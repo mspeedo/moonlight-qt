@@ -47,11 +47,10 @@ jobs:
           sudo apt-get install -y flatpak flatpak-builder
           flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
 
-      - name: Pin Moonlight and Common C source revisions
+      - name: Pin selected Moonlight source revision
         shell: bash
         env:
           SOURCE_SHA: ${{ steps.source.outputs.sha }}
-          COMMON_C_SHA: e834dd74b35963167efb3b31be87c7fe85cf0701
         run: |
           python3 - <<'PY'
           import os
@@ -91,15 +90,8 @@ jobs:
               "https://github.com/mspeedo/moonlight-qt.git",
               os.environ["SOURCE_SHA"],
           )
-          lines = pin_git_source(
-              lines,
-              "https://github.com/mspeedo/moonlight-common-c.git",
-              os.environ["COMMON_C_SHA"],
-          )
-
           manifest.write_text("".join(lines))
           print(f"Pinned Moonlight Qt to {os.environ['SOURCE_SHA']}")
-          print(f"Pinned Moonlight Common C to {os.environ['COMMON_C_SHA']}")
           PY
 
       - name: Build Flatpak
