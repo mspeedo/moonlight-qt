@@ -42,7 +42,7 @@ modules:
     sources:
       - type: git
         url: https://github.com/haasn/libplacebo.git
-        commit: 3330a515d62139259c26239014f286e233bd3a5c
+        commit: e2972fdd09adacd383656738d7d280f0cd84a761
       - type: patch
         path: libplacebo-disable-internally-synchronized-queues.patch
 
@@ -137,15 +137,16 @@ modules:
         # - --enable-hwaccel=hevc_nvdec
         # - --enable-hwaccel=av1_nvdec
         - --enable-libdrm
+        - --enable-vulkan
         - --enable-hwaccel=h264_vulkan
         - --enable-hwaccel=hevc_vulkan
         - --enable-hwaccel=av1_vulkan
         - --enable-libdav1d
     sources:
       - type: git
-        url: https://github.com/cgutman/FFmpeg.git
-        # branch: moonlight_9.0_r1
-        commit: d17de7e33f1332cc2fb3f5afab9ed4f29699c5a0
+        url: https://github.com/FFmpeg/FFmpeg.git
+        tag: n9.0.2
+        commit: 946fcce07b6dcd0331c8cc609192aeff5e1924f8
 
   - name: gamescope-wsi
     buildsystem: simple
