@@ -3,6 +3,9 @@
 #include "utils.h"
 #include "streaming/session.h"
 
+#include <chrono>
+#include <thread>
+
 #include <h264_stream.h>
 
 extern "C" {
@@ -884,13 +887,22 @@ void FFmpegVideoDecoder::stringifyVideoStats(VIDEO_STATS& stats, char* output, i
 #ifdef DISPLAY_BITRATE
             double avgVideoMbps = m_BwTracker.GetAverageMbps();
             double peakVideoMbps = m_BwTracker.GetPeakMbps();
+
+            // m_BwTracker measures reassembled video payload and excludes FEC packets.
+            // Estimate FEC bandwidth from the RTP packet ratio for the lifetime of the stream.
+            const RTP_VIDEO_STATS* rtpVideoStats = LiGetRTPVideoStats();
+            double fecToVideoRatio = 0.0;
+            if (rtpVideoStats != nullptr && rtpVideoStats->packetCountVideo != 0) {
+                fecToVideoRatio = (double)rtpVideoStats->packetCountFec / rtpVideoStats->packetCountVideo;
+            }
+            double fecMbps = avgVideoMbps * fecToVideoRatio;
 #endif
 
             ret = snprintf(&output[offset],
                            length - offset,
                            "Video stream: %dx%d %.2f FPS (Codec: %s)\n"
 #ifdef DISPLAY_BITRATE
-                           "Bitrate: %.1f Mbps, Peak (%us): %.1f\n"
+                           "Bitrate: %.1f Mbps (%.1f/%.1f video/FEC) Peak (%us): %.1f\n"
 #endif
                            ,
                            m_VideoDecoderCtx->width,
@@ -899,9 +911,11 @@ void FFmpegVideoDecoder::stringifyVideoStats(VIDEO_STATS& stats, char* output, i
                            codecString
 #ifdef DISPLAY_BITRATE
                            ,
+                           avgVideoMbps + fecMbps,
                            avgVideoMbps,
+                           fecMbps,
                            m_BwTracker.GetWindowSeconds(),
-                           peakVideoMbps
+                           peakVideoMbps * (1.0 + fecToVideoRatio)
 #endif
                            );
             if (ret < 0 || ret >= length - offset) {
@@ -2052,8 +2066,8 @@ void FFmpegVideoDecoder::decoderThreadProc()
                         LiCompleteVideoFrame(handle, submitDecodeUnit(du));
                     }
                     else {
-                        // No output data or input data. Let's wait a little bit.
-                        SDL_Delay(2);
+                        // Poll frequently without busy-spinning while the hardware decoder is still working.
+                        std::this_thread::sleep_for(std::chrono::microseconds(100));
                     }
                 }
                 else {
