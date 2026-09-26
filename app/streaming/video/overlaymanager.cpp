@@ -435,6 +435,9 @@ OverlayManager::OverlayManager() :
     m_Overlays[OverlayType::OverlayStatusUpdate].color = {0xCC, 0x00, 0x00, 0xFF};
     m_Overlays[OverlayType::OverlayStatusUpdate].fontSize = 36;
 
+    m_Overlays[OverlayType::OverlayImageAdjustments].color = {0xD0, 0xD0, 0x00, 0xFF};
+    m_Overlays[OverlayType::OverlayImageAdjustments].fontSize = 20;
+
     // While TTF will usually not be initialized here, it is valid for that not to
     // be the case, since Session destruction is deferred and could overlap with
     // the lifetime of a new Session object.
@@ -1060,6 +1063,11 @@ void OverlayManager::notifyOverlayUpdated(OverlayType type)
             wrapWidth = 0;
         }
 #endif
+        if (type == OverlayType::OverlayImageAdjustments) {
+            // Keep this compact multiline OSD at its natural width instead of
+            // allocating a 2048-pixel-wide wrapped surface.
+            wrapWidth = 0;
+        }
         newSurface = RenderTextOutlinedWrapped(m_Overlays[type].font,
                                                m_Overlays[type].text,
                                                m_Overlays[type].color,

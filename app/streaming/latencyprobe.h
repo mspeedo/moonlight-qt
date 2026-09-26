@@ -4,6 +4,7 @@
 #include "displaypresentlatency.h"
 #include "latencybenchmarkcontrol.h"
 #include "streampipelinetelemetry.h"
+#include "video/imageadjustments.h"
 
 #include <atomic>
 #include <cstddef>
@@ -421,8 +422,13 @@ private:
                                         event->cbutton.which);
             }
             else if (event->cbutton.button == SDL_CONTROLLER_BUTTON_Y) {
-                probe->onPhysicalYEvent(event->type == SDL_CONTROLLERBUTTONDOWN,
-                                        event->cbutton.which);
+                // The dedicated image-adjustments OSD owns Y while visible.
+                // Suppress the telemetry Y watcher here, before the ordinary
+                // gamepad handler consumes the same SDL event.
+                if (!ImageAdjustments::isOsdOpen()) {
+                    probe->onPhysicalYEvent(event->type == SDL_CONTROLLERBUTTONDOWN,
+                                            event->cbutton.which);
+                }
             }
             else if (event->type == SDL_CONTROLLERBUTTONDOWN &&
                      event->cbutton.button == SDL_CONTROLLER_BUTTON_B) {

@@ -15,6 +15,7 @@ public:
     getDefaultBitrate(int width, int height, int fps, bool yuv444);
 
     Q_INVOKABLE void save();
+    void saveImageAdjustments();
 
     void reload();
 
@@ -185,6 +186,9 @@ public:
     bool framePacing;
     bool enableTransportBuffer;
     int transportBufferMs;
+    float imageSharpening;
+    float imageSaturation;
+    bool imageFiltersEnabled;
     bool connectionWarnings;
     bool configurationWarnings;
     bool richPresence;

@@ -42,6 +42,9 @@
 #define SER_FRAMEPACING "framepacing"
 #define SER_ENABLE_TRANSPORT_BUFFER "enabletransportbuffer"
 #define SER_TRANSPORT_BUFFER_MS "transportbufferms"
+#define SER_IMAGE_SHARPENING "imageSharpening"
+#define SER_IMAGE_SATURATION "imageSaturation"
+#define SER_IMAGE_FILTERS_ENABLED "imageFiltersEnabled"
 #define SER_CONNWARNINGS "connwarnings"
 #define SER_CONFWARNINGS "confwarnings"
 #define SER_UIDISPLAYMODE "uidisplaymode"
@@ -152,6 +155,9 @@ void StreamingPreferences::reload()
     framePacing = settings.value(SER_FRAMEPACING, false).toBool();
     enableTransportBuffer = settings.value(SER_ENABLE_TRANSPORT_BUFFER, false).toBool();
     transportBufferMs = qBound(0, settings.value(SER_TRANSPORT_BUFFER_MS, 5).toInt(), 30);
+    imageSharpening = qBound(0.0f, settings.value(SER_IMAGE_SHARPENING, 0.0).toFloat(), 1.0f);
+    imageSaturation = qBound(1.0f, settings.value(SER_IMAGE_SATURATION, 1.0).toFloat(), 2.0f);
+    imageFiltersEnabled = settings.value(SER_IMAGE_FILTERS_ENABLED, true).toBool();
     connectionWarnings = settings.value(SER_CONNWARNINGS, true).toBool();
     configurationWarnings = settings.value(SER_CONFWARNINGS, true).toBool();
     richPresence = settings.value(SER_RICHPRESENCE, true).toBool();
@@ -363,6 +369,9 @@ void StreamingPreferences::save()
     settings.setValue(SER_FRAMEPACING, framePacing);
     settings.setValue(SER_ENABLE_TRANSPORT_BUFFER, enableTransportBuffer);
     settings.setValue(SER_TRANSPORT_BUFFER_MS, qBound(0, transportBufferMs, 30));
+    settings.setValue(SER_IMAGE_SHARPENING, qBound(0.0f, imageSharpening, 1.0f));
+    settings.setValue(SER_IMAGE_SATURATION, qBound(1.0f, imageSaturation, 2.0f));
+    settings.setValue(SER_IMAGE_FILTERS_ENABLED, imageFiltersEnabled);
     settings.setValue(SER_CONNWARNINGS, connectionWarnings);
     settings.setValue(SER_CONFWARNINGS, configurationWarnings);
     settings.setValue(SER_RICHPRESENCE, richPresence);
@@ -395,6 +404,15 @@ void StreamingPreferences::save()
     GameModeControl::setEnabled(enableGameMode);
     ThreadPriority::setEnabled(enableHighPriorityStreamingThreads);
 #endif
+}
+
+void StreamingPreferences::saveImageAdjustments()
+{
+    QSettings settings;
+
+    settings.setValue(SER_IMAGE_SHARPENING, qBound(0.0f, imageSharpening, 1.0f));
+    settings.setValue(SER_IMAGE_SATURATION, qBound(1.0f, imageSaturation, 2.0f));
+    settings.setValue(SER_IMAGE_FILTERS_ENABLED, imageFiltersEnabled);
 }
 
 int StreamingPreferences::getDefaultBitrate(int width, int height, int fps, bool yuv444)

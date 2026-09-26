@@ -2,6 +2,7 @@
 
 #include "streaming/session.h"
 #include "streaming/streamutils.h"
+#include "streaming/video/imageadjustments.h"
 
 // Implementation in plvk_c.c
 #define PL_LIBAV_IMPLEMENTATION 0
@@ -91,6 +92,81 @@ static const char *k_OptionalDeviceExtensions[] = {
 };
 #endif
 
+static const char kRcasSharpenShader[] =
+    "//!PARAM sharpening\n"
+    "//!DESC Real-time FidelityFX RCAS sharpening strength\n"
+    "//!TYPE DYNAMIC float\n"
+    "//!MINIMUM 0.0\n"
+    "//!MAXIMUM 1.0\n"
+    "0.0\n"
+    "\n"
+    // RCAS is a presentation-resolution sharpener designed for normalized
+    // perceptual/display-referred SDR input. OUTPUT runs after libplacebo
+    // scaling, color management, and target encoding, but before overlays.
+    "//!HOOK OUTPUT\n"
+    "//!BIND HOOKED\n"
+    "//!WHEN sharpening 0 >\n"
+    "//!DESC Moonlight FidelityFX RCAS SDR sharpening\n"
+    "float rcasSafeRcp(float x)\n"
+    "{\n"
+    "    return abs(x) > 1e-6 ? 1.0 / x : 0.0;\n"
+    "}\n"
+    "\n"
+    "vec4 hook()\n"
+    "{\n"
+    "    vec3 b = HOOKED_texOff(vec2( 0.0, -1.0)).rgb;\n"
+    "    vec3 d = HOOKED_texOff(vec2(-1.0,  0.0)).rgb;\n"
+    "    vec4 e4 = HOOKED_texOff(vec2( 0.0,  0.0));\n"
+    "    vec3 e = e4.rgb;\n"
+    "    vec3 f = HOOKED_texOff(vec2( 1.0,  0.0)).rgb;\n"
+    "    vec3 h = HOOKED_texOff(vec2( 0.0,  1.0)).rgb;\n"
+    "\n"
+    "    // Current FidelityFX RCAS luma/noise detector. RCAS operates on the\n"
+    "    // five-tap cross and reduces sharpening on likely noise/grain.\n"
+    "    float bL = b.b * 0.5 + b.r * 0.5 + b.g;\n"
+    "    float dL = d.b * 0.5 + d.r * 0.5 + d.g;\n"
+    "    float eL = e.b * 0.5 + e.r * 0.5 + e.g;\n"
+    "    float fL = f.b * 0.5 + f.r * 0.5 + f.g;\n"
+    "    float hL = h.b * 0.5 + h.r * 0.5 + h.g;\n"
+    "    float maxL = max(max(max(bL, dL), max(eL, fL)), hL);\n"
+    "    float minL = min(min(min(bL, dL), min(eL, fL)), hL);\n"
+    "    float nz = 0.25 * (bL + dL + fL + hL) - eL;\n"
+    "    nz = clamp(abs(nz) * rcasSafeRcp(maxL - minL), 0.0, 1.0);\n"
+    "    nz = -0.5 * nz + 1.0;\n"
+    "\n"
+    "    // Ring min/max and the modern RCAS clipping limiters. The lower\n"
+    "    // limiter multiplier is the current FidelityFX fix that prevents\n"
+    "    // possible negative RCAS output in difficult dark-edge cases.\n"
+    "    vec3 mn4 = min(min(b, d), min(f, h));\n"
+    "    vec3 mx4 = max(max(b, d), max(f, h));\n"
+    "    float minRingL = min(min(bL, dL), min(fL, hL));\n"
+    "    float lowerLimiterMultiplier = clamp(eL / max(minRingL, 1e-6), 0.0, 1.0);\n"
+    "\n"
+    "    vec3 hitMin = mn4 * vec3(\n"
+    "        rcasSafeRcp(4.0 * mx4.r),\n"
+    "        rcasSafeRcp(4.0 * mx4.g),\n"
+    "        rcasSafeRcp(4.0 * mx4.b)) * lowerLimiterMultiplier;\n"
+    "    vec3 hitMax = (vec3(1.0) - mx4) * vec3(\n"
+    "        rcasSafeRcp(4.0 * mn4.r - 4.0),\n"
+    "        rcasSafeRcp(4.0 * mn4.g - 4.0),\n"
+    "        rcasSafeRcp(4.0 * mn4.b - 4.0));\n"
+    "\n"
+    "    vec3 lobeRGB = max(-hitMin, hitMax);\n"
+    "    float lobe = max(-0.1875, min(max(max(lobeRGB.r, lobeRGB.g), lobeRGB.b), 0.0));\n"
+    "\n"
+    "    // FsrRcasCon() converts its public 'stops' control to a 0..1 linear\n"
+    "    // multiplier with exp2(-stops). Moonlight exposes that resulting\n"
+    "    // multiplier directly: 0.0 = true bypass, 1.0 = maximum RCAS.\n"
+    "    lobe *= clamp(sharpening, 0.0, 1.0);\n"
+    "\n"
+    "    // Match the current FSR3 RCAS path with denoise enabled.\n"
+    "    lobe *= nz;\n"
+    "\n"
+    "    float rcpL = rcasSafeRcp(4.0 * lobe + 1.0);\n"
+    "    vec3 sharpened = (lobe * (b + d + h + f) + e) * rcpL;\n"
+    "    return vec4(sharpened, e4.a);\n"
+    "}\n";
+
 static void pl_log_cb(void*, enum pl_log_level level, const char *msg)
 {
     switch (level) {
@@ -169,6 +245,11 @@ PlVkRenderer::~PlVkRenderer()
     SDL_assert(!m_HasPendingSwapchainFrame);
 
     if (m_Vulkan != nullptr) {
+        if (m_SharpenHook != nullptr) {
+            pl_mpv_user_shader_destroy(&m_SharpenHook);
+            m_SharpenStrengthParam = nullptr;
+        }
+
 #ifdef PLVK_USE_EARLY_RENDER_TO_WAIT
         pl_tex_destroy(m_Vulkan->gpu, &m_EmptyOverlay.tex);
 #endif
@@ -545,6 +626,35 @@ bool PlVkRenderer::initialize(PDECODER_PARAMETERS params)
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                      "pl_renderer_create() failed");
         return false;
+    }
+
+    // Parse the sharpening hook once. Its strength is a DYNAMIC shader
+    // parameter, so normal real-time value changes only update a runtime
+    // variable and do not require shader recompilation.
+    m_SharpenHook = pl_mpv_user_shader_parse(m_Vulkan->gpu,
+                                             kRcasSharpenShader,
+                                             sizeof(kRcasSharpenShader) - 1);
+    if (m_SharpenHook != nullptr) {
+        for (int i = 0; i < m_SharpenHook->num_parameters; ++i) {
+            const pl_hook_par& parameter = m_SharpenHook->parameters[i];
+            if (parameter.name != nullptr &&
+                    SDL_strcmp(parameter.name, "sharpening") == 0 &&
+                    parameter.type == PL_VAR_FLOAT &&
+                    parameter.mode == PL_HOOK_PAR_DYNAMIC) {
+                m_SharpenStrengthParam = parameter.data;
+                break;
+            }
+        }
+
+        if (m_SharpenStrengthParam == nullptr) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "libplacebo sharpening hook has no dynamic strength parameter");
+            pl_mpv_user_shader_destroy(&m_SharpenHook);
+        }
+    }
+    else {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "Unable to initialize libplacebo sharpening hook");
     }
 
 #ifdef PLVK_USE_EARLY_RENDER_TO_WAIT
@@ -1064,6 +1174,13 @@ void PlVkRenderer::renderFrame(AVFrame *frame)
                     overlayParts[i].dst.x0 = 0;
                     overlayParts[i].dst.y0 = 0;
                 }
+                else if (i == Overlay::OverlayImageAdjustments) {
+                    // Top right, so it remains visually independent from the
+                    // telemetry/debug OSD if both are visible.
+                    overlayParts[i].dst.x0 = SDL_max(
+                            0, targetFrame.crop.x1 - overlayParts[i].src.x1);
+                    overlayParts[i].dst.y0 = 0;
+                }
 #if defined(HAVE_LIBPLACEBO_VULKAN) && defined(Q_OS_LINUX)
                 else if (i == kGraphOverlay) {
                     // Text is promoted first under this same lock. Its actual width
@@ -1113,10 +1230,56 @@ void PlVkRenderer::renderFrame(AVFrame *frame)
     beginRenderTiming();
 #endif
 
-    // Render the video image and overlays into the swapchain buffer
+    // Render the video image and overlays into the swapchain buffer.
+    // The exact stock fast params are retained for master bypass and neutral
+    // settings. Non-neutral state uses stack-only parameter copies; there are
+    // no per-frame allocations, settings reads, or synchronization locks.
     targetFrame.num_overlays = overlayCount;
     targetFrame.overlays = overlayCount != 0 ? overlays : nullptr;
-    if (!pl_render_image(m_Renderer, &mappedFrame, &targetFrame, &pl_render_fast_params)) {
+
+    const ImageAdjustments::State imageState = ImageAdjustments::snapshot();
+    const bool useSaturation = imageState.enabled && imageState.saturation != 1.0f;
+    const bool hdrInput = pl_color_space_is_hdr(&mappedFrame.color);
+    ImageAdjustments::setHdrStreamActive(hdrInput);
+    const bool useSharpening = imageState.enabled &&
+            !hdrInput &&
+            imageState.sharpening > 0.0f &&
+            m_SharpenHook != nullptr &&
+            m_SharpenStrengthParam != nullptr;
+
+    const pl_render_params* activeRenderParams = &pl_render_fast_params;
+    pl_render_params adjustedRenderParams;
+    pl_color_adjustment colorAdjustment;
+    const pl_hook* sharpenHooks[1];
+
+    if (useSaturation || useSharpening) {
+        adjustedRenderParams = pl_render_fast_params;
+
+        if (useSaturation) {
+            colorAdjustment = pl_color_adjustment_neutral;
+            colorAdjustment.saturation = imageState.saturation;
+            adjustedRenderParams.color_adjustment = &colorAdjustment;
+
+            // Native color adjustment is normally eligible for constant
+            // folding. While the adjustment OSD is open, keep those constants
+            // dynamic so rapid saturation changes do not trigger shader
+            // recompilation for each 0.1 step. Closing the OSD restores the
+            // optimized constant path for the dialed-in value.
+            adjustedRenderParams.dynamic_constants =
+                    ImageAdjustments::isOsdOpen();
+        }
+
+        if (useSharpening) {
+            m_SharpenStrengthParam->f = imageState.sharpening;
+            sharpenHooks[0] = m_SharpenHook;
+            adjustedRenderParams.hooks = sharpenHooks;
+            adjustedRenderParams.num_hooks = 1;
+        }
+
+        activeRenderParams = &adjustedRenderParams;
+    }
+
+    if (!pl_render_image(m_Renderer, &mappedFrame, &targetFrame, activeRenderParams)) {
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                      "pl_render_image() failed");
         // NB: We must fallthrough to call pl_swapchain_submit_frame()

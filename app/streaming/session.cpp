@@ -1,6 +1,7 @@
 #include "session.h"
 #include "settings/streamingpreferences.h"
 #include "streaming/streamutils.h"
+#include "streaming/video/imageadjustments.h"
 #include "backend/richpresencemanager.h"
 
 #include <Limelight.h>
@@ -590,6 +591,9 @@ Session::Session(NvComputer* computer, NvApp& app, StreamingPreferences *prefere
       m_AudioSampleCount(0),
       m_DropAudioEndTime(0)
 {
+    ImageAdjustments::initialize(m_Preferences->imageSharpening,
+                                 m_Preferences->imageSaturation,
+                                 m_Preferences->imageFiltersEnabled);
 }
 
 Session::~Session()
@@ -2315,6 +2319,19 @@ void Session::exec()
     }
 
 DispatchDeferredCleanup:
+    // Persist any live adjustments that were changed without explicitly
+    // closing the OSD (for example, when the stream exits while it is open).
+    ImageAdjustments::setOsdOpen(false);
+    const ImageAdjustments::State imageAdjustmentState = ImageAdjustments::snapshot();
+    if (m_Preferences->imageSharpening != imageAdjustmentState.sharpening ||
+            m_Preferences->imageSaturation != imageAdjustmentState.saturation ||
+            m_Preferences->imageFiltersEnabled != imageAdjustmentState.enabled) {
+        m_Preferences->imageSharpening = imageAdjustmentState.sharpening;
+        m_Preferences->imageSaturation = imageAdjustmentState.saturation;
+        m_Preferences->imageFiltersEnabled = imageAdjustmentState.enabled;
+        m_Preferences->saveImageAdjustments();
+    }
+
     // Switch back to synchronous logging mode
     StreamUtils::exitAsyncLoggingMode();
 

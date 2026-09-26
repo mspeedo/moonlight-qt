@@ -8,6 +8,7 @@
 
 #include <libplacebo/log.h>
 #include <libplacebo/renderer.h>
+#include <libplacebo/shaders/custom.h>
 #include <libplacebo/vulkan.h>
 
 #include <atomic>
@@ -110,6 +111,8 @@ private:
     pl_vulkan m_Vulkan = nullptr;
     pl_swapchain m_Swapchain = nullptr;
     pl_renderer m_Renderer = nullptr;
+    const pl_hook* m_SharpenHook = nullptr;
+    pl_var_data* m_SharpenStrengthParam = nullptr;
     pl_tex m_Textures[PL_MAX_PLANES] = {};
     pl_color_space m_LastColorspace = {};
 

@@ -1,8 +1,10 @@
 #include "streaming/session.h"
+#include "streaming/video/imageadjustments.h"
 
 #include <Limelight.h>
 #include "SDL_compat.h"
 #include "settings/mappingmanager.h"
+#include "settings/streamingpreferences.h"
 
 #include <QtMath>
 
@@ -22,6 +24,153 @@
 #define ML_HAPTIC_GC_RUMBLE         (1U << 16)
 #define ML_HAPTIC_SIMPLE_RUMBLE     (1U << 17)
 #define ML_HAPTIC_GC_TRIGGER_RUMBLE (1U << 18)
+
+namespace {
+
+constexpr float kImageAdjustmentStep = 0.1f;
+
+bool isImageAdjustmentControl(Uint8 button)
+{
+    return button == SDL_CONTROLLER_BUTTON_DPAD_UP ||
+            button == SDL_CONTROLLER_BUTTON_DPAD_DOWN ||
+            button == SDL_CONTROLLER_BUTTON_DPAD_LEFT ||
+            button == SDL_CONTROLLER_BUTTON_DPAD_RIGHT ||
+            button == SDL_CONTROLLER_BUTTON_Y;
+}
+
+void updateImageAdjustmentsOverlayText()
+{
+    Session* session = Session::get();
+    if (session == nullptr) {
+        return;
+    }
+
+    const ImageAdjustments::State state = ImageAdjustments::snapshot();
+    const int selectedRow = ImageAdjustments::selectedRow();
+    const bool hdrStreamActive = ImageAdjustments::isHdrStreamActive();
+
+    char text[256];
+    SDL_snprintf(text, sizeof(text),
+                 "IMAGE ADJUSTMENTS (Y) : %s\n\n"
+                 "%s Saturation        %.1f\n"
+                 "%s Sharpening        %.1f%s",
+                 state.enabled ? "ON" : "OFF",
+                 selectedRow == 0 ? ">" : " ",
+                 state.saturation,
+                 selectedRow == 1 ? ">" : " ",
+                 state.sharpening,
+                 hdrStreamActive ? "  [OFF in HDR]" : "");
+
+    session->getOverlayManager().updateOverlayText(Overlay::OverlayImageAdjustments,
+                                                    text);
+}
+
+void persistImageAdjustments()
+{
+    StreamingPreferences* preferences = StreamingPreferences::get();
+    const ImageAdjustments::State state = ImageAdjustments::snapshot();
+
+    preferences->imageSharpening = state.sharpening;
+    preferences->imageSaturation = state.saturation;
+    preferences->imageFiltersEnabled = state.enabled;
+    preferences->saveImageAdjustments();
+}
+
+void toggleImageAdjustmentsOverlay()
+{
+    Session* session = Session::get();
+    if (session == nullptr) {
+        return;
+    }
+
+    Overlay::OverlayManager& overlayManager = session->getOverlayManager();
+    const bool open = overlayManager.isOverlayEnabled(
+            Overlay::OverlayImageAdjustments);
+
+    if (open) {
+        // Stop Y interception before returning to normal controller handling.
+        overlayManager.setOverlayState(Overlay::OverlayImageAdjustments, false);
+        ImageAdjustments::setOsdOpen(false);
+        persistImageAdjustments();
+    }
+    else {
+        ImageAdjustments::setSelectedRow(0);
+        ImageAdjustments::setOsdOpen(true);
+
+        // Populate text while hidden, then publish once on enable. This avoids
+        // creating/uploading a transient empty or stale surface.
+        updateImageAdjustmentsOverlayText();
+        overlayManager.setOverlayState(Overlay::OverlayImageAdjustments, true);
+    }
+}
+
+bool handleImageAdjustmentsControl(const SDL_ControllerButtonEvent* event)
+{
+    if (!ImageAdjustments::isOsdOpen() ||
+            !isImageAdjustmentControl(event->button)) {
+        return false;
+    }
+
+    // Consume both press and release. Actions occur only on press so the host
+    // never sees a partial button state while this OSD owns the controls.
+    if (event->state != SDL_PRESSED) {
+        return true;
+    }
+
+    const ImageAdjustments::State state = ImageAdjustments::snapshot();
+    bool changed = false;
+    switch (event->button) {
+    case SDL_CONTROLLER_BUTTON_DPAD_UP:
+        if (ImageAdjustments::selectedRow() != 0) {
+            ImageAdjustments::setSelectedRow(0);
+            changed = true;
+        }
+        break;
+    case SDL_CONTROLLER_BUTTON_DPAD_DOWN:
+        if (ImageAdjustments::selectedRow() != 1) {
+            ImageAdjustments::setSelectedRow(1);
+            changed = true;
+        }
+        break;
+    case SDL_CONTROLLER_BUTTON_DPAD_LEFT:
+        if (ImageAdjustments::selectedRow() == 0) {
+            if (state.saturation > 1.0f) {
+                ImageAdjustments::setSaturation(state.saturation - kImageAdjustmentStep);
+                changed = true;
+            }
+        }
+        else if (state.sharpening > 0.0f) {
+            ImageAdjustments::setSharpening(state.sharpening - kImageAdjustmentStep);
+            changed = true;
+        }
+        break;
+    case SDL_CONTROLLER_BUTTON_DPAD_RIGHT:
+        if (ImageAdjustments::selectedRow() == 0) {
+            if (state.saturation < 2.0f) {
+                ImageAdjustments::setSaturation(state.saturation + kImageAdjustmentStep);
+                changed = true;
+            }
+        }
+        else if (state.sharpening < 1.0f) {
+            ImageAdjustments::setSharpening(state.sharpening + kImageAdjustmentStep);
+            changed = true;
+        }
+        break;
+    case SDL_CONTROLLER_BUTTON_Y:
+        ImageAdjustments::setEnabled(!state.enabled);
+        changed = true;
+        break;
+    default:
+        return false;
+    }
+
+    if (changed) {
+        updateImageAdjustmentsOverlayText();
+    }
+    return true;
+}
+
+} // namespace
 
 const int SdlInputHandler::k_ButtonMap[] = {
     A_FLAG, B_FLAG, X_FLAG, Y_FLAG,
@@ -266,6 +415,12 @@ void SdlInputHandler::handleControllerButtonEvent(SDL_ControllerButtonEvent* eve
         return;
     }
 
+    // Image-adjustment controls are physical OSD controls and must be
+    // consumed before optional host face-button remapping.
+    if (handleImageAdjustmentsControl(event)) {
+        return;
+    }
+
     if (m_SwapFaceButtons) {
         switch (event->button) {
         case SDL_CONTROLLER_BUTTON_A:
@@ -375,6 +530,24 @@ void SdlInputHandler::handleControllerButtonEvent(SDL_ControllerButtonEvent* eve
         SDL_PushEvent(&event);
 
         // Clear buttons down on this gamepad
+        LiSendMultiControllerEvent(state->index, m_GamepadMask,
+                                   0, 0, 0, 0, 0, 0, 0);
+        return;
+    }
+
+    // Handle Select+L1+R1+Right Stick as the dedicated image-adjustments
+    // OSD toggle. It deliberately avoids A/B/Y (benchmark/telemetry controls),
+    // X (debug OSD), and Start (quit/mouse-emulation shortcuts).
+    if (state->buttons == (BACK_FLAG | LB_FLAG | RB_FLAG | RS_CLK_FLAG)) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "Detected image adjustments toggle gamepad combo");
+
+        toggleImageAdjustmentsOverlay();
+
+        // The chord itself is local-only. Clear the local button state as well
+        // as the host state so releases after the toggle cannot leak a partial
+        // shortcut chord to the host.
+        state->buttons = 0;
         LiSendMultiControllerEvent(state->index, m_GamepadMask,
                                    0, 0, 0, 0, 0, 0, 0);
         return;
