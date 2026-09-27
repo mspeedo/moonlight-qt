@@ -1164,8 +1164,12 @@ void PlVkRenderer::renderFrame(AVFrame *frame)
     // Probe once on the first SDR frame even at 0.0 sharpening, so the OSD can
     // truthfully report availability before the user raises the slider. Once
     // known, zero-sharpening frames stay on the stock fast path with no probe.
+    const bool retryUnavailableWhileOsdOpen =
+            ImageAdjustments::isOsdOpen() &&
+            !ImageAdjustments::isSharpeningAvailable();
     const bool probeSharpening = !hdrInput && m_AllowFusedRcas &&
-            (sharpeningRequested || !m_SharpeningAvailabilityKnown);
+            (sharpeningRequested || !m_SharpeningAvailabilityKnown ||
+             retryUnavailableWhileOsdOpen);
     const pl_hook* fusedHook = probeSharpening
             ? m_FusedRcas.prepare(m_Renderer, mappedFrame, targetFrame,
                                   useSaturation ? imageState.saturation : 1.0f,
@@ -1236,7 +1240,8 @@ void PlVkRenderer::renderFrame(AVFrame *frame)
         updateSharpeningAvailability(false);
         m_LastSharpenPath = -1;
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
-                     "Fused RCAS failed; sharpening disabled");
+                     "Fused RCAS failed (%s); sharpening disabled",
+                     m_FusedRcas.reason());
     }
     if (!renderOk) {
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
