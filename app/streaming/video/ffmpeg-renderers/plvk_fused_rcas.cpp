@@ -2,6 +2,7 @@
 #include "plvk_rcas.h"
 
 #include <cstdio>
+#include <cstdlib>
 
 void FusedRcas::initialize()
 {
