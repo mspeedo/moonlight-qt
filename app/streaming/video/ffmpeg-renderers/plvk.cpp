@@ -92,6 +92,21 @@ static const char *k_OptionalDeviceExtensions[] = {
 };
 #endif
 
+static void updateSharpeningAvailability(bool available)
+{
+    const bool changed = ImageAdjustments::setSharpeningAvailable(available);
+    if (!changed || !ImageAdjustments::isOsdOpen()) {
+        return;
+    }
+
+    // Overlay text is owned by the session/main thread. Post a refresh instead
+    // of rasterizing or publishing an overlay from the video render thread.
+    SDL_Event event = {};
+    event.type = SDL_USEREVENT;
+    event.user.code = ImageAdjustments::kOverlayRefreshEventCode;
+    SDL_PushEvent(&event);
+}
+
 static void pl_log_cb(void*, enum pl_log_level level, const char *msg)
 {
     switch (level) {
@@ -555,7 +570,7 @@ bool PlVkRenderer::initialize(PDECODER_PARAMETERS params)
     // the full-resolution intermediate RGB texture this implementation avoids.
     m_AllowFusedRcas = !qEnvironmentVariableIsSet("MOONLIGHT_DISABLE_FUSED_RCAS");
     m_SharpeningAvailabilityKnown = !m_AllowFusedRcas;
-    ImageAdjustments::setSharpeningAvailable(false);
+    updateSharpeningAvailability(false);
     m_FusedRcas.initialize(m_Log, m_Vulkan->gpu);
 
 #ifdef PLVK_USE_EARLY_RENDER_TO_WAIT
@@ -1158,7 +1173,7 @@ void PlVkRenderer::renderFrame(AVFrame *frame)
             : nullptr;
     if (probeSharpening) {
         m_SharpeningAvailabilityKnown = true;
-        ImageAdjustments::setSharpeningAvailable(fusedHook != nullptr);
+        updateSharpeningAvailability(fusedHook != nullptr);
     }
     const bool useSharpening = sharpeningRequested && fusedHook != nullptr;
 
@@ -1218,7 +1233,7 @@ void PlVkRenderer::renderFrame(AVFrame *frame)
         // intermediate full-resolution RGB sharpening texture.
         m_AllowFusedRcas = false;
         m_SharpeningAvailabilityKnown = true;
-        ImageAdjustments::setSharpeningAvailable(false);
+        updateSharpeningAvailability(false);
         m_LastSharpenPath = -1;
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                      "Fused RCAS failed; sharpening disabled");

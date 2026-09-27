@@ -2,8 +2,14 @@
 
 #include <atomic>
 #include <cmath>
+#include <cstddef>
+#include <cstdio>
 
 namespace ImageAdjustments {
+
+// Session SDL user-event code reserved for refreshing this OSD on the main
+// thread after renderer-side availability changes.
+constexpr int kOverlayRefreshEventCode = 106;
 
 struct State {
     float sharpening;
@@ -129,9 +135,9 @@ inline bool isSharpeningAvailable()
     return sharpeningAvailableState().load(std::memory_order_relaxed);
 }
 
-inline void setSharpeningAvailable(bool available)
+inline bool setSharpeningAvailable(bool available)
 {
-    sharpeningAvailableState().store(available, std::memory_order_relaxed);
+    return sharpeningAvailableState().exchange(available, std::memory_order_relaxed) != available;
 }
 
 inline bool isOsdOpen()
@@ -152,6 +158,27 @@ inline int selectedRow()
 inline void setSelectedRow(int row)
 {
     selectedRowState().store(row == 0 ? 0 : 1, std::memory_order_relaxed);
+}
+
+inline void formatOverlayText(char* text, std::size_t size)
+{
+    const State state = snapshot();
+    const int selected = selectedRow();
+    const bool hdrStreamActive = isHdrStreamActive();
+    const bool sharpeningAvailable = isSharpeningAvailable();
+    const char* sharpeningStatus = hdrStreamActive ? "  [OFF in HDR]" :
+            !sharpeningAvailable ? "  [UNAVAILABLE]" : "";
+
+    std::snprintf(text, size,
+                  "IMAGE ADJUSTMENTS (Y) : %s\n\n"
+                  "%s Saturation        %.1f\n"
+                  "%s Sharpening        %.1f%s",
+                  state.enabled ? "ON" : "OFF",
+                  selected == 0 ? ">" : " ",
+                  state.saturation,
+                  selected == 1 ? ">" : " ",
+                  state.sharpening,
+                  sharpeningStatus);
 }
 
 } // namespace ImageAdjustments

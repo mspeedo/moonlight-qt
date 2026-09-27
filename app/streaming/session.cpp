@@ -29,6 +29,7 @@
 #define SDL_CODE_GAMECONTROLLER_SET_MOTION_EVENT_STATE 103
 #define SDL_CODE_GAMECONTROLLER_SET_CONTROLLER_LED 104
 #define SDL_CODE_GAMECONTROLLER_SET_ADAPTIVE_TRIGGERS 105
+// 106 is reserved by ImageAdjustments::kOverlayRefreshEventCode.
 
 #include <openssl/rand.h>
 
@@ -2043,6 +2044,14 @@ void Session::exec()
             case SDL_CODE_GAMECONTROLLER_SET_ADAPTIVE_TRIGGERS:
                 m_InputHandler->setAdaptiveTriggers((uint16_t)(uintptr_t)event.user.data1,
                                                     (DualSenseOutputReport *)event.user.data2);
+                break;
+            case ImageAdjustments::kOverlayRefreshEventCode:
+                if (ImageAdjustments::isOsdOpen()) {
+                    char text[256];
+                    ImageAdjustments::formatOverlayText(text, sizeof(text));
+                    getOverlayManager().updateOverlayText(
+                            Overlay::OverlayImageAdjustments, text);
+                }
                 break;
             default:
                 SDL_assert(false);
