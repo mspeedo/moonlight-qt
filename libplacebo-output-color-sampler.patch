@@ -1,0 +1,449 @@
+diff --git a/src/include/libplacebo/shaders/custom.h b/src/include/libplacebo/shaders/custom.h
+--- a/src/include/libplacebo/shaders/custom.h
++++ b/src/include/libplacebo/shaders/custom.h
+@@ -26,9 +26,12 @@
+ 
+ #include <libplacebo/shaders.h>
+ #include <libplacebo/dispatch.h>
+-#include <libplacebo/colorspace.h>
+-
+-PL_API_BEGIN
++#include <libplacebo/colorspace.h>
++
++// Downstream extension used by Moonlight's zero-intermediate-pass RCAS hook.
++#define PL_HAVE_HOOK_COLOR_SAMPLER 1
++
++PL_API_BEGIN
+ 
+ // Parameters describing custom shader text to be embedded into a `pl_shader`
+ // object. All of the strings are optional and can be left as NULL, but without
+@@ -188,9 +191,23 @@
+     // Note that this shader might have specific output size requirements,
+     // depending on the exact shader stage hooked by the user, and may already
+     // be a compute shader.
+-    pl_shader sh;
+-
+-    // For `PL_HOOK_SIG_TEX`, this contains the texture that the user should
++    pl_shader sh;
++
++    // Optional downstream extension for COLOR hooks. When requested by the
++    // hook and available, this names a GLSL function with signature:
++    //
++    //     vec4 sample_color(vec2 pixel_offset)
++    //
++    // It evaluates the same direct source/color-conversion path as the current
++    // image at a neighboring output pixel, without materializing an
++    // intermediate texture. The offset is measured in final output pixels.
++    //
++    // If unavailable, sample_color is NULL and sample_color_reason explains
++    // why. The reason pointer remains valid for the duration of the callback.
++    const char *sample_color;
++    const char *sample_color_reason;
++
++    // For `PL_HOOK_SIG_TEX`, this contains the texture that the user should
+     // sample from.
+     //
+     // Note: This texture object is owned by the renderer, and users must not
+@@ -303,9 +320,14 @@
+ // Note: Users may freely create their own instances of this struct, there is
+ // nothing particularly special about `pl_mpv_user_shader_parse`.
+ struct pl_hook {
+-    enum pl_hook_stage stages;  // Which stages to hook on
+-    enum pl_hook_sig input;     // Which input signature this hook expects
+-    void *priv;                 // Arbitrary user context
++    enum pl_hook_stage stages;  // Which stages to hook on
++    enum pl_hook_sig input;     // Which input signature this hook expects
++
++    // Request the optional sample_color helper above. This is currently only
++    // provided to PL_HOOK_SIG_COLOR hooks at PL_HOOK_OUTPUT.
++    bool requires_color_sampler;
++
++    void *priv;                 // Arbitrary user context
+ 
+     // Custom tunable shader parameters exported by this hook. These may be
+     // updated at any time by the user, to influence the behavior of the hook.
+diff --git a/src/renderer.c b/src/renderer.c
+--- a/src/renderer.c
++++ b/src/renderer.c
+@@ -1039,75 +1039,312 @@
+     }
+ }
+ 
+-static pl_tex get_hook_tex(void *priv, int width, int height)
+-{
+-    struct pass_state *pass = priv;
+-
+-    return get_fbo(pass, width, height, NULL, 4, PL_DEBUG_TAG);
+-}
+-
+-// Returns if any hook was applied (even if there were errors)
+-static bool pass_hook(struct pass_state *pass, struct img *img,
+-                      enum pl_hook_stage stage)
+-{
+-    const struct pl_render_params *params = pass->params;
+-    pl_renderer rr = pass->rr;
+-    if (!pass->fbofmt[4] || !stage)
+-        return false;
+-
+-    bool ret = false;
+-
+-    for (int n = 0; n < params->num_hooks; n++) {
+-        const struct pl_hook *hook = params->hooks[n];
+-        if (!(hook->stages & stage))
+-            continue;
+-
+-        // Hopefully the list of disabled hooks is small, search linearly.
+-        for (int i = 0; i < rr->disabled_hooks.num; i++) {
+-            if (rr->disabled_hooks.elem[i] != hook->signature)
+-                continue;
+-            PL_TRACE(rr, "Skipping hook %d (0x%"PRIx64") stage 0x%x",
+-                     n, hook->signature, stage);
+-            goto hook_skip;
+-        }
+-
+-        PL_TRACE(rr, "Dispatching hook %d (0x%"PRIx64") stage 0x%x",
+-                 n, hook->signature, stage);
+-        struct pl_hook_params hparams = {
+-            .gpu = rr->gpu,
+-            .dispatch = rr->dp,
+-            .get_tex = get_hook_tex,
+-            .priv = pass,
+-            .stage = stage,
+-            .rect = img->rect,
+-            .repr = img->repr,
+-            .color = img->color,
+-            .orig_repr = &pass->image.repr,
+-            .orig_color = &pass->image.color,
+-            .components = img->comps,
+-            .src_rect = pass->ref_rect,
+-            .dst_rect = pass->dst_rect,
+-        };
+-
+-        // TODO: Add some sort of `test` API function to the hooks that allows
+-        // us to skip having to touch the `img` state at all for no-ops
+-
+-        switch (hook->input) {
+-        case PL_HOOK_SIG_NONE:
+-            break;
+-
+-        case PL_HOOK_SIG_TEX: {
+-            hparams.tex = img_tex(pass, img);
+-            if (!hparams.tex) {
+-                PL_ERR(rr, "Failed dispatching shader prior to hook!");
+-                goto hook_error;
+-            }
+-            break;
+-        }
+-
+-        case PL_HOOK_SIG_COLOR:
+-            hparams.sh = img_sh(pass, img);
+-            break;
++static pl_tex get_hook_tex(void *priv, int width, int height)
++{
++    struct pass_state *pass = priv;
++
++    return get_fbo(pass, width, height, NULL, 4, PL_DEBUG_TAG);
++}
++
++static ident_t hook_find_sampled_texture(pl_shader sh, pl_tex tex)
++{
++    for (int i = 0; i < sh->descs.num; i++) {
++        const struct pl_shader_desc *desc = &sh->descs.elem[i];
++        if (desc->desc.type == PL_DESC_SAMPLED_TEX &&
++            desc->binding.object == tex)
++        {
++            return sh_ident_unpack(desc->desc.name);
++        }
++    }
++
++    return NULL_IDENT;
++}
++
++// Builds a callable SDR source sampler inside the current OUTPUT shader.
++//
++// This deliberately reuses the source texture descriptors that are already
++// present in the in-progress render shader. If those descriptors are gone, the
++// renderer has already materialized or otherwise transformed the source path,
++// so replaying it without an intermediate texture would no longer be exact.
++static bool hook_build_color_sampler(struct pass_state *pass, pl_shader sh,
++                                     const char **out_name,
++                                     const char **out_reason)
++{
++    const struct pl_render_params *params = pass->params;
++    const struct pl_frame *image = &pass->image;
++    const struct pl_frame *target = &pass->target;
++    pl_renderer rr = pass->rr;
++
++    *out_name = NULL;
++    *out_reason = "color sampler unavailable";
++
++#define HOOK_UNAVAILABLE(reason) do { *out_reason = (reason); return false; } while (0)
++
++    if (pass->rotation != PL_ROTATION_0)
++        HOOK_UNAVAILABLE("rotated output is not replayable");
++
++    if (pl_color_space_is_hdr(&image->color) ||
++        pl_color_space_is_hdr(&target->color))
++    {
++        HOOK_UNAVAILABLE("HDR color replay is disabled");
++    }
++
++    if (image->repr.alpha != PL_ALPHA_NONE ||
++        target->repr.alpha != PL_ALPHA_NONE ||
++        params->blend_params)
++    {
++        HOOK_UNAVAILABLE("alpha/blended output is not replayable");
++    }
++
++    // These operations alter the source or output in ways that cannot be
++    // reconstructed from the still-bound source planes alone.
++    if (image->field != PL_FIELD_NONE ||
++        image->film_grain.type != PL_FILM_GRAIN_NONE ||
++        image->lut || target->lut || params->lut ||
++        image->icc || target->icc ||
++        image->profile.len || target->profile.len ||
++        image->enhancement_layer || params->cone_params)
++    {
++        HOOK_UNAVAILABLE("render pipeline is not directly replayable");
++    }
++
++    if (target->repr.sys != PL_COLOR_SYSTEM_RGB)
++        HOOK_UNAVAILABLE("output representation is not RGB");
++
++    if (image->num_planes <= 0 || image->num_planes > PL_MAX_PLANES ||
++        pass->src_ref < 0 || pass->src_ref >= image->num_planes)
++    {
++        HOOK_UNAVAILABLE("invalid source plane layout");
++    }
++
++    const pl_tex ref_tex = image->planes[pass->src_ref].texture;
++    if (!ref_tex || ref_tex->params.w <= 0 || ref_tex->params.h <= 0)
++        HOOK_UNAVAILABLE("invalid reference plane");
++
++    const float src_w = pl_rect_w(pass->ref_rect);
++    const float src_h = pl_rect_h(pass->ref_rect);
++    const int dst_w = pl_rect_w(pass->dst_rect);
++    const int dst_h = pl_rect_h(pass->dst_rect);
++    if (src_w <= 0.0f || src_h <= 0.0f || dst_w <= 0 || dst_h <= 0)
++        HOOK_UNAVAILABLE("invalid replay geometry");
++
++    ident_t plane_tex[PL_MAX_PLANES] = {0};
++    bool have_component[3] = {false, false, false};
++
++    for (int p = 0; p < image->num_planes; p++) {
++        const struct pl_plane *plane = &image->planes[p];
++        pl_tex tex = plane->texture;
++        if (!tex || !tex->params.sampleable || tex->params.d ||
++            (tex->sampler_type != PL_SAMPLER_NORMAL &&
++             tex->sampler_type != PL_SAMPLER_RECT) ||
++            !tex->params.format)
++        {
++            HOOK_UNAVAILABLE("source plane cannot be sampled directly");
++        }
++
++        enum pl_fmt_type type = tex->params.format->type;
++        if (type != PL_FMT_FLOAT && type != PL_FMT_UNORM &&
++            type != PL_FMT_SNORM)
++        {
++            HOOK_UNAVAILABLE("source plane format is not replayable");
++        }
++
++        // The decisive zero-FBO condition: reuse the exact descriptor already
++        // bound by libplacebo's current RGB shader. No texture is rebound and
++        // no duplicate descriptor is created.
++        plane_tex[p] = hook_find_sampled_texture(sh, tex);
++        if (!plane_tex[p])
++            HOOK_UNAVAILABLE("source RGB path was already materialized");
++
++        for (int c = 0; c < plane->components; c++) {
++            int map = plane->component_mapping[c];
++            if (map >= 0 && map < 3)
++                have_component[map] = true;
++        }
++    }
++
++    if (!have_component[0] || !have_component[1] || !have_component[2])
++        HOOK_UNAVAILABLE("source RGB components are incomplete");
++
++    // Build the exact color-domain conversion as a callable COLOR -> COLOR
++    // subpass. The source signal normalization is important for formats such
++    // as P010, whose logical 10-bit values occupy a wider sampled container.
++    pl_shader conversion = pl_dispatch_begin_ex(rr->dp, true);
++    if (!sh_require(conversion, PL_SHADER_SIG_COLOR, 0, 0)) {
++        pl_dispatch_abort(rr->dp, &conversion);
++        HOOK_UNAVAILABLE("unable to create color replay conversion");
++    }
++
++    struct pl_color_repr repr = image->repr;
++    float sample_scale = pl_color_repr_normalize(&repr);
++    ident_t scale = sh_const_float(conversion, "sample_scale", sample_scale);
++    sh_append(conversion, SH_BUF_BODY, "color *= vec4("$");\n", scale);
++
++    pl_shader_decode_color_ex(conversion, pl_color_decode_args(
++        .repr = &repr,
++        .color_adjustment = params->color_adjustment,
++    ));
++
++    pl_shader_color_map_ex(conversion, params->color_map_params,
++                          pl_color_map_args(
++        .src = image->color,
++        .dst = target->color,
++    ));
++
++    repr = target->repr;
++    pl_color_repr_normalize(&repr);
++    repr.alpha = PL_ALPHA_NONE;
++    pl_shader_encode_color(conversion, &repr);
++
++    ident_t convert = sh_subpass(sh, conversion);
++    pl_dispatch_abort(rr->dp, &conversion);
++    if (!convert)
++        HOOK_UNAVAILABLE("unable to merge color replay conversion");
++
++    ident_t sample = sh_fresh(sh, "hook_sample_color");
++
++    GLSLH("vec4 "$"(vec2 pixel_offset) {\n"
++          "    vec2 out_pos = clamp(gl_FragCoord.xy + pixel_offset,\n"
++          "        vec2("$", "$"), vec2("$", "$"));\n"
++          "    vec2 ref_pos = vec2("$", "$") +\n"
++          "        (out_pos - vec2("$", "$")) * vec2("$", "$");\n"
++          "    vec4 color = vec4(0.0, 0.5, 0.5, 1.0);\n",
++          sample,
++          SH_FLOAT(pass->dst_rect.x0 + 0.5f),
++          SH_FLOAT(pass->dst_rect.y0 + 0.5f),
++          SH_FLOAT(pass->dst_rect.x1 - 0.5f),
++          SH_FLOAT(pass->dst_rect.y1 - 0.5f),
++          SH_FLOAT(pass->ref_rect.x0),
++          SH_FLOAT(pass->ref_rect.y0),
++          SH_FLOAT(pass->dst_rect.x0),
++          SH_FLOAT(pass->dst_rect.y0),
++          SH_FLOAT(src_w / dst_w),
++          SH_FLOAT(src_h / dst_h));
++
++    for (int p = 0; p < image->num_planes; p++) {
++        const struct pl_plane *plane = &image->planes[p];
++        pl_tex tex = plane->texture;
++        pl_fmt fmt = tex->params.format;
++
++        float rx = (float) tex->params.w / ref_tex->params.w;
++        float ry = (float) tex->params.h / ref_tex->params.h;
++        float rrx = rx >= 1.0f ? roundf(rx) : 1.0f / roundf(1.0f / rx);
++        float rry = ry >= 1.0f ? roundf(ry) : 1.0f / roundf(1.0f / ry);
++        float plane_h = ref_tex->params.h * rry;
++
++        GLSLH("    {\n"
++              "        vec2 pos = (ref_pos - vec2("$", "$")) *\n"
++              "                   vec2("$", "$");\n",
++              SH_FLOAT(plane->shift_x), SH_FLOAT(plane->shift_y),
++              SH_FLOAT(rrx), SH_FLOAT(rry));
++
++        if (plane->flipped)
++            GLSLH("        pos.y = "$" - pos.y;\n", SH_FLOAT(plane_h));
++
++        if (tex->sampler_type == PL_SAMPLER_NORMAL) {
++            GLSLH("        pos /= vec2("$", "$");\n",
++                  SH_FLOAT(tex->params.w), SH_FLOAT(tex->params.h));
++        }
++
++        GLSLH("        vec4 tmp = textureLod("$", pos, 0.0);\n", plane_tex[p]);
++
++        for (int c = 0; c < plane->components; c++) {
++            int map = plane->component_mapping[c];
++            if (map < 0 || map >= 3)
++                continue;
++
++            int sample_order = fmt->sample_order[c];
++            if (sample_order < 0 || sample_order >= 4)
++                HOOK_UNAVAILABLE("invalid source component order");
++
++            GLSLH("        color[%d] = tmp[%d];\n", map, sample_order);
++        }
++
++        GLSLH("    }\n");
++    }
++
++    GLSLH("    return "$"(color);\n"
++          "}\n",
++          convert);
++
++    *out_name = sh_ident_tostr(sample);
++    *out_reason = NULL;
++#undef HOOK_UNAVAILABLE
++    return true;
++}
++
++// Returns if any hook was applied (even if there were errors)
++static bool pass_hook(struct pass_state *pass, struct img *img,
++                      enum pl_hook_stage stage)
++{
++    const struct pl_render_params *params = pass->params;
++    pl_renderer rr = pass->rr;
++    if (!pass->fbofmt[4] || !stage)
++        return false;
++
++    bool ret = false;
++
++    for (int n = 0; n < params->num_hooks; n++) {
++        const struct pl_hook *hook = params->hooks[n];
++        if (!(hook->stages & stage))
++            continue;
++
++        // Hopefully the list of disabled hooks is small, search linearly.
++        for (int i = 0; i < rr->disabled_hooks.num; i++) {
++            if (rr->disabled_hooks.elem[i] != hook->signature)
++                continue;
++            PL_TRACE(rr, "Skipping hook %d (0x%"PRIx64") stage 0x%x",
++                     n, hook->signature, stage);
++            goto hook_skip;
++        }
++
++        PL_TRACE(rr, "Dispatching hook %d (0x%"PRIx64") stage 0x%x",
++                 n, hook->signature, stage);
++        struct pl_hook_params hparams = {
++            .gpu = rr->gpu,
++            .dispatch = rr->dp,
++            .get_tex = get_hook_tex,
++            .priv = pass,
++            .stage = stage,
++            .rect = img->rect,
++            .repr = img->repr,
++            .color = img->color,
++            .orig_repr = &pass->image.repr,
++            .orig_color = &pass->image.color,
++            .components = img->comps,
++            .src_rect = pass->ref_rect,
++            .dst_rect = pass->dst_rect,
++        };
++
++        // TODO: Add some sort of `test` API function to the hooks that allows
++        // us to skip having to touch the `img` state at all for no-ops
++
++        switch (hook->input) {
++        case PL_HOOK_SIG_NONE:
++            break;
++
++        case PL_HOOK_SIG_TEX: {
++            hparams.tex = img_tex(pass, img);
++            if (!hparams.tex) {
++                PL_ERR(rr, "Failed dispatching shader prior to hook!");
++                goto hook_error;
++            }
++            break;
++        }
++
++        case PL_HOOK_SIG_COLOR:
++            hparams.sh = img_sh(pass, img);
++            if (hook->requires_color_sampler) {
++                if (stage != PL_HOOK_OUTPUT) {
++                    hparams.sample_color_reason =
++                            "color sampler is only available at OUTPUT";
++                } else {
++                    hook_build_color_sampler(pass, hparams.sh,
++                                             &hparams.sample_color,
++                                             &hparams.sample_color_reason);
++                }
++            }
++            break;
+ 
+         case PL_HOOK_SIG_COUNT:
+             pl_unreachable();

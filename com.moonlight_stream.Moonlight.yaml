@@ -46,7 +46,7 @@ modules:
       - type: patch
         path: libplacebo-disable-internally-synchronized-queues.patch
       - type: patch
-        path: libplacebo-deduplicate-sampled-textures.patch
+        path: libplacebo-output-color-sampler.patch
 
   - name: libdecor
     buildsystem: meson

@@ -572,7 +572,7 @@ bool PlVkRenderer::initialize(PDECODER_PARAMETERS params)
     m_SharpeningAvailabilityKnown = !m_AllowFusedRcas;
     updateSharpeningAvailability(false,
             m_AllowFusedRcas ? "not probed" : "fused sharpening disabled");
-    m_FusedRcas.initialize(m_Log, m_Vulkan->gpu);
+    m_FusedRcas.initialize();
 
 #ifdef PLVK_USE_EARLY_RENDER_TO_WAIT
     SDL_Surface *emptySurface = SDL_CreateRGBSurfaceWithFormat(0, 1, 1, 0, SDL_PIXELFORMAT_ARGB8888);
@@ -1163,8 +1163,9 @@ void PlVkRenderer::renderFrame(AVFrame *frame)
             imageState.sharpening > 0.0f;
 
     // Probe once on the first SDR frame even at 0.0 sharpening, so the OSD can
-    // truthfully report availability before the user raises the slider. Once
-    // known, zero-sharpening frames stay on the stock fast path with no probe.
+    // truthfully report availability before the user raises the slider. The
+    // patched libplacebo hook itself decides whether the current RGB path can
+    // be replay-sampled without materializing an intermediate texture.
     const bool retryUnavailableWhileOsdOpen =
             ImageAdjustments::isOsdOpen() &&
             !ImageAdjustments::isSharpeningAvailable();
@@ -1172,23 +1173,15 @@ void PlVkRenderer::renderFrame(AVFrame *frame)
             (sharpeningRequested || !m_SharpeningAvailabilityKnown ||
              retryUnavailableWhileOsdOpen);
     const pl_hook* fusedHook = probeSharpening
-            ? m_FusedRcas.prepare(m_Renderer, mappedFrame, targetFrame,
-                                  useSaturation ? imageState.saturation : 1.0f,
-                                  imageState.sharpening)
+            ? m_FusedRcas.prepare(imageState.sharpening)
             : nullptr;
-    if (probeSharpening) {
-        m_SharpeningAvailabilityKnown = true;
-        updateSharpeningAvailability(fusedHook != nullptr,
-                fusedHook ? nullptr : m_FusedRcas.reason());
-    }
-    const bool useSharpening = sharpeningRequested && fusedHook != nullptr;
 
     const pl_render_params* activeRenderParams = &pl_render_fast_params;
     pl_render_params adjustedRenderParams;
     pl_color_adjustment colorAdjustment;
     const pl_hook* sharpenHooks[1];
 
-    if (useSaturation || useSharpening) {
+    if (useSaturation || fusedHook != nullptr) {
         adjustedRenderParams = pl_render_fast_params;
 
         if (useSaturation) {
@@ -1205,7 +1198,7 @@ void PlVkRenderer::renderFrame(AVFrame *frame)
                     ImageAdjustments::isOsdOpen();
         }
 
-        if (useSharpening) {
+        if (fusedHook != nullptr) {
             sharpenHooks[0] = fusedHook;
             adjustedRenderParams.hooks = sharpenHooks;
             adjustedRenderParams.num_hooks = 1;
@@ -1214,11 +1207,35 @@ void PlVkRenderer::renderFrame(AVFrame *frame)
         activeRenderParams = &adjustedRenderParams;
     }
 
+    bool renderOk = pl_render_image(m_Renderer, &mappedFrame, &targetFrame, activeRenderParams);
+
+    const bool hookFailed = fusedHook != nullptr &&
+            (m_FusedRcas.failed() ||
+             (pl_renderer_get_errors(m_Renderer).errors & PL_RENDER_ERR_HOOKS));
+    if (hookFailed) {
+        // A true shader-construction/runtime failure disables sharpening. A
+        // normal "not replayable" result is a clean no-op and remains visible
+        // in the OSD without disabling the renderer hook infrastructure.
+        m_AllowFusedRcas = false;
+        m_SharpeningAvailabilityKnown = true;
+        updateSharpeningAvailability(false, m_FusedRcas.reason());
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "Fused RCAS failed (%s); sharpening disabled",
+                     m_FusedRcas.reason());
+    }
+    else if (probeSharpening && m_FusedRcas.availabilityKnown()) {
+        m_SharpeningAvailabilityKnown = true;
+        updateSharpeningAvailability(m_FusedRcas.available(),
+                m_FusedRcas.available() ? nullptr : m_FusedRcas.reason());
+    }
+
+    const bool useSharpening = sharpeningRequested &&
+            m_AllowFusedRcas && m_FusedRcas.available();
     const int sharpenPath = !sharpeningRequested ? 0 : useSharpening ? 1 : 2;
     if (sharpenPath != m_LastSharpenPath) {
         if (sharpenPath == 1) {
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                        "RCAS path: fused RGB, no sharpening FBO");
+                        "RCAS path: libplacebo replay sampler, no sharpening FBO");
         }
         else if (sharpenPath == 2) {
             SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
@@ -1229,21 +1246,6 @@ void PlVkRenderer::renderFrame(AVFrame *frame)
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "RCAS path: bypass");
         }
         m_LastSharpenPath = sharpenPath;
-    }
-
-    bool renderOk = pl_render_image(m_Renderer, &mappedFrame, &targetFrame, activeRenderParams);
-    if (useSharpening && (m_FusedRcas.failed() ||
-            (pl_renderer_get_errors(m_Renderer).errors & PL_RENDER_ERR_HOOKS))) {
-        // A fused hook failure disables sharpening for subsequent frames. Do
-        // not retry through the legacy OUTPUT hook: that would reintroduce the
-        // intermediate full-resolution RGB sharpening texture.
-        m_AllowFusedRcas = false;
-        m_SharpeningAvailabilityKnown = true;
-        updateSharpeningAvailability(false, m_FusedRcas.reason());
-        m_LastSharpenPath = -1;
-        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
-                     "Fused RCAS failed (%s); sharpening disabled",
-                     m_FusedRcas.reason());
     }
     if (!renderOk) {
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
