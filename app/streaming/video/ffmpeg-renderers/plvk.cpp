@@ -92,9 +92,9 @@ static const char *k_OptionalDeviceExtensions[] = {
 };
 #endif
 
-static void updateSharpeningAvailability(bool available)
+static void updateSharpeningAvailability(bool available, const char* reason = nullptr)
 {
-    const bool changed = ImageAdjustments::setSharpeningAvailable(available);
+    const bool changed = ImageAdjustments::setSharpeningAvailability(available, reason);
     if (!changed || !ImageAdjustments::isOsdOpen()) {
         return;
     }
@@ -570,7 +570,8 @@ bool PlVkRenderer::initialize(PDECODER_PARAMETERS params)
     // the full-resolution intermediate RGB texture this implementation avoids.
     m_AllowFusedRcas = !qEnvironmentVariableIsSet("MOONLIGHT_DISABLE_FUSED_RCAS");
     m_SharpeningAvailabilityKnown = !m_AllowFusedRcas;
-    updateSharpeningAvailability(false);
+    updateSharpeningAvailability(false,
+            m_AllowFusedRcas ? "not probed" : "fused sharpening disabled");
     m_FusedRcas.initialize(m_Log, m_Vulkan->gpu);
 
 #ifdef PLVK_USE_EARLY_RENDER_TO_WAIT
@@ -1177,7 +1178,8 @@ void PlVkRenderer::renderFrame(AVFrame *frame)
             : nullptr;
     if (probeSharpening) {
         m_SharpeningAvailabilityKnown = true;
-        updateSharpeningAvailability(fusedHook != nullptr);
+        updateSharpeningAvailability(fusedHook != nullptr,
+                fusedHook ? nullptr : m_FusedRcas.reason());
     }
     const bool useSharpening = sharpeningRequested && fusedHook != nullptr;
 
@@ -1237,7 +1239,7 @@ void PlVkRenderer::renderFrame(AVFrame *frame)
         // intermediate full-resolution RGB sharpening texture.
         m_AllowFusedRcas = false;
         m_SharpeningAvailabilityKnown = true;
-        updateSharpeningAvailability(false);
+        updateSharpeningAvailability(false, m_FusedRcas.reason());
         m_LastSharpenPath = -1;
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                      "Fused RCAS failed (%s); sharpening disabled",

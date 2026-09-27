@@ -52,6 +52,14 @@ inline std::atomic<bool>& sharpeningAvailableState()
     return value;
 }
 
+inline std::atomic<const char*>& sharpeningUnavailableReasonState()
+{
+    // All producers publish static string literals, so the pointer remains
+    // valid for the lifetime of the process and is safe to read lock-free.
+    static std::atomic<const char*> value { "not probed" };
+    return value;
+}
+
 inline std::atomic<bool>& osdOpenState()
 {
     static std::atomic<bool> value { false };
@@ -87,6 +95,7 @@ inline void initialize(float sharpening, float saturation, bool enabled)
                            std::memory_order_relaxed);
     enabledState().store(enabled, std::memory_order_relaxed);
     hdrStreamActiveState().store(false, std::memory_order_relaxed);
+    sharpeningUnavailableReasonState().store("not probed", std::memory_order_relaxed);
     sharpeningAvailableState().store(false, std::memory_order_relaxed);
     osdOpenState().store(false, std::memory_order_release);
     selectedRowState().store(0, std::memory_order_relaxed);
@@ -135,9 +144,25 @@ inline bool isSharpeningAvailable()
     return sharpeningAvailableState().load(std::memory_order_relaxed);
 }
 
-inline bool setSharpeningAvailable(bool available)
+inline const char* sharpeningUnavailableReason()
 {
-    return sharpeningAvailableState().exchange(available, std::memory_order_relaxed) != available;
+    return sharpeningUnavailableReasonState().load(std::memory_order_acquire);
+}
+
+inline bool setSharpeningAvailability(bool available, const char* reason = nullptr)
+{
+    if (available) {
+        reason = nullptr;
+    }
+    else if (reason == nullptr) {
+        reason = "unknown reason";
+    }
+
+    const char* previousReason =
+            sharpeningUnavailableReasonState().exchange(reason, std::memory_order_release);
+    const bool previousAvailable =
+            sharpeningAvailableState().exchange(available, std::memory_order_acq_rel);
+    return previousAvailable != available || previousReason != reason;
 }
 
 inline bool isOsdOpen()
@@ -168,17 +193,34 @@ inline void formatOverlayText(char* text, std::size_t size)
     const bool sharpeningAvailable = isSharpeningAvailable();
     const char* sharpeningStatus = hdrStreamActive ? "  [OFF in HDR]" :
             !sharpeningAvailable ? "  [UNAVAILABLE]" : "";
+    const char* unavailableReason = sharpeningUnavailableReason();
 
-    std::snprintf(text, size,
-                  "IMAGE ADJUSTMENTS (Y) : %s\n\n"
-                  "%s Saturation        %.1f\n"
-                  "%s Sharpening        %.1f%s",
-                  state.enabled ? "ON" : "OFF",
-                  selected == 0 ? ">" : " ",
-                  state.saturation,
-                  selected == 1 ? ">" : " ",
-                  state.sharpening,
-                  sharpeningStatus);
+    if (!hdrStreamActive && !sharpeningAvailable) {
+        std::snprintf(text, size,
+                      "IMAGE ADJUSTMENTS (Y) : %s\n\n"
+                      "%s Saturation        %.1f\n"
+                      "%s Sharpening        %.1f%s\n"
+                      "  Reason: %s",
+                      state.enabled ? "ON" : "OFF",
+                      selected == 0 ? ">" : " ",
+                      state.saturation,
+                      selected == 1 ? ">" : " ",
+                      state.sharpening,
+                      sharpeningStatus,
+                      unavailableReason ? unavailableReason : "unknown reason");
+    }
+    else {
+        std::snprintf(text, size,
+                      "IMAGE ADJUSTMENTS (Y) : %s\n\n"
+                      "%s Saturation        %.1f\n"
+                      "%s Sharpening        %.1f%s",
+                      state.enabled ? "ON" : "OFF",
+                      selected == 0 ? ">" : " ",
+                      state.saturation,
+                      selected == 1 ? ">" : " ",
+                      state.sharpening,
+                      sharpeningStatus);
+    }
 }
 
 } // namespace ImageAdjustments
