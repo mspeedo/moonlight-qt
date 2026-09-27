@@ -38,9 +38,6 @@ private:
     pl_tex_address_mode m_LumaAddressMode = PL_TEX_ADDRESS_CLAMP;
     pl_tex_address_mode m_ChromaAddressMode = PL_TEX_ADDRESS_CLAMP;
     float m_TextureSize[2] = {};
-    float m_SourceOrigin[2] = {};
-    float m_SourceExtent[2] = {};
-    float m_OutputSize[2] = {};
     float m_ChromaShift[2] = {};
     std::string m_Header;
     const char* m_Reason = "not prepared";

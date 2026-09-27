@@ -78,27 +78,11 @@ const pl_hook* FusedRcas::prepare(pl_renderer renderer, const pl_frame& source,
     }
 
     // Match the renderer's own inference, including missing bit-depth metadata,
-    // colorspace defaults, and target representation. The fused path samples
-    // the same decoder textures but is no longer restricted to an exact
-    // uncropped 1:1 source/target pair.
+    // colorspace defaults, and target representation. Output geometry is taken
+    // from the actual OUTPUT hook invocation instead of guessed here, so
+    // decoder padding/cropping and direct scaling remain eligible.
     pl_frame src = source, dst = target;
     pl_frames_infer(renderer, &src, &dst);
-
-    const float srcW = src.crop.x1 - src.crop.x0;
-    const float srcH = src.crop.y1 - src.crop.y0;
-    const float outWf = dst.crop.x1 - dst.crop.x0;
-    const float outHf = dst.crop.y1 - dst.crop.y0;
-    const int outW = int(std::lround(outWf));
-    const int outH = int(std::lround(outHf));
-
-    m_Reason = "invalid source crop or output geometry";
-    if (srcW <= 0.0f || srcH <= 0.0f || outW <= 0 || outH <= 0 ||
-            std::fabs(outWf - outW) > 1e-4f ||
-            std::fabs(outHf - outH) > 1e-4f ||
-            src.crop.x0 < 0.0f || src.crop.y0 < 0.0f ||
-            src.crop.x1 > width || src.crop.y1 > height) {
-        return nullptr;
-    }
 
     m_Reason = "requires SDR two-plane YUV and RGB output";
     if (!pl_color_system_is_ycbcr_like(src.repr.sys) ||
@@ -132,12 +116,6 @@ const pl_hook* FusedRcas::prepare(pl_renderer renderer, const pl_frame& source,
     m_ChromaAddressMode = uv.address_mode;
     m_TextureSize[0] = float(width);
     m_TextureSize[1] = float(height);
-    m_SourceOrigin[0] = src.crop.x0;
-    m_SourceOrigin[1] = src.crop.y0;
-    m_SourceExtent[0] = srcW;
-    m_SourceExtent[1] = srcH;
-    m_OutputSize[0] = float(outW);
-    m_OutputSize[1] = float(outH);
     m_ChromaShift[0] = uv.shift_x;
     m_ChromaShift[1] = uv.shift_y;
     m_Strength = strength;
@@ -206,15 +184,11 @@ bool FusedRcas::updateConversion(const pl_frame& source, const pl_frame& target,
 
     m_Header = kRcasCore;
     m_Header += R"GLSL(
-vec3 moonlightRcasSample(vec2 outPos)
+vec3 moonlightRcasSample(vec2 srcPos)
 {
-    // RCAS neighbours are defined in final output-pixel space. Map each output
-    // pixel center back through the source crop to decoder-plane coordinates.
-    // This exactly matches Moonlight's fast direct-sampling path for ordinary
-    // scaling while also handling decoder padding/cropping without an RGB FBO.
-    outPos = clamp(outPos, vec2(0.5), mlRcasOutputSize - vec2(0.5));
-    vec2 srcPos = mlRcasSourceOrigin +
-                  outPos * (mlRcasSourceExtent / mlRcasOutputSize);
+    // Clamp in source-pixel space. The per-output-pixel source step comes from
+    // the actual libplacebo src/dst rectangles supplied to the OUTPUT hook.
+    srcPos = clamp(srcPos, mlRcasSourceMin, mlRcasSourceMax);
     float y = texture(mlRcasY, srcPos / mlRcasTextureSize).r;
     vec2 uv = texture(mlRcasUV,
                       (srcPos - mlRcasChromaShift) / mlRcasTextureSize).rg;
@@ -269,55 +243,86 @@ pl_hook_res FusedRcas::hook(void* priv, const pl_hook_params* params)
     descriptors[1].binding.sample_mode = PL_TEX_SAMPLE_LINEAR;
     descriptors[1].binding.address_mode = self.m_ChromaAddressMode;
 
-    pl_shader_var variables[6] = {};
+    const int outW = std::abs(params->dst_rect.x1 - params->dst_rect.x0);
+    const int outH = std::abs(params->dst_rect.y1 - params->dst_rect.y0);
+    const float srcW = params->src_rect.x1 - params->src_rect.x0;
+    const float srcH = params->src_rect.y1 - params->src_rect.y0;
+    if (outW <= 0 || outH <= 0 || srcW <= 0.0f || srcH <= 0.0f) {
+        self.m_Reason = "invalid OUTPUT hook geometry";
+        self.m_Failed = result.failed = true;
+        return result;
+    }
+
+    const float sourceStep[2] = {srcW / outW, srcH / outH};
+    const float sourceMin[2] = {
+        params->src_rect.x0 + 0.5f * sourceStep[0],
+        params->src_rect.y0 + 0.5f * sourceStep[1]
+    };
+    const float sourceMax[2] = {
+        params->src_rect.x1 - 0.5f * sourceStep[0],
+        params->src_rect.y1 - 0.5f * sourceStep[1]
+    };
+
+    pl_shader_var variables[5] = {};
     variables[0].var = pl_var_vec2("mlRcasTextureSize");
     variables[0].data = self.m_TextureSize;
-    variables[1].var = pl_var_vec2("mlRcasSourceOrigin");
-    variables[1].data = self.m_SourceOrigin;
-    variables[2].var = pl_var_vec2("mlRcasSourceExtent");
-    variables[2].data = self.m_SourceExtent;
-    variables[3].var = pl_var_vec2("mlRcasOutputSize");
-    variables[3].data = self.m_OutputSize;
+    variables[1].var = pl_var_vec2("mlRcasSourceStep");
+    variables[1].data = sourceStep;
+    variables[2].var = pl_var_vec2("mlRcasSourceMin");
+    variables[2].data = sourceMin;
+    variables[3].var = pl_var_vec2("mlRcasSourceMax");
+    variables[3].data = sourceMax;
     variables[4].var = pl_var_vec2("mlRcasChromaShift");
     variables[4].data = self.m_ChromaShift;
-    variables[5].var = pl_var_float("mlRcasStrength");
-    variables[5].data = &self.m_Strength;
-    variables[5].dynamic = true;
 
-    const float coordinates[4][2] = {
-        {0.0f, 0.0f}, {self.m_OutputSize[0], 0.0f},
-        {0.0f, self.m_OutputSize[1]},
-        {self.m_OutputSize[0], self.m_OutputSize[1]}
+    pl_shader_var strength = {};
+    strength.var = pl_var_float("mlRcasStrength");
+    strength.data = &self.m_Strength;
+    strength.dynamic = true;
+
+    const float sourceCoordinates[4][2] = {
+        {params->src_rect.x0, params->src_rect.y0},
+        {params->src_rect.x1, params->src_rect.y0},
+        {params->src_rect.x0, params->src_rect.y1},
+        {params->src_rect.x1, params->src_rect.y1}
     };
     pl_shader_va position = {};
-    position.attr.name = "mlRcasPosition";
+    position.attr.name = "mlRcasSourcePosition";
     position.attr.fmt = pl_find_fmt(params->gpu, PL_FMT_FLOAT, 2, 32, 32,
                                     PL_FMT_CAP_VERTEX);
     for (int i = 0; i < 4; ++i)
-        position.data[i] = coordinates[i];
+        position.data[i] = sourceCoordinates[i];
 
     pl_custom_shader shader = {};
     shader.input = shader.output = PL_SHADER_SIG_COLOR;
     shader.description = "Moonlight fused RGB RCAS (decoder planes)";
     shader.header = self.m_Header.c_str();
     shader.body = R"GLSL(
-        vec3 b = moonlightRcasSample(mlRcasPosition + vec2( 0.0, -1.0));
-        vec3 d = moonlightRcasSample(mlRcasPosition + vec2(-1.0,  0.0));
-        vec3 f = moonlightRcasSample(mlRcasPosition + vec2( 1.0,  0.0));
-        vec3 h = moonlightRcasSample(mlRcasPosition + vec2( 0.0,  1.0));
+        vec3 b = moonlightRcasSample(mlRcasSourcePosition +
+                                     vec2(0.0, -mlRcasSourceStep.y));
+        vec3 d = moonlightRcasSample(mlRcasSourcePosition +
+                                     vec2(-mlRcasSourceStep.x, 0.0));
+        vec3 f = moonlightRcasSample(mlRcasSourcePosition +
+                                     vec2( mlRcasSourceStep.x, 0.0));
+        vec3 h = moonlightRcasSample(mlRcasSourcePosition +
+                                     vec2(0.0,  mlRcasSourceStep.y));
         color.rgb = moonlightRcas(b, d, color.rgb, f, h, mlRcasStrength);
     )GLSL";
     shader.descriptors = descriptors;
     shader.num_descriptors = 2;
-    shader.variables = variables;
+    pl_shader_var allVariables[6] = {
+        variables[0], variables[1], variables[2],
+        variables[3], variables[4], strength
+    };
+    shader.variables = allVariables;
     shader.num_variables = 6;
     shader.vertex_attribs = &position;
     shader.num_vertex_attribs = 1;
     // OUTPUT is a non-resizable hook stage. The native hook API requires
     // returned COLOR shaders to carry the exact image dimensions, otherwise
     // pass_hook() rejects the result as an attempted resize.
-    shader.output_w = static_cast<int>(self.m_OutputSize[0]);
-    shader.output_h = static_cast<int>(self.m_OutputSize[1]);
+    shader.output_w = outW;
+    shader.output_h = outH;
 
     if (!pl_shader_custom(params->sh, &import) || !pl_shader_custom(params->sh, &shader)) {
         self.m_Reason = "unable to fuse RCAS into render shader";
