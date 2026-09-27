@@ -17,55 +17,57 @@ diff --git a/src/include/libplacebo/shaders/custom.h b/src/include/libplacebo/sh
  
  // Parameters describing custom shader text to be embedded into a `pl_shader`
  // object. All of the strings are optional and can be left as NULL, but without
-@@ -188,9 +191,23 @@
-     // Note that this shader might have specific output size requirements,
-     // depending on the exact shader stage hooked by the user, and may already
-     // be a compute shader.
--    pl_shader sh;
--
--    // For `PL_HOOK_SIG_TEX`, this contains the texture that the user should
-+    pl_shader sh;
+@@ -158,10 +161,16 @@
+ // The different forms of communicating image data between the renderer and
+ // the hooks
+ enum pl_hook_sig {
+-    PL_HOOK_SIG_NONE,   // No data is passed, no data is received/returned
+-    PL_HOOK_SIG_COLOR,  // `vec4 color` already pre-sampled in a `pl_shader`
+-    PL_HOOK_SIG_TEX,    // `pl_tex` containing the image data
+-    PL_HOOK_SIG_COUNT,
++    PL_HOOK_SIG_NONE,   // No data is passed, no data is received/returned
++    PL_HOOK_SIG_COLOR,  // `vec4 color` already pre-sampled in a `pl_shader`
++    PL_HOOK_SIG_TEX,    // `pl_tex` containing the image data
 +
-+    // Optional downstream extension for COLOR hooks. When requested by the
-+    // hook and available, this names a GLSL function with signature:
++    // Downstream input-only extension: same mutable COLOR shader as above,
++    // plus pl_hook_params.sample_color() when the renderer can replay the
++    // current direct source path without materializing an intermediate image.
++    PL_HOOK_SIG_COLOR_SAMPLER,
++
++    PL_HOOK_SIG_COUNT,
+ };
+ 
+ struct pl_hook_params {
+@@ -221,9 +230,22 @@
+     // rendering. These are functionallty equivalent to `image.crop` and
+     // `target.crop`, respectively, but `src_rect` in particular may change as
+     // a result of previous hooks being executed. (e.g. prescalers)
+-    pl_rect2df src_rect;
+-    pl_rect2d dst_rect;
+-};
++    pl_rect2df src_rect;
++    pl_rect2d dst_rect;
++
++    // Optional downstream extension for PL_HOOK_SIG_COLOR_SAMPLER. When
++    // available, this names a GLSL function with signature:
 +    //
 +    //     vec4 sample_color(vec2 pixel_offset)
 +    //
 +    // It evaluates the same direct source/color-conversion path as the current
 +    // image at a neighboring output pixel, without materializing an
 +    // intermediate texture. The offset is measured in final output pixels.
-+    //
 +    // If unavailable, sample_color is NULL and sample_color_reason explains
-+    // why. The reason pointer remains valid for the duration of the callback.
++    // why. Both pointers are valid for the duration of the hook callback.
 +    const char *sample_color;
 +    const char *sample_color_reason;
-+
-+    // For `PL_HOOK_SIG_TEX`, this contains the texture that the user should
-     // sample from.
-     //
-     // Note: This texture object is owned by the renderer, and users must not
-@@ -303,9 +320,14 @@
- // Note: Users may freely create their own instances of this struct, there is
- // nothing particularly special about `pl_mpv_user_shader_parse`.
- struct pl_hook {
--    enum pl_hook_stage stages;  // Which stages to hook on
--    enum pl_hook_sig input;     // Which input signature this hook expects
--    void *priv;                 // Arbitrary user context
-+    enum pl_hook_stage stages;  // Which stages to hook on
-+    enum pl_hook_sig input;     // Which input signature this hook expects
-+
-+    // Request the optional sample_color helper above. This is currently only
-+    // provided to PL_HOOK_SIG_COLOR hooks at PL_HOOK_OUTPUT.
-+    bool requires_color_sampler;
-+
-+    void *priv;                 // Arbitrary user context
++};
  
-     // Custom tunable shader parameters exported by this hook. These may be
-     // updated at any time by the user, to influence the behavior of the hook.
+ struct pl_hook_res {
+     // If true, the hook is assumed to have "failed" or errored in some way,
 diff --git a/src/renderer.c b/src/renderer.c
 --- a/src/renderer.c
 +++ b/src/renderer.c
-@@ -1039,75 +1039,312 @@
+@@ -1039,75 +1039,304 @@
      }
  }
  
@@ -159,12 +161,10 @@ diff --git a/src/renderer.c b/src/renderer.c
 +    return NULL_IDENT;
 +}
 +
-+// Builds a callable SDR source sampler inside the current OUTPUT shader.
-+//
-+// This deliberately reuses the source texture descriptors that are already
-+// present in the in-progress render shader. If those descriptors are gone, the
-+// renderer has already materialized or otherwise transformed the source path,
-+// so replaying it without an intermediate texture would no longer be exact.
++// Build an output-pixel neighborhood sampler by replaying libplacebo's direct
++// source-plane path inside the current OUTPUT shader. No image is materialized:
++// the generated helper reuses the exact sampled-texture descriptors already
++// owned by the current shader.
 +static bool hook_build_color_sampler(struct pass_state *pass, pl_shader sh,
 +                                     const char **out_name,
 +                                     const char **out_reason)
@@ -195,8 +195,6 @@ diff --git a/src/renderer.c b/src/renderer.c
 +        HOOK_UNAVAILABLE("alpha/blended output is not replayable");
 +    }
 +
-+    // These operations alter the source or output in ways that cannot be
-+    // reconstructed from the still-bound source planes alone.
 +    if (image->field != PL_FIELD_NONE ||
 +        image->film_grain.type != PL_FILM_GRAIN_NONE ||
 +        image->lut || target->lut || params->lut ||
@@ -248,9 +246,6 @@ diff --git a/src/renderer.c b/src/renderer.c
 +            HOOK_UNAVAILABLE("source plane format is not replayable");
 +        }
 +
-+        // The decisive zero-FBO condition: reuse the exact descriptor already
-+        // bound by libplacebo's current RGB shader. No texture is rebound and
-+        // no duplicate descriptor is created.
 +        plane_tex[p] = hook_find_sampled_texture(sh, tex);
 +        if (!plane_tex[p])
 +            HOOK_UNAVAILABLE("source RGB path was already materialized");
@@ -265,9 +260,6 @@ diff --git a/src/renderer.c b/src/renderer.c
 +    if (!have_component[0] || !have_component[1] || !have_component[2])
 +        HOOK_UNAVAILABLE("source RGB components are incomplete");
 +
-+    // Build the exact color-domain conversion as a callable COLOR -> COLOR
-+    // subpass. The source signal normalization is important for formats such
-+    // as P010, whose logical 10-bit values occupy a wider sampled container.
 +    pl_shader conversion = pl_dispatch_begin_ex(rr->dp, true);
 +    if (!sh_require(conversion, PL_SHADER_SIG_COLOR, 0, 0)) {
 +        pl_dispatch_abort(rr->dp, &conversion);
@@ -433,17 +425,37 @@ diff --git a/src/renderer.c b/src/renderer.c
 +
 +        case PL_HOOK_SIG_COLOR:
 +            hparams.sh = img_sh(pass, img);
-+            if (hook->requires_color_sampler) {
-+                if (stage != PL_HOOK_OUTPUT) {
-+                    hparams.sample_color_reason =
-+                            "color sampler is only available at OUTPUT";
-+                } else {
-+                    hook_build_color_sampler(pass, hparams.sh,
-+                                             &hparams.sample_color,
-+                                             &hparams.sample_color_reason);
-+                }
++            break;
++
++        case PL_HOOK_SIG_COLOR_SAMPLER:
++            hparams.sh = img_sh(pass, img);
++            if (stage != PL_HOOK_OUTPUT) {
++                hparams.sample_color_reason =
++                        "color sampler is only available at OUTPUT";
++            } else {
++                hook_build_color_sampler(pass, hparams.sh,
++                                         &hparams.sample_color,
++                                         &hparams.sample_color_reason);
 +            }
 +            break;
  
          case PL_HOOK_SIG_COUNT:
              pl_unreachable();
+@@ -1173,11 +1402,12 @@
+             };
+             break;
+ 
+-        case PL_HOOK_SIG_COUNT:
+-            pl_unreachable();
+-        }
+-
+-        // a hook was performed successfully
++        case PL_HOOK_SIG_COLOR_SAMPLER:
++        case PL_HOOK_SIG_COUNT:
++            pl_unreachable();
++        }
++
++        // a hook was performed successfully
+         ret = true;
+ 
+ hook_skip:

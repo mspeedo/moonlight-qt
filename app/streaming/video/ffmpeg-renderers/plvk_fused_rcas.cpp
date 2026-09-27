@@ -8,13 +8,14 @@ void FusedRcas::initialize()
 {
     m_Hook = {};
     m_Hook.stages = PL_HOOK_OUTPUT;
+#ifdef PL_HAVE_HOOK_COLOR_SAMPLER
+    m_Hook.input = PL_HOOK_SIG_COLOR_SAMPLER;
+#else
     m_Hook.input = PL_HOOK_SIG_COLOR;
+#endif
     m_Hook.priv = this;
     m_Hook.hook = hook;
     m_Hook.signature = UINT64_C(0x4d4c465243415332); // MLFRCAS2
-#ifdef PL_HAVE_HOOK_COLOR_SAMPLER
-    m_Hook.requires_color_sampler = true;
-#endif
 }
 
 const pl_hook* FusedRcas::prepare(float strength)
