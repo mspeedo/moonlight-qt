@@ -1,0 +1,26 @@
+diff --git a/src/shaders.c b/src/shaders.c
+index 5dde382..1c9ad14 100644
+--- a/src/shaders.c
++++ b/src/shaders.c
+@@ -1,5 +1,21 @@
+ ident_t sh_desc(pl_shader sh, struct pl_shader_desc sd)
+ {
++    // pl_pass_run() requires every GPU object to appear at most once in a
++    // shader. Reuse an existing sampled-texture descriptor when both the
++    // resource and sampler state are identical. This is semantically exact
++    // and lets custom shader code alias a texture already used by a merged
++    // renderer subpass without creating a second binding for the same pl_tex.
++    if (sd.desc.type == PL_DESC_SAMPLED_TEX) {
++        for (int i = 0; i < sh->descs.num; i++) {
++            const struct pl_shader_desc *prev = &sh->descs.elem[i];
++            if (prev->desc.type == PL_DESC_SAMPLED_TEX &&
++                prev->binding.object == sd.binding.object &&
++                prev->binding.address_mode == sd.binding.address_mode &&
++                prev->binding.sample_mode == sd.binding.sample_mode)
++                return sh_ident_unpack(prev->desc.name);
++        }
++    }
++
+     switch (sd.desc.type) {
+     case PL_DESC_BUF_UNIFORM:
+     case PL_DESC_BUF_STORAGE:;

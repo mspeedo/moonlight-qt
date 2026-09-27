@@ -1,6 +1,7 @@
 #pragma once
 
 #include "renderer.h"
+#include "plvk_fused_rcas.h"
 
 #ifdef Q_OS_WIN32
 #define VK_USE_PLATFORM_WIN32_KHR
@@ -111,8 +112,9 @@ private:
     pl_vulkan m_Vulkan = nullptr;
     pl_swapchain m_Swapchain = nullptr;
     pl_renderer m_Renderer = nullptr;
-    const pl_hook* m_SharpenHook = nullptr;
-    pl_var_data* m_SharpenStrengthParam = nullptr;
+    FusedRcas m_FusedRcas;
+    bool m_AllowFusedRcas = true;
+    int m_LastSharpenPath = -1;
     pl_tex m_Textures[PL_MAX_PLANES] = {};
     pl_color_space m_LastColorspace = {};
 

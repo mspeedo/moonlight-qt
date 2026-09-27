@@ -92,81 +92,6 @@ static const char *k_OptionalDeviceExtensions[] = {
 };
 #endif
 
-static const char kRcasSharpenShader[] =
-    "//!PARAM sharpening\n"
-    "//!DESC Real-time FidelityFX RCAS sharpening strength\n"
-    "//!TYPE DYNAMIC float\n"
-    "//!MINIMUM 0.0\n"
-    "//!MAXIMUM 1.0\n"
-    "0.0\n"
-    "\n"
-    // RCAS is a presentation-resolution sharpener designed for normalized
-    // perceptual/display-referred SDR input. OUTPUT runs after libplacebo
-    // scaling, color management, and target encoding, but before overlays.
-    "//!HOOK OUTPUT\n"
-    "//!BIND HOOKED\n"
-    "//!WHEN sharpening 0 >\n"
-    "//!DESC Moonlight FidelityFX RCAS SDR sharpening\n"
-    "float rcasSafeRcp(float x)\n"
-    "{\n"
-    "    return abs(x) > 1e-6 ? 1.0 / x : 0.0;\n"
-    "}\n"
-    "\n"
-    "vec4 hook()\n"
-    "{\n"
-    "    vec3 b = HOOKED_texOff(vec2( 0.0, -1.0)).rgb;\n"
-    "    vec3 d = HOOKED_texOff(vec2(-1.0,  0.0)).rgb;\n"
-    "    vec4 e4 = HOOKED_texOff(vec2( 0.0,  0.0));\n"
-    "    vec3 e = e4.rgb;\n"
-    "    vec3 f = HOOKED_texOff(vec2( 1.0,  0.0)).rgb;\n"
-    "    vec3 h = HOOKED_texOff(vec2( 0.0,  1.0)).rgb;\n"
-    "\n"
-    "    // Current FidelityFX RCAS luma/noise detector. RCAS operates on the\n"
-    "    // five-tap cross and reduces sharpening on likely noise/grain.\n"
-    "    float bL = b.b * 0.5 + b.r * 0.5 + b.g;\n"
-    "    float dL = d.b * 0.5 + d.r * 0.5 + d.g;\n"
-    "    float eL = e.b * 0.5 + e.r * 0.5 + e.g;\n"
-    "    float fL = f.b * 0.5 + f.r * 0.5 + f.g;\n"
-    "    float hL = h.b * 0.5 + h.r * 0.5 + h.g;\n"
-    "    float maxL = max(max(max(bL, dL), max(eL, fL)), hL);\n"
-    "    float minL = min(min(min(bL, dL), min(eL, fL)), hL);\n"
-    "    float nz = 0.25 * (bL + dL + fL + hL) - eL;\n"
-    "    nz = clamp(abs(nz) * rcasSafeRcp(maxL - minL), 0.0, 1.0);\n"
-    "    nz = -0.5 * nz + 1.0;\n"
-    "\n"
-    "    // Ring min/max and the modern RCAS clipping limiters. The lower\n"
-    "    // limiter multiplier is the current FidelityFX fix that prevents\n"
-    "    // possible negative RCAS output in difficult dark-edge cases.\n"
-    "    vec3 mn4 = min(min(b, d), min(f, h));\n"
-    "    vec3 mx4 = max(max(b, d), max(f, h));\n"
-    "    float minRingL = min(min(bL, dL), min(fL, hL));\n"
-    "    float lowerLimiterMultiplier = clamp(eL / max(minRingL, 1e-6), 0.0, 1.0);\n"
-    "\n"
-    "    vec3 hitMin = mn4 * vec3(\n"
-    "        rcasSafeRcp(4.0 * mx4.r),\n"
-    "        rcasSafeRcp(4.0 * mx4.g),\n"
-    "        rcasSafeRcp(4.0 * mx4.b)) * lowerLimiterMultiplier;\n"
-    "    vec3 hitMax = (vec3(1.0) - mx4) * vec3(\n"
-    "        rcasSafeRcp(4.0 * mn4.r - 4.0),\n"
-    "        rcasSafeRcp(4.0 * mn4.g - 4.0),\n"
-    "        rcasSafeRcp(4.0 * mn4.b - 4.0));\n"
-    "\n"
-    "    vec3 lobeRGB = max(-hitMin, hitMax);\n"
-    "    float lobe = max(-0.1875, min(max(max(lobeRGB.r, lobeRGB.g), lobeRGB.b), 0.0));\n"
-    "\n"
-    "    // FsrRcasCon() converts its public 'stops' control to a 0..1 linear\n"
-    "    // multiplier with exp2(-stops). Moonlight exposes that resulting\n"
-    "    // multiplier directly: 0.0 = true bypass, 1.0 = maximum RCAS.\n"
-    "    lobe *= clamp(sharpening, 0.0, 1.0);\n"
-    "\n"
-    "    // Match the current FSR3 RCAS path with denoise enabled.\n"
-    "    lobe *= nz;\n"
-    "\n"
-    "    float rcpL = rcasSafeRcp(4.0 * lobe + 1.0);\n"
-    "    vec3 sharpened = (lobe * (b + d + h + f) + e) * rcpL;\n"
-    "    return vec4(sharpened, e4.a);\n"
-    "}\n";
-
 static void pl_log_cb(void*, enum pl_log_level level, const char *msg)
 {
     switch (level) {
@@ -245,10 +170,7 @@ PlVkRenderer::~PlVkRenderer()
     SDL_assert(!m_HasPendingSwapchainFrame);
 
     if (m_Vulkan != nullptr) {
-        if (m_SharpenHook != nullptr) {
-            pl_mpv_user_shader_destroy(&m_SharpenHook);
-            m_SharpenStrengthParam = nullptr;
-        }
+        m_FusedRcas.reset();
 
 #ifdef PLVK_USE_EARLY_RENDER_TO_WAIT
         pl_tex_destroy(m_Vulkan->gpu, &m_EmptyOverlay.tex);
@@ -628,34 +550,11 @@ bool PlVkRenderer::initialize(PDECODER_PARAMETERS params)
         return false;
     }
 
-    // Parse the sharpening hook once. Its strength is a DYNAMIC shader
-    // parameter, so normal real-time value changes only update a runtime
-    // variable and do not require shader recompilation.
-    m_SharpenHook = pl_mpv_user_shader_parse(m_Vulkan->gpu,
-                                             kRcasSharpenShader,
-                                             sizeof(kRcasSharpenShader) - 1);
-    if (m_SharpenHook != nullptr) {
-        for (int i = 0; i < m_SharpenHook->num_parameters; ++i) {
-            const pl_hook_par& parameter = m_SharpenHook->parameters[i];
-            if (parameter.name != nullptr &&
-                    SDL_strcmp(parameter.name, "sharpening") == 0 &&
-                    parameter.type == PL_VAR_FLOAT &&
-                    parameter.mode == PL_HOOK_PAR_DYNAMIC) {
-                m_SharpenStrengthParam = parameter.data;
-                break;
-            }
-        }
-
-        if (m_SharpenStrengthParam == nullptr) {
-            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                        "libplacebo sharpening hook has no dynamic strength parameter");
-            pl_mpv_user_shader_destroy(&m_SharpenHook);
-        }
-    }
-    else {
-        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                    "Unable to initialize libplacebo sharpening hook");
-    }
+    // Sharpening is implemented only by the fused decoder-plane hook. There is
+    // intentionally no legacy OUTPUT-texture fallback because that path creates
+    // the full-resolution intermediate RGB texture this implementation avoids.
+    m_AllowFusedRcas = !qEnvironmentVariableIsSet("MOONLIGHT_DISABLE_FUSED_RCAS");
+    m_FusedRcas.initialize(m_Log, m_Vulkan->gpu);
 
 #ifdef PLVK_USE_EARLY_RENDER_TO_WAIT
     SDL_Surface *emptySurface = SDL_CreateRGBSurfaceWithFormat(0, 1, 1, 0, SDL_PIXELFORMAT_ARGB8888);
@@ -1241,11 +1140,15 @@ void PlVkRenderer::renderFrame(AVFrame *frame)
     const bool useSaturation = imageState.enabled && imageState.saturation != 1.0f;
     const bool hdrInput = pl_color_space_is_hdr(&mappedFrame.color);
     ImageAdjustments::setHdrStreamActive(hdrInput);
-    const bool useSharpening = imageState.enabled &&
+    const bool sharpeningRequested = imageState.enabled &&
             !hdrInput &&
-            imageState.sharpening > 0.0f &&
-            m_SharpenHook != nullptr &&
-            m_SharpenStrengthParam != nullptr;
+            imageState.sharpening > 0.0f;
+    const pl_hook* fusedHook = sharpeningRequested && m_AllowFusedRcas
+            ? m_FusedRcas.prepare(m_Renderer, mappedFrame, targetFrame,
+                                  useSaturation ? imageState.saturation : 1.0f,
+                                  imageState.sharpening)
+            : nullptr;
+    const bool useSharpening = fusedHook != nullptr;
 
     const pl_render_params* activeRenderParams = &pl_render_fast_params;
     pl_render_params adjustedRenderParams;
@@ -1270,8 +1173,7 @@ void PlVkRenderer::renderFrame(AVFrame *frame)
         }
 
         if (useSharpening) {
-            m_SharpenStrengthParam->f = imageState.sharpening;
-            sharpenHooks[0] = m_SharpenHook;
+            sharpenHooks[0] = fusedHook;
             adjustedRenderParams.hooks = sharpenHooks;
             adjustedRenderParams.num_hooks = 1;
         }
@@ -1279,7 +1181,35 @@ void PlVkRenderer::renderFrame(AVFrame *frame)
         activeRenderParams = &adjustedRenderParams;
     }
 
-    if (!pl_render_image(m_Renderer, &mappedFrame, &targetFrame, activeRenderParams)) {
+    const int sharpenPath = !sharpeningRequested ? 0 : useSharpening ? 1 : 2;
+    if (sharpenPath != m_LastSharpenPath) {
+        if (sharpenPath == 1) {
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "RCAS path: fused RGB, no sharpening FBO");
+        }
+        else if (sharpenPath == 2) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "RCAS unavailable: %s",
+                        m_AllowFusedRcas ? m_FusedRcas.reason() : "fused sharpening disabled");
+        }
+        else {
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "RCAS path: bypass");
+        }
+        m_LastSharpenPath = sharpenPath;
+    }
+
+    bool renderOk = pl_render_image(m_Renderer, &mappedFrame, &targetFrame, activeRenderParams);
+    if (useSharpening && (m_FusedRcas.failed() ||
+            (pl_renderer_get_errors(m_Renderer).errors & PL_RENDER_ERR_HOOKS))) {
+        // A fused hook failure disables sharpening for subsequent frames. Do
+        // not retry through the legacy OUTPUT hook: that would reintroduce the
+        // intermediate full-resolution RGB sharpening texture.
+        m_AllowFusedRcas = false;
+        m_LastSharpenPath = -1;
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "Fused RCAS failed; sharpening disabled");
+    }
+    if (!renderOk) {
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                      "pl_render_image() failed");
         // NB: We must fallthrough to call pl_swapchain_submit_frame()

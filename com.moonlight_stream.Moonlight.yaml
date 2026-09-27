@@ -45,6 +45,8 @@ modules:
         commit: e2972fdd09adacd383656738d7d280f0cd84a761
       - type: patch
         path: libplacebo-disable-internally-synchronized-queues.patch
+      - type: patch
+        path: libplacebo-deduplicate-sampled-textures.patch
 
   - name: libdecor
     buildsystem: meson
