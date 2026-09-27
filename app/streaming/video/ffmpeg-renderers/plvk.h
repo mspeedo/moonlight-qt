@@ -114,6 +114,7 @@ private:
     pl_renderer m_Renderer = nullptr;
     FusedRcas m_FusedRcas;
     bool m_AllowFusedRcas = true;
+    bool m_SharpeningAvailabilityKnown = false;
     int m_LastSharpenPath = -1;
     pl_tex m_Textures[PL_MAX_PLANES] = {};
     pl_color_space m_LastColorspace = {};

@@ -37,6 +37,15 @@ inline std::atomic<bool>& hdrStreamActiveState()
     return value;
 }
 
+inline std::atomic<bool>& sharpeningAvailableState()
+{
+    // Conservative until the active renderer has probed its actual source and
+    // target layout. Non-libplacebo renderers therefore never advertise a
+    // sharpening path they don't implement.
+    static std::atomic<bool> value { false };
+    return value;
+}
+
 inline std::atomic<bool>& osdOpenState()
 {
     static std::atomic<bool> value { false };
@@ -72,6 +81,7 @@ inline void initialize(float sharpening, float saturation, bool enabled)
                            std::memory_order_relaxed);
     enabledState().store(enabled, std::memory_order_relaxed);
     hdrStreamActiveState().store(false, std::memory_order_relaxed);
+    sharpeningAvailableState().store(false, std::memory_order_relaxed);
     osdOpenState().store(false, std::memory_order_release);
     selectedRowState().store(0, std::memory_order_relaxed);
 }
@@ -112,6 +122,16 @@ inline bool isHdrStreamActive()
 inline void setHdrStreamActive(bool active)
 {
     hdrStreamActiveState().store(active, std::memory_order_relaxed);
+}
+
+inline bool isSharpeningAvailable()
+{
+    return sharpeningAvailableState().load(std::memory_order_relaxed);
+}
+
+inline void setSharpeningAvailable(bool available)
+{
+    sharpeningAvailableState().store(available, std::memory_order_relaxed);
 }
 
 inline bool isOsdOpen()

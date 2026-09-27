@@ -554,6 +554,8 @@ bool PlVkRenderer::initialize(PDECODER_PARAMETERS params)
     // intentionally no legacy OUTPUT-texture fallback because that path creates
     // the full-resolution intermediate RGB texture this implementation avoids.
     m_AllowFusedRcas = !qEnvironmentVariableIsSet("MOONLIGHT_DISABLE_FUSED_RCAS");
+    m_SharpeningAvailabilityKnown = !m_AllowFusedRcas;
+    ImageAdjustments::setSharpeningAvailable(false);
     m_FusedRcas.initialize(m_Log, m_Vulkan->gpu);
 
 #ifdef PLVK_USE_EARLY_RENDER_TO_WAIT
@@ -1143,12 +1145,22 @@ void PlVkRenderer::renderFrame(AVFrame *frame)
     const bool sharpeningRequested = imageState.enabled &&
             !hdrInput &&
             imageState.sharpening > 0.0f;
-    const pl_hook* fusedHook = sharpeningRequested && m_AllowFusedRcas
+
+    // Probe once on the first SDR frame even at 0.0 sharpening, so the OSD can
+    // truthfully report availability before the user raises the slider. Once
+    // known, zero-sharpening frames stay on the stock fast path with no probe.
+    const bool probeSharpening = !hdrInput && m_AllowFusedRcas &&
+            (sharpeningRequested || !m_SharpeningAvailabilityKnown);
+    const pl_hook* fusedHook = probeSharpening
             ? m_FusedRcas.prepare(m_Renderer, mappedFrame, targetFrame,
                                   useSaturation ? imageState.saturation : 1.0f,
                                   imageState.sharpening)
             : nullptr;
-    const bool useSharpening = fusedHook != nullptr;
+    if (probeSharpening) {
+        m_SharpeningAvailabilityKnown = true;
+        ImageAdjustments::setSharpeningAvailable(fusedHook != nullptr);
+    }
+    const bool useSharpening = sharpeningRequested && fusedHook != nullptr;
 
     const pl_render_params* activeRenderParams = &pl_render_fast_params;
     pl_render_params adjustedRenderParams;
@@ -1205,6 +1217,8 @@ void PlVkRenderer::renderFrame(AVFrame *frame)
         // not retry through the legacy OUTPUT hook: that would reintroduce the
         // intermediate full-resolution RGB sharpening texture.
         m_AllowFusedRcas = false;
+        m_SharpeningAvailabilityKnown = true;
+        ImageAdjustments::setSharpeningAvailable(false);
         m_LastSharpenPath = -1;
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                      "Fused RCAS failed; sharpening disabled");

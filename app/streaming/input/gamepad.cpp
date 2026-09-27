@@ -48,6 +48,9 @@ void updateImageAdjustmentsOverlayText()
     const ImageAdjustments::State state = ImageAdjustments::snapshot();
     const int selectedRow = ImageAdjustments::selectedRow();
     const bool hdrStreamActive = ImageAdjustments::isHdrStreamActive();
+    const bool sharpeningAvailable = ImageAdjustments::isSharpeningAvailable();
+    const char* sharpeningStatus = hdrStreamActive ? "  [OFF in HDR]" :
+            !sharpeningAvailable ? "  [UNAVAILABLE]" : "";
 
     char text[256];
     SDL_snprintf(text, sizeof(text),
@@ -59,7 +62,7 @@ void updateImageAdjustmentsOverlayText()
                  state.saturation,
                  selectedRow == 1 ? ">" : " ",
                  state.sharpening,
-                 hdrStreamActive ? "  [OFF in HDR]" : "");
+                 sharpeningStatus);
 
     session->getOverlayManager().updateOverlayText(Overlay::OverlayImageAdjustments,
                                                     text);
