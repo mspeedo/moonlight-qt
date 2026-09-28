@@ -134,9 +134,13 @@ vec3 mlRcas(vec3 b, vec3 d, vec3 e, vec3 f, vec3 h, float sharpening)
     float lobe = max(-0.1875,
                      min(max(max(lobeRGB.r, lobeRGB.g), lobeRGB.b), 0.0));
 
-    // Moonlight exposes the resulting RCAS multiplier directly:
-    // 0.0 = true bypass, 1.0 = maximum RCAS.
-    lobe *= clamp(sharpening, 0.0, 1.0);
+    // Match AMD's public FSR sharpness mapping for every non-zero
+    // Moonlight step: stops = 2 - 2 * sharpness, multiplier = exp2(-stops).
+    // Keep 0.0 as a Moonlight-specific true bypass instead of AMD's 0.25x
+    // minimum RCAS strength.
+    float strength = clamp(sharpening, 0.0, 1.0);
+    strength = strength > 0.0 ? exp2(2.0 * strength - 2.0) : 0.0;
+    lobe *= strength;
 
     // Match the current FSR3 RCAS path with denoise enabled.
     lobe *= nz;
