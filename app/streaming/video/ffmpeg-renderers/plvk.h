@@ -65,6 +65,7 @@ private:
     static void lockQueue(AVHWDeviceContext *dev_ctx, uint32_t queue_family, uint32_t index);
     static void unlockQueue(AVHWDeviceContext *dev_ctx, uint32_t queue_family, uint32_t index);
     static void overlayUploadComplete(void* opaque);
+    static pl_hook_res sharpenHook(void* priv, const pl_hook_params* params);
 
     void beginRenderTiming();
     void endRenderTiming();
@@ -111,8 +112,8 @@ private:
     pl_vulkan m_Vulkan = nullptr;
     pl_swapchain m_Swapchain = nullptr;
     pl_renderer m_Renderer = nullptr;
-    const pl_hook* m_SharpenHook = nullptr;
-    pl_var_data* m_SharpenStrengthParam = nullptr;
+    pl_hook m_SharpenHook = {};
+    float m_SharpenStrength = 0.0f;
     pl_tex m_Textures[PL_MAX_PLANES] = {};
     pl_color_space m_LastColorspace = {};
 
