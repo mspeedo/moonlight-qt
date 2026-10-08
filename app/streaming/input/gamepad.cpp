@@ -88,6 +88,27 @@ void toggleImageAdjustmentsOverlay()
     const bool open = overlayManager.isOverlayEnabled(
             Overlay::OverlayImageAdjustments);
 
+    if (overlayManager.isOverlayEnabled(Overlay::OverlayDebug)) {
+        // Reuse the existing shortcut to edit the integrated section while
+        // the telemetry OSD stays visible. With telemetry hidden, the same
+        // shortcut continues to toggle the original dedicated OSD.
+        if (open) {
+            overlayManager.setOverlayState(Overlay::OverlayImageAdjustments, false);
+            ImageAdjustments::setOsdOpen(false);
+        }
+
+        const bool editing = ImageAdjustments::isMainOsdEditing();
+        ImageAdjustments::setMainOsdEditing(!editing);
+        if (!editing) {
+            ImageAdjustments::setSelectedRow(0);
+        }
+        else {
+            persistImageAdjustments();
+        }
+        overlayManager.imageAdjustmentsChanged();
+        return;
+    }
+
     if (open) {
         // Stop Y interception before returning to normal controller handling.
         overlayManager.setOverlayState(Overlay::OverlayImageAdjustments, false);
@@ -107,7 +128,8 @@ void toggleImageAdjustmentsOverlay()
 
 bool handleImageAdjustmentsControl(const SDL_ControllerButtonEvent* event)
 {
-    if (!ImageAdjustments::isOsdOpen() ||
+    if ((!ImageAdjustments::isOsdOpen() &&
+            !ImageAdjustments::isMainOsdEditing()) ||
             !isImageAdjustmentControl(event->button)) {
         return false;
     }
@@ -166,7 +188,15 @@ bool handleImageAdjustmentsControl(const SDL_ControllerButtonEvent* event)
     }
 
     if (changed) {
-        updateImageAdjustmentsOverlayText();
+        Session* session = Session::get();
+        if (session != nullptr) {
+            if (ImageAdjustments::isOsdOpen()) {
+                updateImageAdjustmentsOverlayText();
+            }
+            if (session->getOverlayManager().isOverlayEnabled(Overlay::OverlayDebug)) {
+                session->getOverlayManager().imageAdjustmentsChanged();
+            }
+        }
     }
     return true;
 }

@@ -43,6 +43,14 @@ inline std::atomic<bool>& osdOpenState()
     return value;
 }
 
+// The main telemetry OSD can edit image settings without opening the
+// dedicated image-adjustments overlay.
+inline std::atomic<bool>& mainOsdEditingState()
+{
+    static std::atomic<bool> value { false };
+    return value;
+}
+
 inline std::atomic<int>& selectedRowState()
 {
     static std::atomic<int> value { 0 };
@@ -73,6 +81,7 @@ inline void initialize(float sharpening, float saturation, bool enabled)
     enabledState().store(enabled, std::memory_order_relaxed);
     hdrStreamActiveState().store(false, std::memory_order_relaxed);
     osdOpenState().store(false, std::memory_order_release);
+    mainOsdEditingState().store(false, std::memory_order_release);
     selectedRowState().store(0, std::memory_order_relaxed);
 }
 
@@ -122,6 +131,16 @@ inline bool isOsdOpen()
 inline void setOsdOpen(bool open)
 {
     osdOpenState().store(open, std::memory_order_release);
+}
+
+inline bool isMainOsdEditing()
+{
+    return mainOsdEditingState().load(std::memory_order_acquire);
+}
+
+inline void setMainOsdEditing(bool editing)
+{
+    mainOsdEditingState().store(editing, std::memory_order_release);
 }
 
 inline int selectedRow()

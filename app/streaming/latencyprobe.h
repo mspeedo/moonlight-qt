@@ -422,10 +422,11 @@ private:
                                         event->cbutton.which);
             }
             else if (event->cbutton.button == SDL_CONTROLLER_BUTTON_Y) {
-                // The dedicated image-adjustments OSD owns Y while visible.
-                // Suppress the telemetry Y watcher here, before the ordinary
-                // gamepad handler consumes the same SDL event.
-                if (!ImageAdjustments::isOsdOpen()) {
+                // Either image-adjustments editor owns Y while editing.
+                // The telemetry Y watcher must not see these presses before
+                // the ordinary gamepad handler consumes them.
+                if (!ImageAdjustments::isOsdOpen() &&
+                        !ImageAdjustments::isMainOsdEditing()) {
                     probe->onPhysicalYEvent(event->type == SDL_CONTROLLERBUTTONDOWN,
                                             event->cbutton.which);
                 }

@@ -52,6 +52,7 @@ public:
     void updateOverlayText(OverlayType type, const char* text);
     int getOverlayMaxTextLength();
     void setOverlayTextUpdated(OverlayType type);
+    void imageAdjustmentsChanged();
     void setOverlayState(OverlayType type, bool enabled);
     SDL_Color getOverlayColor(OverlayType type);
     int getOverlayFontSize(OverlayType type);
@@ -102,6 +103,7 @@ private:
     bool m_DebugOverlaySplit = false;
     bool m_DebugOverlayReady = false;
     bool m_DebugOverlayStatePending = false;
+    bool m_DebugImageAdjustmentsPending = false;
     std::uint64_t m_DebugOverlayGeneration = 0;
     char m_DebugOverlayPendingText[4096] = {};
 #endif

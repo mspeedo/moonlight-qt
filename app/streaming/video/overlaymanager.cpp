@@ -1,6 +1,7 @@
 #include "overlaymanager.h"
 #include "path.h"
 #include "settings/streamingpreferences.h"
+#include "streaming/video/imageadjustments.h"
 
 #include <array>
 #include <chrono>
@@ -17,6 +18,33 @@
 #endif
 
 using namespace Overlay;
+
+namespace {
+
+// Render these from the shared atomic settings, not from saved telemetry text.
+// Thus an adjustment stays editable even when benchmark telemetry is frozen.
+void appendMainImageAdjustments(char* text, std::size_t length)
+{
+    const auto state = ImageAdjustments::snapshot();
+    const bool editing = ImageAdjustments::isMainOsdEditing();
+    const bool hdr = ImageAdjustments::isHdrStreamActive();
+
+    char lines[320];
+    SDL_snprintf(lines, sizeof(lines),
+                 "\n\nIMAGE ADJUSTMENTS (Y): %s  %s\n"
+                 "%s Saturation        %.1f\n"
+                 "%s Sharpening        %.1f%s",
+                 state.enabled ? "ON" : "OFF",
+                 editing ? "[EDITING - D-pad]" : "[Select+L1+R1+RS to edit]",
+                 editing && ImageAdjustments::selectedRow() == 0 ? ">" : " ",
+                 state.saturation,
+                 editing && ImageAdjustments::selectedRow() == 1 ? ">" : " ",
+                 state.sharpening,
+                 hdr ? "  [OFF in HDR]" : "");
+    SDL_strlcat(text, lines, length);
+}
+
+} // namespace
 
 #ifdef HAVE_LATENCY_PROBE
 namespace {
@@ -658,6 +686,7 @@ void OverlayManager::setDebugOverlayWorkerEnabled(bool enabled)
     std::lock_guard<std::mutex> lock(m_DebugOverlayMutex);
     m_DebugOverlayReady = false;
     m_DebugOverlayStatePending = false;
+    m_DebugImageAdjustmentsPending = false;
     m_DebugOverlayEnabled = enabled;
     m_DebugOverlayPending = false;
     ++m_DebugOverlayGeneration;
@@ -750,6 +779,7 @@ void OverlayManager::debugOverlayThreadProc()
         char text[sizeof(m_DebugOverlayPendingText)];
         std::uint64_t generation;
         bool textUpdate;
+        bool imageAdjustmentsUpdate;
         bool split;
         bool ready;
         {
@@ -778,7 +808,10 @@ void OverlayManager::debugOverlayThreadProc()
                 // is updated. Wait for its explicit first-text request.
                 continue;
             }
-            textUpdate = m_DebugOverlayPending || m_DebugOverlayStatePending || !m_DebugOverlayReady;
+            imageAdjustmentsUpdate = m_DebugImageAdjustmentsPending;
+            textUpdate = m_DebugOverlayPending || m_DebugOverlayStatePending ||
+                    imageAdjustmentsUpdate || !m_DebugOverlayReady;
+            m_DebugImageAdjustmentsPending = false;
             ready = m_DebugOverlayReady;
             split = m_DebugOverlaySplit;
             generation = m_DebugOverlayGeneration;
@@ -799,9 +832,10 @@ void OverlayManager::debugOverlayThreadProc()
         if (reopened) {
             cache.background.reset();
         }
-        if (!live && !stateChanged && !reopened && ready) {
-            // Frozen text and graph stay byte-for-byte unchanged. The existing
-            // one-second stats notification cannot start a graph timer or upload.
+        if (!live && !stateChanged && !reopened && ready &&
+                !imageAdjustmentsUpdate) {
+            // Preserve frozen benchmark telemetry. Only an explicit image
+            // adjustment edit is allowed to redraw its separate control section.
             graphLive = false;
             continue;
         }
@@ -828,6 +862,7 @@ void OverlayManager::debugOverlayThreadProc()
                     frozenTextRevision = revision;
                 }
             }
+            appendMainImageAdjustments(text, sizeof(text));
             textSurface.reset(RenderTextOutlinedWrapped(m_DebugOverlayFont, text,
                     m_Overlays[OverlayDebug].color, {0, 0, 0, 255}, 4, 0));
             if (!textSurface) {
@@ -883,11 +918,41 @@ void OverlayManager::setOverlayTextUpdated(OverlayType type)
     }
 }
 
+void OverlayManager::imageAdjustmentsChanged()
+{
+#ifdef HAVE_LATENCY_PROBE
+    // The debug OSD has its own rasterization worker. Request a fresh text
+    // surface without copying decoder stats or disturbing frozen telemetry.
+    std::lock_guard<std::mutex> lock(m_DebugOverlayMutex);
+    if (m_DebugOverlayThread != nullptr && m_DebugOverlayEnabled &&
+            !m_DebugOverlayStop) {
+        m_DebugImageAdjustmentsPending = true;
+        m_DebugOverlayStatePending = true;
+        m_DebugOverlayCondition.notify_one();
+    }
+#else
+    setOverlayTextUpdated(OverlayDebug);
+#endif
+}
+
 void OverlayManager::setOverlayState(OverlayType type, bool enabled)
 {
     bool stateChanged = m_Overlays[type].enabled != enabled;
 
     m_Overlays[type].enabled = enabled;
+
+    if (type == OverlayDebug && !enabled && stateChanged &&
+            ImageAdjustments::isMainOsdEditing()) {
+        // This also handles keyboard-driven OSD closure: controller events
+        // must immediately stop being intercepted and settings must persist.
+        ImageAdjustments::setMainOsdEditing(false);
+        const auto state = ImageAdjustments::snapshot();
+        auto* prefs = StreamingPreferences::get();
+        prefs->imageSharpening = state.sharpening;
+        prefs->imageSaturation = state.saturation;
+        prefs->imageFiltersEnabled = state.enabled;
+        prefs->saveImageAdjustments();
+    }
 
 #ifdef HAVE_LATENCY_PROBE
     if (type == OverlayType::OverlayDebug && stateChanged) {
@@ -1068,8 +1133,17 @@ void OverlayManager::notifyOverlayUpdated(OverlayType type)
             // allocating a 2048-pixel-wide wrapped surface.
             wrapWidth = 0;
         }
+        const char* overlayText = m_Overlays[type].text;
+#ifndef HAVE_LATENCY_PROBE
+        char combinedDebugText[4096];
+        if (type == OverlayDebug) {
+            SDL_utf8strlcpy(combinedDebugText, overlayText, sizeof(combinedDebugText));
+            appendMainImageAdjustments(combinedDebugText, sizeof(combinedDebugText));
+            overlayText = combinedDebugText;
+        }
+#endif
         newSurface = RenderTextOutlinedWrapped(m_Overlays[type].font,
-                                               m_Overlays[type].text,
+                                               overlayText,
                                                m_Overlays[type].color,
                                                {0, 0, 0, 255},
                                                4,
