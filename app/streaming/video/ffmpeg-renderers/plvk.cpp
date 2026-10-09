@@ -678,7 +678,7 @@ bool PlVkRenderer::initialize(PDECODER_PARAMETERS params)
         m_VkPresentMode = VK_PRESENT_MODE_FIFO_KHR;
     }
     else {
-        // Use the upstream preference order unless Mailbox is explicitly preferred.
+        // Prefer Immediate with V-Sync disabled, retaining supported fallback modes.
         struct {
             VkPresentModeKHR mode;
             const char* name;
@@ -688,9 +688,6 @@ bool PlVkRenderer::initialize(PDECODER_PARAMETERS params)
             { VK_PRESENT_MODE_MAILBOX_KHR, "Mailbox" },
             { VK_PRESENT_MODE_FIFO_KHR, "FIFO" },
         };
-        if (params->preferMailbox) {
-            std::swap(presentModes[0], presentModes[2]);
-        }
 
         for (const auto& presentMode : presentModes) {
             // FIFO is always supported.

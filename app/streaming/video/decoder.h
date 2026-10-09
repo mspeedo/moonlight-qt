@@ -43,7 +43,6 @@ typedef struct _DECODER_PARAMETERS {
     int height;
     int frameRate;
     bool enableVsync;
-    bool preferMailbox;
     bool enableFramePacing;
     bool enableTransportBuffer;
     int transportBufferMs;

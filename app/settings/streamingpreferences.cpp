@@ -24,7 +24,6 @@
 #define SER_AUTOADJUSTBITRATE "autoadjustbitrate"
 #define SER_FULLSCREEN "fullscreen"
 #define SER_VSYNC "vsync"
-#define SER_PREFER_MAILBOX "prefermailbox"
 #define SER_GAMEOPTS "gameopts"
 #define SER_HOSTAUDIO "hostaudio"
 #define SER_MULTICONT "multicontroller"
@@ -144,7 +143,6 @@ void StreamingPreferences::reload()
     unlockBitrate = settings.value(SER_UNLOCK_BITRATE, false).toBool();
     autoAdjustBitrate = settings.value(SER_AUTOADJUSTBITRATE, true).toBool();
     enableVsync = settings.value(SER_VSYNC, true).toBool();
-    preferMailbox = settings.value(SER_PREFER_MAILBOX, false).toBool();
     gameOptimizations = settings.value(SER_GAMEOPTS, true).toBool();
     playAudioOnHost = settings.value(SER_HOSTAUDIO, false).toBool();
     multiController = settings.value(SER_MULTICONT, true).toBool();
@@ -358,7 +356,6 @@ void StreamingPreferences::save()
     settings.setValue(SER_UNLOCK_BITRATE, unlockBitrate);
     settings.setValue(SER_AUTOADJUSTBITRATE, autoAdjustBitrate);
     settings.setValue(SER_VSYNC, enableVsync);
-    settings.setValue(SER_PREFER_MAILBOX, preferMailbox);
     settings.setValue(SER_GAMEOPTS, gameOptimizations);
     settings.setValue(SER_HOSTAUDIO, playAudioOnHost);
     settings.setValue(SER_MULTICONT, multiController);
