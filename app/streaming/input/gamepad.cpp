@@ -587,10 +587,10 @@ void SdlInputHandler::handleControllerButtonEvent(SDL_ControllerButtonEvent* eve
         return;
     }
 
-    // Handle Select+L1+R1+Right Stick as the dedicated image-adjustments
+    // Handle L1+R1+Right Stick as the dedicated image-adjustments
     // OSD toggle. It deliberately avoids A/B/Y (benchmark/telemetry controls),
     // X (debug OSD), and Start (quit/mouse-emulation shortcuts).
-    if (state->buttons == (BACK_FLAG | LB_FLAG | RB_FLAG | RS_CLK_FLAG)) {
+    if (state->buttons == (LB_FLAG | RB_FLAG | RS_CLK_FLAG)) {
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                     "Detected image adjustments toggle gamepad combo");
 
