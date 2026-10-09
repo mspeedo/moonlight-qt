@@ -35,7 +35,7 @@ void appendMainImageAdjustments(char* text, std::size_t length)
                  "%s Saturation        %.1f\n"
                  "%s Sharpening        %.1f%s",
                  state.enabled ? "ON" : "OFF",
-                 editing ? "[EDITING - D-pad]" : "[Select+L1+R1+RS to edit]",
+                 editing ? "[EDITING - D-pad]" : "[L1+R1+RS to edit]",
                  editing && ImageAdjustments::selectedRow() == 0 ? ">" : " ",
                  state.saturation,
                  editing && ImageAdjustments::selectedRow() == 1 ? ">" : " ",
