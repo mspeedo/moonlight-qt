@@ -124,7 +124,11 @@ NvPairingManager::getSignatureFromCert(X509* cert)
 #else
         reinterpret_cast<const char*>(ASN1_STRING_get0_data(asnSignature)),
 #endif
+#if (OPENSSL_VERSION_NUMBER < 0x40100000L)
         ASN1_STRING_length(asnSignature)
+#else
+        ASN1_STRING_get_length(asnSignature)
+#endif
     );
 }
 
@@ -140,6 +144,9 @@ NvPairingManager::getSignatureFromPemCert(const QByteArray& certificate)
 
     X509* cert = PEM_read_bio_X509(bio, nullptr, nullptr, nullptr);
     BIO_free_all(bio);
+    if (cert == nullptr) {
+        return QByteArray();
+    }
 
     QByteArray signature = getSignatureFromCert(cert);
     X509_free(cert);
@@ -159,11 +166,21 @@ NvPairingManager::verifySignature(const QByteArray& data, const QByteArray& sign
 
     X509* cert = PEM_read_bio_X509(bio, nullptr, nullptr, nullptr);
     BIO_free_all(bio);
+    if (cert == nullptr) {
+        return false;
+    }
 
     EVP_PKEY* pubKey = X509_get_pubkey(cert);
-    THROW_BAD_ALLOC_IF_NULL(pubKey);
+    if (pubKey == nullptr) {
+        X509_free(cert);
+        return false;
+    }
 
+#if (OPENSSL_VERSION_NUMBER < 0x10100000L)
     EVP_MD_CTX* mdctx = EVP_MD_CTX_create();
+#else
+    EVP_MD_CTX* mdctx = EVP_MD_CTX_new();
+#endif
     THROW_BAD_ALLOC_IF_NULL(mdctx);
 
     EVP_DigestVerifyInit(mdctx, nullptr, EVP_sha256(), nullptr, pubKey);
@@ -171,7 +188,11 @@ NvPairingManager::verifySignature(const QByteArray& data, const QByteArray& sign
     int result = EVP_DigestVerifyFinal(mdctx, reinterpret_cast<unsigned char*>(const_cast<char*>(signature.data())), signature.length());
 
     EVP_PKEY_free(pubKey);
+#if (OPENSSL_VERSION_NUMBER < 0x10100000L)
     EVP_MD_CTX_destroy(mdctx);
+#else
+    EVP_MD_CTX_free(mdctx);
+#endif
     X509_free(cert);
 
     return result > 0;
@@ -180,7 +201,11 @@ NvPairingManager::verifySignature(const QByteArray& data, const QByteArray& sign
 QByteArray
 NvPairingManager::signMessage(const QByteArray& message)
 {
-    EVP_MD_CTX *ctx = EVP_MD_CTX_create();
+#if (OPENSSL_VERSION_NUMBER < 0x10100000L)
+    EVP_MD_CTX* ctx = EVP_MD_CTX_create();
+#else
+    EVP_MD_CTX* ctx = EVP_MD_CTX_new();
+#endif
     THROW_BAD_ALLOC_IF_NULL(ctx);
 
     EVP_DigestSignInit(ctx, NULL, EVP_sha256(), NULL, m_PrivateKey);
@@ -192,7 +217,11 @@ NvPairingManager::signMessage(const QByteArray& message)
     QByteArray signature((int)signatureLength, 0);
     EVP_DigestSignFinal(ctx, reinterpret_cast<unsigned char*>(signature.data()), &signatureLength);
 
+#if (OPENSSL_VERSION_NUMBER < 0x10100000L)
     EVP_MD_CTX_destroy(ctx);
+#else
+    EVP_MD_CTX_free(ctx);
+#endif
 
     return signature;
 }
@@ -206,7 +235,7 @@ NvPairingManager::saltPin(const QByteArray& salt, QString pin)
 NvPairingManager::PairState
 NvPairingManager::pair(QString appVersion, QString pin, QSslCertificate& serverCert)
 {
-    int serverMajorVersion = NvHTTP::parseQuad(appVersion).at(0);
+    int serverMajorVersion = NvHTTP::parseQuad(appVersion).value(0);
     qInfo() << "Pairing with server generation:" << serverMajorVersion;
 
     QCryptographicHash::Algorithm hashAlgo;
@@ -278,7 +307,7 @@ NvPairingManager::pair(QString appVersion, QString pin, QSslCertificate& serverC
     }
 
     QByteArray challengeResponseData = decrypt(m_Http.getXmlStringFromHex(challengeXml, "challengeresponse"), aesKey);
-    if (challengeResponseData.size() < hashLength) {
+    if (challengeResponseData.size() < hashLength + 16) {
         qCritical() << "Invalid challengeresponse at stage #2";
         m_Http.openConnectionToString(m_Http.m_BaseUrlHttp, "unpair", nullptr, REQUEST_TIMEOUT_MS);
         return PairState::FAILED;

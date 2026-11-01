@@ -1,5 +1,6 @@
 #include "pacer.h"
 #include "streaming/streamutils.h"
+#include "streaming/session.h"
 #include "streaming/streampipelinetelemetry.h"
 
 #ifdef Q_OS_WIN32
@@ -66,6 +67,9 @@ Pacer::~Pacer()
         SDL_WaitThread(m_RenderThread, nullptr);
     }
     else {
+        // Stop any further overlay callbacks
+        Session::get()->getOverlayManager().setOverlayRenderer(nullptr);
+
         // Notify the renderer that it is being destroyed soon
         // NB: This must happen on the same thread that calls renderFrame().
         m_VsyncRenderer->cleanupRenderContext();
@@ -117,13 +121,20 @@ int Pacer::vsyncThread(void *context)
     while (!me->m_Stopping) {
         if (async) {
             // Wait for the VSync source to invoke signalVsync() or 100ms to elapse
-            me->m_FrameQueueLock.lock();
+            QMutexLocker locker(&me->m_FrameQueueLock);
             me->m_VsyncSignalled.wait(&me->m_FrameQueueLock, 100);
-            me->m_FrameQueueLock.unlock();
         }
         else {
             // Let the VSync source wait in the context of our thread
-            me->m_VsyncSource->waitForVsync();
+            if (!me->m_VsyncSource->waitForVsync()) {
+                // Fall back to a fixed delay if the VSync source fails
+                //
+                // NB: We don't actually expect signalVsync() to be called, since
+                // this is a synchronous VSync source, but we wait on m_VsyncSignalled
+                // anyway so that the destructor can immediately wake us on shutdown.
+                QMutexLocker locker(&me->m_FrameQueueLock);
+                me->m_VsyncSignalled.wait(&me->m_FrameQueueLock, 1000 / me->m_DisplayFps);
+            }
         }
 
         if (me->m_Stopping) {
@@ -182,6 +193,9 @@ int Pacer::renderThread(void* context)
 
         me->renderFrame(frame);
     }
+
+    // Stop any further overlay callbacks
+    Session::get()->getOverlayManager().setOverlayRenderer(nullptr);
 
     // Notify the renderer that it is being destroyed soon
     // NB: This must happen on the same thread that calls renderFrame().
@@ -264,7 +278,7 @@ void Pacer::handleVsync(int timeUntilNextVsyncMillis)
             return;
         }
 
-        if (m_Stopping) {
+        if (m_Stopping || m_PacingQueue.isEmpty()) {
             m_FrameQueueLock.unlock();
             return;
         }
@@ -335,6 +349,12 @@ bool Pacer::initialize(SDL_Window* window, int maxVideoFps, bool enablePacing, b
         m_VsyncThread = SDL_CreateThread(Pacer::vsyncThread, "PacerVsync", this);
     }
 
+    // Allow the renderer to perform final preparations for rendering
+    m_VsyncRenderer->prepareToRender();
+
+    // Tell overlay manager to use this frontend renderer
+    Session::get()->getOverlayManager().setOverlayRenderer(m_VsyncRenderer);
+
     if (m_VsyncRenderer->isRenderThreadSupported()) {
         m_RenderThread = SDL_CreateThread(Pacer::renderThread, "PacerRender", this);
     }
@@ -356,6 +376,7 @@ void Pacer::renderFrame(AVFrame* frame)
     // Resolve the frame identity before taking the semantic render-start clock.
     // After the timestamp, armRenderStart() is an inline TLS store and then the
     // very next operation is the actual frontend renderer call.
+    m_VsyncRenderer->acquireRenderLock();
     const bool pipelineTelemetryActive = StreamPipelineTelemetry::isActiveFast();
     std::uint32_t pipelineFrameNumber = 0;
     std::uint64_t pipelineRenderStartUs = 0;
@@ -372,6 +393,7 @@ void Pacer::renderFrame(AVFrame* frame)
                     pipelineFrameNumber, pipelineRenderStartUs);
         StreamPipelineTelemetry::renderEnd();
     }
+    m_VsyncRenderer->releaseRenderLock();
     uint64_t afterRender = LiGetMicroseconds();
 
     m_VideoStats->totalRenderTimeUs += (afterRender - beforeRender);
@@ -390,7 +412,7 @@ void Pacer::renderFrame(AVFrame* frame)
     }
 
     // Drop frames if we have too many queued up for a while
-    m_FrameQueueLock.lock();
+    QMutexLocker frameQueueLocker(&m_FrameQueueLock);
 
     int frameDropTarget;
 
@@ -423,14 +445,12 @@ void Pacer::renderFrame(AVFrame* frame)
         AVFrame* frame = m_RenderQueue.dequeue();
 
         // Drop the lock while we call av_frame_free()
-        m_FrameQueueLock.unlock();
+        frameQueueLocker.unlock();
         m_VideoStats->pacerDroppedFrames++;
         StreamPipelineTelemetry::pacerDrop();
         av_frame_free(&frame);
-        m_FrameQueueLock.lock();
+        frameQueueLocker.relock();
     }
-
-    m_FrameQueueLock.unlock();
 }
 
 void Pacer::dropFrameForEnqueue(QQueue<AVFrame*>& queue)
