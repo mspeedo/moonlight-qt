@@ -551,8 +551,12 @@ void OverlayManager::appendDebugTelemetry(char* text, std::size_t length, std::u
     StreamHealthTelemetry::formatOverlayLines(healthLines, sizeof(healthLines));
 
     const size_t currentLength = SDL_strlen(text);
-    if (currentLength > 0 && text[currentLength - 1] != '\n') {
-        SDL_strlcat(text, "\n", length);
+    if (currentLength > 0) {
+        if (text[currentLength - 1] != '\n') {
+            SDL_strlcat(text, "\n", length);
+        }
+        // Separate Moonlight's original OSD statistics from our added rows.
+        SDL_strlcat(text, "-----\n", length);
     }
     SDL_strlcat(text, healthLines, length);
 
