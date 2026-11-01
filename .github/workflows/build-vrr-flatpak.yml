@@ -6,6 +6,12 @@ permissions:
 
 on:
   workflow_dispatch:
+  # One-time branch push kickoff when this workflow file changes.
+  push:
+    branches:
+      - vrr-image-adjustments
+    paths:
+      - '.github/workflows/build-vrr-flatpak.yml'
 
 concurrency:
   group: moonlight-flatpak-${{ github.ref }}
