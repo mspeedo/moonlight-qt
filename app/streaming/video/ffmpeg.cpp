@@ -77,12 +77,20 @@ bool FFmpegVideoDecoder::isHdrSupported()
 
 void FFmpegVideoDecoder::setHdrMode(bool enabled)
 {
+    m_FrontendRenderer->acquireRenderLock();
     m_FrontendRenderer->setHdrMode(enabled);
+    m_FrontendRenderer->releaseRenderLock();
 }
 
 bool FFmpegVideoDecoder::notifyWindowChanged(PWINDOW_STATE_CHANGE_INFO info)
 {
-    return m_FrontendRenderer->notifyWindowChanged(info);
+    bool ret;
+
+    m_FrontendRenderer->acquireRenderLock();
+    ret = m_FrontendRenderer->notifyWindowChanged(info);
+    m_FrontendRenderer->releaseRenderLock();
+
+    return ret;
 }
 
 int FFmpegVideoDecoder::getDecoderCapabilities()
@@ -288,10 +296,6 @@ void FFmpegVideoDecoder::reset()
     // need to delete in the renderer destructor.
     avcodec_free_context(&m_VideoDecoderCtx);
 
-    if (m_CurrentTestMode != TestMode::TestFrameOnly) {
-        Session::get()->getOverlayManager().setOverlayRenderer(nullptr);
-    }
-
     // If we have a separate frontend renderer, free that first
     if (m_FrontendRenderer != m_BackendRenderer) {
         delete m_FrontendRenderer;
@@ -493,15 +497,6 @@ bool FFmpegVideoDecoder::completeInitialization(const AVCodec* decoder, enum AVP
     m_StreamFps = params->frameRate;
     m_VideoFormat = params->videoFormat;
     m_CurrentTestMode = testMode;
-
-    // Don't bother initializing Pacer if we're not actually going to render
-    if (testMode != TestMode::TestFrameOnly) {
-        m_Pacer = new Pacer(m_FrontendRenderer, &m_ActiveWndVideoStats);
-        if (!m_Pacer->initialize(params->window, params->frameRate,
-                                 params->enableFramePacing || (params->enableVsync && (m_FrontendRenderer->getRendererAttributes() & RENDERER_ATTRIBUTE_FORCE_PACING)))) {
-            return false;
-        }
-    }
 
     m_VideoDecoderCtx = avcodec_alloc_context3(decoder);
     if (!m_VideoDecoderCtx) {
@@ -723,11 +718,11 @@ bool FFmpegVideoDecoder::completeInitialization(const AVCodec* decoder, enum AVP
             m_NeedsSpsFixup = false;
         }
 
-        // Tell overlay manager to use this frontend renderer
-        Session::get()->getOverlayManager().setOverlayRenderer(m_FrontendRenderer);
-
-        // Allow the renderer to perform final preparations for rendering
-        m_FrontendRenderer->prepareToRender();
+        m_Pacer = new Pacer(m_FrontendRenderer, &m_ActiveWndVideoStats);
+        if (!m_Pacer->initialize(params->window, params->frameRate,
+                                 params->enableFramePacing || (params->enableVsync && (m_FrontendRenderer->getRendererAttributes() & RENDERER_ATTRIBUTE_FORCE_PACING)))) {
+            return false;
+        }
 
         // Only create the decoder thread when instantiating the decoder for real. It will use APIs from
         // moonlight-common-c that can only be legally called with an established connection.
@@ -1765,11 +1760,21 @@ void FFmpegVideoDecoder::writeBuffer(PLENTRY entry, int& offset)
         int nalStart, nalEnd;
         bool needsFixup;
 
-        // Read the old NALU
-        find_nal_unit((uint8_t*)entry->data, entry->length, &nalStart, &nalEnd);
-        read_nal_unit(stream,
-                      (unsigned char *)&entry->data[nalStart],
-                      nalEnd - nalStart);
+        // Find the old SPS NALU
+        if (find_nal_unit((uint8_t*)entry->data, entry->length, &nalStart, &nalEnd) <= 0) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "Failed to find SPS");
+            h264_free(stream);
+            goto WriteUnmodifiedBuffer;
+        }
+
+        // Read the SPS. Pass it through unmodified if we fail to parse it.
+        if (read_nal_unit(stream, (uint8_t*)&entry->data[nalStart], nalEnd - nalStart) < 0) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "Failed to read SPS");
+            h264_free(stream);
+            goto WriteUnmodifiedBuffer;
+        }
 
         SDL_assert(nalStart == 3 || nalStart == 4); // 3 or 4 byte Annex B start sequence
         SDL_assert(nalEnd == entry->length);
@@ -1802,8 +1807,18 @@ void FFmpegVideoDecoder::writeBuffer(PLENTRY entry, int& offset)
 
             // Copy the modified NALU data. This clobbers byte 0 and starts NALU data at byte 1.
             // Since it prepended one extra byte, subtract one from the returned length.
-            offset += write_nal_unit(stream, (uint8_t*)&m_DecodeBuffer.data()[initialOffset + nalStart - 1],
-                                     MAX_SPS_EXTRA_SIZE + entry->length - nalStart) - 1;
+            //
+            // Pass the SPS through unmodified if the write fails.
+            int writeLength = write_nal_unit(stream, (uint8_t*)&m_DecodeBuffer.data()[initialOffset + nalStart - 1],
+                                             MAX_SPS_EXTRA_SIZE + entry->length - nalStart);
+            if (writeLength < 0) {
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                            "Failed to write modified SPS");
+                h264_free(stream);
+                goto WriteUnmodifiedBuffer;
+            }
+
+            offset += writeLength - 1;
 
             // Copy the NALU prefix over from the original SPS
             memcpy(&m_DecodeBuffer.data()[initialOffset], entry->data, nalStart);
@@ -1834,6 +1849,7 @@ void FFmpegVideoDecoder::writeBuffer(PLENTRY entry, int& offset)
         h264_free(stream);
     }
     else {
+WriteUnmodifiedBuffer:
         // Write the buffer as-is
         memcpy(&m_DecodeBuffer.data()[offset],
                entry->data,
