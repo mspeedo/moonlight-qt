@@ -6,6 +6,7 @@ permissions:
 
 on:
   workflow_dispatch:
+  # Push-triggered CI validation after common-c upstream sync (2026-11-02).
   # One-time branch push kickoff when this workflow file changes.
   push:
     branches:
