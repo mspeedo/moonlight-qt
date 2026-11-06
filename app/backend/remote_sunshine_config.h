@@ -10,8 +10,8 @@
 #include <QVariantMap>
 
 // Sunshine's existing web administration API, using the pinned certificate
-// obtained during Moonlight pairing. This class is intentionally independent
-// of the streaming pipeline and requires a separate Sunshine admin login.
+// obtained during Moonlight pairing. A short-lived API grant comes from the
+// paired-client mTLS GameStream endpoint. No web-admin password is stored.
 class RemoteSunshineConfig : public QObject
 {
     Q_OBJECT
@@ -31,7 +31,7 @@ public:
     QVariantList settings() const { return m_Settings; }
     QStringList presets() const { return m_Presets; }
 
-    Q_INVOKABLE void login(const QVariantMap& host, const QString& username, const QString& password);
+    Q_INVOKABLE void connectPaired(const QVariantMap& host);
     Q_INVOKABLE void reload();
     Q_INVOKABLE void setOption(const QString& key, const QString& value);
     Q_INVOKABLE void removeOption(const QString& key);
@@ -53,8 +53,9 @@ private:
 
     QNetworkAccessManager m_Network;
     QUrl m_BaseUrl;
+    QUrl m_GameStreamUrl;
     QSslCertificate m_Cert;
-    QByteArray m_Authorization; // RAM only; never persisted or logged
+    QByteArray m_Authorization; // ephemeral bearer token, RAM only
     QString m_Csrf;
     QJsonObject m_Values;
     QVariantList m_Settings;
@@ -64,4 +65,9 @@ private:
     bool m_Connected = false;
     bool m_Dirty = false;
     bool m_RestartAfterSave = false;
+    bool m_RefreshAttempted = false;
+    QString m_RetryAction;
+    QString m_RetryPath;
+    QByteArray m_RetryMethod;
+    QJsonObject m_RetryBody;
 };
