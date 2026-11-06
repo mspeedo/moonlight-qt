@@ -11,6 +11,7 @@ on:
   push:
     branches:
       - vrr-image-adjustments
+      - feature/remote-sunshine-settings
     paths:
       - '.github/workflows/build-vrr-flatpak.yml'
 
