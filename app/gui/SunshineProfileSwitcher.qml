@@ -9,6 +9,7 @@ import RemoteSunshineConfig 1.0
 RowLayout {
     id: root
     property var hostInfo: ({})
+    property var returnFocusItem: null
     spacing: 8
     implicitWidth: 355
     implicitHeight: 42
@@ -53,7 +54,9 @@ RowLayout {
         Keys.onEnterPressed: clicked()
         Keys.onLeftPressed: nextItemInFocusChain(false).forceActiveFocus(Qt.TabFocus)
         Keys.onRightPressed: nextItemInFocusChain(true).forceActiveFocus(Qt.TabFocus)
-        Keys.onDownPressed: stackView.currentItem.forceActiveFocus(Qt.TabFocus)
+        Keys.onDownPressed: {
+            if (root.returnFocusItem) root.returnFocusItem.forceActiveFocus(Qt.TabFocus)
+        }
         text: !remote.connected && !remote.busy ? qsTr("Retry") : qsTr("Apply")
         enabled: !remote.busy &&
                  ((!remote.connected && root.hostInfo.address) ||
