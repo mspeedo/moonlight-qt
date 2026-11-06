@@ -6,6 +6,8 @@
 #include <QSslCertificate>
 #include <QVariantList>
 #include <QStringList>
+#include <QUrl>
+#include <QVariantMap>
 
 // Sunshine's existing web administration API, using the pinned certificate
 // obtained during Moonlight pairing. This class is intentionally independent
