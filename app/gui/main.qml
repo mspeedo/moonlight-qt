@@ -305,6 +305,7 @@ ApplicationWindow {
                 Layout.preferredHeight: 42
                 sourceComponent: SunshineProfileSwitcher {
                     hostInfo: stackView.currentItem ? stackView.currentItem.sunshineHostInfo : ({})
+                    returnFocusItem: stackView.currentItem
                 }
             }
 
