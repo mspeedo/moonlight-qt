@@ -65,7 +65,7 @@ RowLayout {
             if (!remote.connected) {
                 remote.connectPaired(root.hostInfo)
             } else {
-                applyConfirm.open()
+                remote.switchPreset(presetSelect.currentText)
             }
         }
         ToolTip.visible: hovered
@@ -76,19 +76,4 @@ RowLayout {
         ToolTip.timeout: 5000
     }
 
-    NavigableDialog {
-        id: applyConfirm
-        title: qsTr("Switch Sunshine profile?")
-        font.pointSize: 14
-        standardButtons: Dialog.Yes | Dialog.No
-        contentItem: Label {
-            font.pointSize: 14
-            wrapMode: Text.WordWrap
-            text: qsTr("Apply '%1' and restart Sunshine? Active streams may disconnect.").arg(presetSelect.currentText)
-        }
-        onAccepted: {
-            if (remote.connected && !remote.busy && presetSelect.currentIndex >= 0)
-                remote.switchPreset(presetSelect.currentText)
-        }
-    }
 }

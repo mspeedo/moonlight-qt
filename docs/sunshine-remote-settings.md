@@ -14,7 +14,7 @@ No new streaming protocol messages, third-party web renderer, WebEngine dependen
 - Load existing non-default options, edit values, reset overrides, or add a new option by Sunshine config key.
 - Save settings, save-and-restart, or restart Sunshine without editing.
 - Create host-stored named presets, switch-and-restart, and delete presets (requires the corresponding Sunshine fork).
-- **App-list quick switcher:** on a paired Sunshine host's game/app selection screen, the native top toolbar offers a **Profile** selector and **Apply** button. It loads the same host-stored presets using the existing paired-certificate authorization; a confirmation explains that Sunshine will restart. No extra account login or full settings-page navigation is needed. It is hidden for NVIDIA/non-Sunshine hosts.
+- **App-list quick switcher:** on a paired Sunshine host's game/app selection screen, the native top toolbar offers a **Profile** selector and **Apply** button. It loads the same host-stored presets using the existing paired-certificate authorization; applying a profile immediately stages it and requests a Sunshine restart. No extra account login or full settings-page navigation is needed. It is hidden for NVIDIA/non-Sunshine hosts.
 
 ## Important limitations
 
@@ -34,7 +34,9 @@ No new streaming protocol messages, third-party web renderer, WebEngine dependen
 4. Edit simple setting, save, reload, restart and verify effect.
 5. Create two presets, switch in both directions, validate backup and delete.
 6. Switch and restart while a stream is active, recover after host reappears.
-6a. Open the app-list quick switcher, choose either saved profile, confirm Apply, verify the host restarts and reappears; repeat without restarting Moonlight. Verify the control is absent for non-Sunshine hosts and keyboard/gamepad navigation reaches both controls.
+6a. Open the app-list quick switcher, choose either saved profile, press Apply without a confirmation dialog, verify the host restarts and reappears; repeat without restarting Moonlight. Verify the control is absent for non-Sunshine hosts and keyboard/gamepad navigation reaches both controls.
 7. Original Moonlight streaming, VRR and OSD functionality unchanged.
 
 This integration lives in a feature branch and intentionally does not modify Sunshine or Moonlight's active development branches until validation.
+
+Quick-switcher Apply and the full settings page's Save & Restart, Switch & Restart, Delete, Restart, and Reload actions now execute immediately without confirmation dialogs. Reload discards unsaved local edits; deleting a preset cannot be undone.

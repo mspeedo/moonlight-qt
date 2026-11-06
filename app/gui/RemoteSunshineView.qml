@@ -103,10 +103,7 @@ Item {
                             font.pointSize: root.settingsFontPointSize
                             text: qsTr("Reload")
                             enabled: !remote.busy
-                            onClicked: {
-                                if (remote.dirty) reloadConfirm.open()
-                                else remote.reload()
-                            }
+                            onClicked: remote.reload()
                         }
                     }
 
@@ -196,7 +193,7 @@ Item {
                             font.pointSize: root.settingsFontPointSize
                             text: qsTr("Save & Restart Sunshine")
                             enabled: !remote.busy
-                            onClicked: saveRestartConfirm.open()
+                            onClicked: remote.save(true)
                         }
                     }
                 }
@@ -250,13 +247,13 @@ Item {
                             font.pointSize: root.settingsFontPointSize
                             text: qsTr("Switch & Restart")
                             enabled: !remote.busy && presetSelect.currentIndex >= 0
-                            onClicked: switchConfirm.open()
+                            onClicked: remote.switchPreset(presetSelect.currentText)
                         }
                         Button {
                             font.pointSize: root.settingsFontPointSize
                             text: qsTr("Delete")
                             enabled: !remote.busy && presetSelect.currentIndex >= 0
-                            onClicked: deleteConfirm.open()
+                            onClicked: remote.deletePreset(presetSelect.currentText)
                         }
                     }
 
@@ -272,7 +269,7 @@ Item {
                         font.pointSize: root.settingsFontPointSize
                         text: qsTr("Restart Sunshine without changing settings")
                         enabled: !remote.busy
-                        onClicked: restartConfirm.open()
+                        onClicked: remote.restart()
                     }
                     Item { Layout.fillHeight: true }
                 }
@@ -280,54 +277,4 @@ Item {
         }
     }
 
-    Dialog {
-        font.pointSize: root.settingsFontPointSize
-        id: saveRestartConfirm
-        title: qsTr("Apply Sunshine settings?")
-        modal: true
-        anchors.centerIn: parent
-        standardButtons: Dialog.Yes | Dialog.No
-        contentItem: Label { font.pointSize: root.settingsFontPointSize; text: qsTr("Save all changes and restart Sunshine? The current stream may disconnect."); wrapMode: Text.WordWrap }
-        onAccepted: remote.save(true)
-    }
-    Dialog {
-        font.pointSize: root.settingsFontPointSize
-        id: switchConfirm
-        title: qsTr("Switch preset?")
-        modal: true
-        anchors.centerIn: parent
-        standardButtons: Dialog.Yes | Dialog.No
-        contentItem: Label { font.pointSize: root.settingsFontPointSize; text: qsTr("Replace Sunshine configuration with '%1' and restart? The current stream may disconnect.").arg(presetSelect.currentText); wrapMode: Text.WordWrap }
-        onAccepted: remote.switchPreset(presetSelect.currentText)
-    }
-    Dialog {
-        font.pointSize: root.settingsFontPointSize
-        id: deleteConfirm
-        title: qsTr("Delete preset?")
-        modal: true
-        anchors.centerIn: parent
-        standardButtons: Dialog.Yes | Dialog.No
-        contentItem: Label { font.pointSize: root.settingsFontPointSize; text: qsTr("Delete '%1'? This cannot be undone.").arg(presetSelect.currentText) }
-        onAccepted: remote.deletePreset(presetSelect.currentText)
-    }
-    Dialog {
-        font.pointSize: root.settingsFontPointSize
-        id: restartConfirm
-        title: qsTr("Restart Sunshine?")
-        modal: true
-        anchors.centerIn: parent
-        standardButtons: Dialog.Yes | Dialog.No
-        contentItem: Label { font.pointSize: root.settingsFontPointSize; text: qsTr("Restart Sunshine service now? Active streams may disconnect.") }
-        onAccepted: remote.restart()
-    }
-    Dialog {
-        font.pointSize: root.settingsFontPointSize
-        id: reloadConfirm
-        title: qsTr("Discard changes?")
-        modal: true
-        anchors.centerIn: parent
-        standardButtons: Dialog.Yes | Dialog.No
-        contentItem: Label { font.pointSize: root.settingsFontPointSize; text: qsTr("Discard unsaved local edits and reload from Sunshine?") }
-        onAccepted: remote.reload()
-    }
 }
