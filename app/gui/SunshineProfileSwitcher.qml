@@ -10,7 +10,7 @@ RowLayout {
     id: root
     property var hostInfo: ({})
     spacing: 8
-    implicitWidth: 318
+    implicitWidth: 355
     implicitHeight: 42
 
     RemoteSunshineConfig {
@@ -20,9 +20,14 @@ RowLayout {
     Component.onCompleted: remote.connectPaired(root.hostInfo)
     Component.onDestruction: remote.close()
 
+    Label {
+        text: qsTr("Profile:")
+        font.pointSize: 14
+    }
+
     ComboBox {
         id: presetSelect
-        Layout.preferredWidth: 210
+        Layout.preferredWidth: 180
         Layout.fillHeight: true
         font.pointSize: 14
         activeFocusOnTab: true
@@ -30,7 +35,7 @@ RowLayout {
         Keys.onRightPressed: nextItemInFocusChain(true).forceActiveFocus(Qt.TabFocus)
         model: remote.presets
         enabled: remote.connected && !remote.busy && remote.presets.length > 0
-        displayText: !remote.connected ? qsTr("Loading profiles...") :
+        displayText: !remote.connected ? (remote.busy ? qsTr("Loading profiles...") : qsTr("Profiles unavailable")) :
                      (remote.presets.length === 0 ? qsTr("No saved profiles") : currentText)
         ToolTip.visible: hovered
         ToolTip.text: remote.status
