@@ -16,6 +16,8 @@ Item {
 
     RemoteSunshineConfig { id: remote }
     Component.onCompleted: remote.connectPaired(root.hostInfo)
+    StackView.onDeactivating: remote.close()
+    Component.onDestruction: remote.close()
 
     ColumnLayout {
         anchors.fill: parent
