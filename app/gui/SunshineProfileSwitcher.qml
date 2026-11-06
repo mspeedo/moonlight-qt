@@ -25,6 +25,9 @@ RowLayout {
         Layout.preferredWidth: 210
         Layout.fillHeight: true
         font.pointSize: 14
+        activeFocusOnTab: true
+        Keys.onLeftPressed: nextItemInFocusChain(false).forceActiveFocus(Qt.TabFocus)
+        Keys.onRightPressed: nextItemInFocusChain(true).forceActiveFocus(Qt.TabFocus)
         model: remote.presets
         enabled: remote.connected && !remote.busy && remote.presets.length > 0
         displayText: !remote.connected ? qsTr("Loading profiles...") :
@@ -40,6 +43,12 @@ RowLayout {
         Layout.fillHeight: true
         Layout.preferredWidth: 98
         font.pointSize: 14
+        activeFocusOnTab: true
+        Keys.onReturnPressed: clicked()
+        Keys.onEnterPressed: clicked()
+        Keys.onLeftPressed: nextItemInFocusChain(false).forceActiveFocus(Qt.TabFocus)
+        Keys.onRightPressed: nextItemInFocusChain(true).forceActiveFocus(Qt.TabFocus)
+        Keys.onDownPressed: stackView.currentItem.forceActiveFocus(Qt.TabFocus)
         text: !remote.connected && !remote.busy ? qsTr("Retry") : qsTr("Apply")
         enabled: !remote.busy &&
                  ((!remote.connected && root.hostInfo.address) ||
