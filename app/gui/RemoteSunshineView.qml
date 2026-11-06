@@ -7,9 +7,9 @@ import RemoteSunshineConfig 1.0
 Item {
     id: root
     property var hostInfo: ({})
-    // Match the native SettingsView.qml: 12 pt option controls, 9 pt descriptions.
-    readonly property int settingsFontPointSize: 12
-    readonly property int descriptionFontPointSize: 9
+    // Keep every remote settings control and description at least 14 pt.
+    readonly property int settingsFontPointSize: 14
+    readonly property int descriptionFontPointSize: 14
     objectName: qsTr("Sunshine Remote Settings")
     focus: true
     activeFocusOnTab: true
@@ -125,8 +125,11 @@ Item {
                                 text: modelData.key
                                 Layout.preferredWidth: 245
                                 elide: Text.ElideRight
-                                ToolTip.visible: mouseOver.containsMouse
-                                ToolTip.text: modelData.key
+                                ToolTip {
+                                    visible: mouseOver.containsMouse
+                                    text: modelData.key
+                                    font.pointSize: root.settingsFontPointSize
+                                }
                                 MouseArea {
                                     id: mouseOver
                                     anchors.fill: parent
@@ -276,6 +279,7 @@ Item {
     }
 
     Dialog {
+        font.pointSize: root.settingsFontPointSize
         id: saveRestartConfirm
         title: qsTr("Apply Sunshine settings?")
         modal: true
@@ -285,6 +289,7 @@ Item {
         onAccepted: remote.save(true)
     }
     Dialog {
+        font.pointSize: root.settingsFontPointSize
         id: switchConfirm
         title: qsTr("Switch preset?")
         modal: true
@@ -294,6 +299,7 @@ Item {
         onAccepted: remote.switchPreset(presetSelect.currentText)
     }
     Dialog {
+        font.pointSize: root.settingsFontPointSize
         id: deleteConfirm
         title: qsTr("Delete preset?")
         modal: true
@@ -303,6 +309,7 @@ Item {
         onAccepted: remote.deletePreset(presetSelect.currentText)
     }
     Dialog {
+        font.pointSize: root.settingsFontPointSize
         id: restartConfirm
         title: qsTr("Restart Sunshine?")
         modal: true
@@ -312,6 +319,7 @@ Item {
         onAccepted: remote.restart()
     }
     Dialog {
+        font.pointSize: root.settingsFontPointSize
         id: reloadConfirm
         title: qsTr("Discard changes?")
         modal: true
