@@ -3,6 +3,7 @@
 #include <QObject>
 #include <QJsonObject>
 #include <QNetworkAccessManager>
+#include <QPointer>
 #include <QSslCertificate>
 #include <QVariantList>
 #include <QStringList>
@@ -32,6 +33,7 @@ public:
     QStringList presets() const { return m_Presets; }
 
     Q_INVOKABLE void connectPaired(const QVariantMap& host);
+    Q_INVOKABLE void close();
     Q_INVOKABLE void reload();
     Q_INVOKABLE void setOption(const QString& key, const QString& value);
     Q_INVOKABLE void removeOption(const QString& key);
@@ -52,6 +54,7 @@ private:
     void fail(const QString& message);
 
     QNetworkAccessManager m_Network;
+    QPointer<QNetworkReply> m_ActiveReply;
     QUrl m_BaseUrl;
     QUrl m_GameStreamUrl;
     QSslCertificate m_Cert;
@@ -62,6 +65,7 @@ private:
     QStringList m_Presets;
     QString m_Status;
     bool m_Busy = false;
+    bool m_Closing = false;
     bool m_Connected = false;
     bool m_Dirty = false;
     bool m_RestartAfterSave = false;
