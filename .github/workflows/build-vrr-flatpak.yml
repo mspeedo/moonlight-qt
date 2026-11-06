@@ -14,6 +14,13 @@ on:
       - feature/remote-sunshine-settings
     paths:
       - '.github/workflows/build-vrr-flatpak.yml'
+      - 'app/backend/remote_sunshine_config.*'
+      - 'app/gui/RemoteSunshineView.qml'
+      - 'app/gui/PcView.qml'
+      - 'app/gui/computermodel.*'
+      - 'app/app.pro'
+      - 'app/main.cpp'
+      - 'app/qml.qrc'
 
 concurrency:
   group: moonlight-flatpak-${{ github.ref }}
