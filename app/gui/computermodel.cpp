@@ -98,7 +98,8 @@ QVariantMap ComputerModel::sunshineAdminInfo(int computerIndex) const
         computer->pairState != NvComputer::PS_PAIRED ||
         computer->isNvidiaServerSoftware ||
         computer->serverCert.isNull() ||
-        computer->activeAddress.port() >= 65535) return {};
+        computer->activeAddress.port() >= 65535 ||
+        computer->activeHttpsPort == 0) return {};
 
     // Sunshine's web UI is GameStream's base HTTP port + 1 (normally 47990).
     // A separately mapped administration port is intentionally unsupported.
@@ -106,6 +107,7 @@ QVariantMap ComputerModel::sunshineAdminInfo(int computerIndex) const
         {"name", computer->name},
         {"address", computer->activeAddress.address()},
         {"port", int(computer->activeAddress.port()) + 1},
+        {"gameStreamHttpsPort", int(computer->activeHttpsPort)},
         {"certificate", computer->serverCert.toDer().toBase64()}
     };
 }
