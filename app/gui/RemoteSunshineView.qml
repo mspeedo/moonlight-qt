@@ -7,6 +7,9 @@ import RemoteSunshineConfig 1.0
 Item {
     id: root
     property var hostInfo: ({})
+    // Match the native SettingsView.qml: 12 pt option controls, 9 pt descriptions.
+    readonly property int settingsFontPointSize: 12
+    readonly property int descriptionFontPointSize: 9
     objectName: qsTr("Sunshine Remote Settings")
     focus: true
     activeFocusOnTab: true
@@ -27,6 +30,7 @@ Item {
         }
 
         Label {
+            font.pointSize: root.descriptionFontPointSize
             Layout.fillWidth: true
             wrapMode: Text.WordWrap
             text: qsTr("Access uses your existing Moonlight pairing. No additional Sunshine administrator login is needed.")
@@ -42,6 +46,7 @@ Item {
                 Layout.preferredHeight: 28
             }
             Label {
+                font.pointSize: root.descriptionFontPointSize
                 Layout.fillWidth: true
                 text: remote.status
                 color: remote.status.indexOf("failed") >= 0 || remote.status.indexOf("denied") >= 0
@@ -49,6 +54,7 @@ Item {
                 wrapMode: Text.WordWrap
             }
             Button {
+                font.pointSize: root.settingsFontPointSize
                 text: qsTr("Retry")
                 visible: !remote.connected && !remote.busy
                 onClicked: remote.connectPaired(root.hostInfo)
@@ -59,8 +65,8 @@ Item {
             id: pages
             Layout.fillWidth: true
             visible: remote.connected
-            TabButton { text: qsTr("Settings") }
-            TabButton { text: qsTr("Presets & Restart") }
+            TabButton { font.pointSize: root.settingsFontPointSize; text: qsTr("Settings") }
+            TabButton { font.pointSize: root.settingsFontPointSize; text: qsTr("Presets & Restart") }
         }
 
         StackLayout {
@@ -75,6 +81,7 @@ Item {
                     spacing: 8
 
                     Label {
+                        font.pointSize: root.descriptionFontPointSize
                         Layout.fillWidth: true
                         wrapMode: Text.WordWrap
                         text: qsTr("Existing non-default Sunshine options are shown below. " +
@@ -85,11 +92,13 @@ Item {
                     RowLayout {
                         Layout.fillWidth: true
                         TextField {
+                            font.pointSize: root.settingsFontPointSize
                             id: searchInput
                             Layout.fillWidth: true
                             placeholderText: qsTr("Filter options...")
                         }
                         Button {
+                            font.pointSize: root.settingsFontPointSize
                             text: qsTr("Reload")
                             enabled: !remote.busy
                             onClicked: {
@@ -112,6 +121,7 @@ Item {
                             width: optionList.width - 12
                             spacing: 8
                             Label {
+                                font.pointSize: root.settingsFontPointSize
                                 text: modelData.key
                                 Layout.preferredWidth: 245
                                 elide: Text.ElideRight
@@ -125,12 +135,14 @@ Item {
                                 }
                             }
                             TextField {
+                                font.pointSize: root.settingsFontPointSize
                                 Layout.fillWidth: true
                                 text: modelData.value
                                 selectByMouse: true
                                 onEditingFinished: remote.setOption(modelData.key, text)
                             }
                             Button {
+                                font.pointSize: root.settingsFontPointSize
                                 text: qsTr("Reset")
                                 onClicked: remote.removeOption(modelData.key)
                             }
@@ -140,16 +152,19 @@ Item {
                     RowLayout {
                         Layout.fillWidth: true
                         TextField {
+                            font.pointSize: root.settingsFontPointSize
                             id: newKey
                             Layout.preferredWidth: 220
                             placeholderText: qsTr("Setting key")
                         }
                         TextField {
+                            font.pointSize: root.settingsFontPointSize
                             id: newValue
                             Layout.fillWidth: true
                             placeholderText: qsTr("Value")
                         }
                         Button {
+                            font.pointSize: root.settingsFontPointSize
                             text: qsTr("Set option")
                             onClicked: {
                                 remote.setOption(newKey.text, newValue.text)
@@ -162,15 +177,18 @@ Item {
                     RowLayout {
                         Layout.fillWidth: true
                         Label {
+                            font.pointSize: root.settingsFontPointSize
                             Layout.fillWidth: true
                             text: remote.dirty ? qsTr("Unsaved changes") : ""
                         }
                         Button {
+                            font.pointSize: root.settingsFontPointSize
                             text: qsTr("Save")
                             enabled: !remote.busy
                             onClicked: remote.save(false)
                         }
                         Button {
+                            font.pointSize: root.settingsFontPointSize
                             text: qsTr("Save & Restart Sunshine")
                             enabled: !remote.busy
                             onClicked: saveRestartConfirm.open()
@@ -185,6 +203,7 @@ Item {
                     spacing: 12
 
                     Label {
+                        font.pointSize: root.descriptionFontPointSize
                         Layout.fillWidth: true
                         wrapMode: Text.WordWrap
                         text: qsTr("Presets are stored on the Sunshine PC, not in Moonlight. " +
@@ -195,15 +214,18 @@ Item {
                     RowLayout {
                         Layout.fillWidth: true
                         TextField {
+                            font.pointSize: root.settingsFontPointSize
                             id: presetName
                             Layout.fillWidth: true
                             placeholderText: qsTr("New preset name (letters, numbers, _ or -)")
                         }
                         CheckBox {
+                            font.pointSize: root.settingsFontPointSize
                             id: overwritePreset
                             text: qsTr("Overwrite existing")
                         }
                         Button {
+                            font.pointSize: root.settingsFontPointSize
                             text: qsTr("Save current as preset")
                             enabled: !remote.busy && presetName.text.length > 0
                             onClicked: remote.createPreset(presetName.text, overwritePreset.checked)
@@ -213,17 +235,20 @@ Item {
                     RowLayout {
                         Layout.fillWidth: true
                         ComboBox {
+                            font.pointSize: root.settingsFontPointSize
                             id: presetSelect
                             Layout.fillWidth: true
                             model: remote.presets
                             enabled: remote.presets.length > 0
                         }
                         Button {
+                            font.pointSize: root.settingsFontPointSize
                             text: qsTr("Switch & Restart")
                             enabled: !remote.busy && presetSelect.currentIndex >= 0
                             onClicked: switchConfirm.open()
                         }
                         Button {
+                            font.pointSize: root.settingsFontPointSize
                             text: qsTr("Delete")
                             enabled: !remote.busy && presetSelect.currentIndex >= 0
                             onClicked: deleteConfirm.open()
@@ -231,6 +256,7 @@ Item {
                     }
 
                     Label {
+                        font.pointSize: root.descriptionFontPointSize
                         Layout.fillWidth: true
                         wrapMode: Text.WordWrap
                         text: qsTr("Before a preset is applied, Sunshine keeps a recovery copy " +
@@ -238,6 +264,7 @@ Item {
                     }
 
                     Button {
+                        font.pointSize: root.settingsFontPointSize
                         text: qsTr("Restart Sunshine without changing settings")
                         enabled: !remote.busy
                         onClicked: restartConfirm.open()
@@ -254,7 +281,7 @@ Item {
         modal: true
         anchors.centerIn: parent
         standardButtons: Dialog.Yes | Dialog.No
-        contentItem: Label { text: qsTr("Save all changes and restart Sunshine? The current stream may disconnect."); wrapMode: Text.WordWrap }
+        contentItem: Label { font.pointSize: root.settingsFontPointSize; text: qsTr("Save all changes and restart Sunshine? The current stream may disconnect."); wrapMode: Text.WordWrap }
         onAccepted: remote.save(true)
     }
     Dialog {
@@ -263,7 +290,7 @@ Item {
         modal: true
         anchors.centerIn: parent
         standardButtons: Dialog.Yes | Dialog.No
-        contentItem: Label { text: qsTr("Replace Sunshine configuration with '%1' and restart? The current stream may disconnect.").arg(presetSelect.currentText); wrapMode: Text.WordWrap }
+        contentItem: Label { font.pointSize: root.settingsFontPointSize; text: qsTr("Replace Sunshine configuration with '%1' and restart? The current stream may disconnect.").arg(presetSelect.currentText); wrapMode: Text.WordWrap }
         onAccepted: remote.switchPreset(presetSelect.currentText)
     }
     Dialog {
@@ -272,7 +299,7 @@ Item {
         modal: true
         anchors.centerIn: parent
         standardButtons: Dialog.Yes | Dialog.No
-        contentItem: Label { text: qsTr("Delete '%1'? This cannot be undone.").arg(presetSelect.currentText) }
+        contentItem: Label { font.pointSize: root.settingsFontPointSize; text: qsTr("Delete '%1'? This cannot be undone.").arg(presetSelect.currentText) }
         onAccepted: remote.deletePreset(presetSelect.currentText)
     }
     Dialog {
@@ -281,7 +308,7 @@ Item {
         modal: true
         anchors.centerIn: parent
         standardButtons: Dialog.Yes | Dialog.No
-        contentItem: Label { text: qsTr("Restart Sunshine service now? Active streams may disconnect.") }
+        contentItem: Label { font.pointSize: root.settingsFontPointSize; text: qsTr("Restart Sunshine service now? Active streams may disconnect.") }
         onAccepted: remote.restart()
     }
     Dialog {
@@ -290,7 +317,7 @@ Item {
         modal: true
         anchors.centerIn: parent
         standardButtons: Dialog.Yes | Dialog.No
-        contentItem: Label { text: qsTr("Discard unsaved local edits and reload from Sunshine?") }
+        contentItem: Label { font.pointSize: root.settingsFontPointSize; text: qsTr("Discard unsaved local edits and reload from Sunshine?") }
         onAccepted: remote.reload()
     }
 }
