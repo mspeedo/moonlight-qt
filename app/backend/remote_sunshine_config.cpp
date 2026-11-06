@@ -1,4 +1,5 @@
 #include "remote_sunshine_config.h"
+#include "identitymanager.h"
 
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -23,45 +24,60 @@ void RemoteSunshineConfig::fail(const QString& message)
     emit stateChanged();
 }
 
-void RemoteSunshineConfig::login(const QVariantMap& host, const QString& username, const QString& password)
+void RemoteSunshineConfig::connectPaired(const QVariantMap& host)
 {
     if (m_Busy) return;
     const auto address = host.value("address").toString();
-    const auto port = host.value("port").toInt();
+    const auto adminPort = host.value("port").toInt();
+    const auto gameStreamPort = host.value("gameStreamHttpsPort").toInt();
     m_Cert = QSslCertificate(QByteArray::fromBase64(host.value("certificate").toByteArray()), QSsl::Der);
-    if (address.isEmpty() || port < 1 || port > 65535 || m_Cert.isNull() ||
-        username.isEmpty() || password.isEmpty()) {
-        fail(tr("Select an online, paired Sunshine PC and enter its web UI credentials."));
+    if (address.isEmpty() || adminPort < 1 || adminPort > 65535 ||
+        gameStreamPort < 1 || gameStreamPort > 65535 || m_Cert.isNull()) {
+        fail(tr("Select an online, paired Sunshine PC with a valid TLS identity."));
         return;
     }
 
     m_BaseUrl = QUrl();
     m_BaseUrl.setScheme("https");
     m_BaseUrl.setHost(address);
-    m_BaseUrl.setPort(port);
-    if (!m_BaseUrl.isValid()) {
-        fail(tr("Invalid host address."));
+    m_BaseUrl.setPort(adminPort);
+    m_GameStreamUrl = m_BaseUrl;
+    m_GameStreamUrl.setPort(gameStreamPort);
+    if (!m_BaseUrl.isValid() || !m_GameStreamUrl.isValid()) {
+        fail(tr("Invalid paired host address."));
         return;
     }
 
-    m_Authorization = "Basic " + (username.toUtf8() + ':' + password.toUtf8()).toBase64();
+    m_Authorization.clear();
     m_Csrf.clear();
     m_Connected = false;
     m_Dirty = false;
-    m_Status = tr("Authenticating with Sunshine...");
+    m_RefreshAttempted = false;
+    m_RetryAction.clear();
+    m_Status = tr("Authorizing with existing Moonlight pairing...");
     emit stateChanged();
-    request("csrf", "/api/csrf-token");
+    request("pairedToken", "/remote-admin-token");
 }
 
 void RemoteSunshineConfig::request(const QString& action, const QString& path,
                                    const QByteArray& method, const QJsonObject& body)
 {
-    if (m_Busy || m_BaseUrl.isEmpty() || m_Cert.isNull() || m_Authorization.isEmpty()) return;
+    const bool gameStreamAuth = action == "pairedToken";
+    if (m_Busy || m_BaseUrl.isEmpty() || m_Cert.isNull() ||
+        (!gameStreamAuth && m_Authorization.isEmpty())) return;
 
-    QUrl url = m_BaseUrl;
+    QUrl url = gameStreamAuth ? m_GameStreamUrl : m_BaseUrl;
     url.setPath(path);
     QNetworkRequest req(url);
-    req.setRawHeader("Authorization", m_Authorization);
+    if (!gameStreamAuth) {
+        req.setRawHeader("Authorization", m_Authorization);
+    } else {
+        // GameStream HTTPS already requires our paired client certificate.
+        req.setSslConfiguration(IdentityManager::get()->getSslConfig());
+    }
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+    req.setAttribute(QNetworkRequest::Http2AllowedAttribute, false);
+#endif
     req.setRawHeader("Accept", "application/json");
     req.setAttribute(QNetworkRequest::CacheLoadControlAttribute, QNetworkRequest::AlwaysNetwork);
 #if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
@@ -110,7 +126,7 @@ void RemoteSunshineConfig::request(const QString& action, const QString& path,
         if (reply->isRunning()) reply->abort();
     });
 
-    connect(reply, &QNetworkReply::finished, this, [this, reply, action]() {
+    connect(reply, &QNetworkReply::finished, this, [this, reply, action, path, method, body]() {
         m_Busy = false;
         const bool certificateMatches = reply->sslConfiguration().peerCertificate() == m_Cert;
         const int statusCode = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
@@ -123,11 +139,23 @@ void RemoteSunshineConfig::request(const QString& action, const QString& path,
             return;
         }
 
+        if (statusCode == 401 && action != "pairedToken" && !m_RefreshAttempted) {
+            // Renew an expired scoped grant automatically, then retry once.
+            m_RefreshAttempted = true;
+            m_RetryAction = action;
+            m_RetryPath = path;
+            m_RetryMethod = method;
+            m_RetryBody = body;
+            m_Authorization.clear();
+            m_Csrf.clear();
+            request("pairedToken", "/remote-admin-token");
+            return;
+        }
         if (action == "restart") {
             // Sunshine's restart() may terminate the HTTPS connection without
             // a response. Never report a definite successful restart here.
             if (statusCode == 401) {
-                fail(tr("Sunshine rejected the restart: invalid administrator credentials."));
+                fail(tr("Sunshine rejected paired-client restart authorization."));
             } else if (statusCode == 403) {
                 fail(tr("Sunshine denied the restart request."));
             } else if (statusCode >= 400) {
@@ -142,12 +170,15 @@ void RemoteSunshineConfig::request(const QString& action, const QString& path,
             return;
         }
         if (error != QNetworkReply::NoError || statusCode < 200 || statusCode >= 300) {
-            if (statusCode == 401) fail(tr("Sunshine login failed. Check your web UI username and password."));
+            if (statusCode == 401) fail(tr("Sunshine rejected Moonlight pairing authorization. Re-pair or check whether this client is enabled."));
+
             else if (statusCode == 403) fail(tr("Sunshine denied remote administration. Check origin_web_ui_allowed."));
-            else if (statusCode == 404) fail(tr("This Sunshine build does not support the requested remote settings endpoint."));
+            else if (statusCode == 404) fail(tr("Sunshine does not support paired remote settings. Install the matching Sunshine fork build."));
+
             else fail(tr("Sunshine request failed (HTTP %1, error %2).").arg(statusCode).arg(int(error)));
             return;
         }
+        if (action != "pairedToken" && action != "csrf") m_RefreshAttempted = false;
         onResult(action, data);
     });
 }
@@ -161,13 +192,32 @@ void RemoteSunshineConfig::onResult(const QString& action, const QByteArray& dat
         return;
     }
     const QJsonObject obj = doc.object();
-    if (action == "csrf") {
+    if (action == "pairedToken") {
+        const QString token = obj.value("token").toString();
+        if (token.size() != 48) {
+            fail(tr("Sunshine did not issue a valid paired-client authorization token."));
+            return;
+        }
+        m_Authorization = "Bearer " + token.toLatin1();
+        m_Status = tr("Paired client verified. Loading Sunshine settings...");
+        emit stateChanged();
+        request("csrf", "/api/csrf-token");
+    } else if (action == "csrf") {
         m_Csrf = obj.value("csrf_token").toString();
         if (m_Csrf.isEmpty()) {
             fail(tr("Sunshine did not issue an administration CSRF token."));
             return;
         }
-        request("config", "/api/config");
+        if (!m_RetryAction.isEmpty()) {
+            const QString actionToRetry = m_RetryAction;
+            const QString pathToRetry = m_RetryPath;
+            const QByteArray methodToRetry = m_RetryMethod;
+            const QJsonObject bodyToRetry = m_RetryBody;
+            m_RetryAction.clear();
+            request(actionToRetry, pathToRetry, methodToRetry, bodyToRetry);
+        } else {
+            request("config", "/api/config");
+        }
     } else if (action == "config") {
         m_Values = obj;
         m_Values.remove("status");
