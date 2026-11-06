@@ -12,6 +12,7 @@ Item {
     activeFocusOnTab: true
 
     RemoteSunshineConfig { id: remote }
+    Component.onCompleted: remote.connectPaired(root.hostInfo)
 
     ColumnLayout {
         anchors.fill: parent
@@ -28,38 +29,8 @@ Item {
         Label {
             Layout.fillWidth: true
             wrapMode: Text.WordWrap
-            text: qsTr("Manage your paired Sunshine host with its web administrator credentials. " +
-                       "These credentials stay in memory and are not saved by Moonlight.")
+            text: qsTr("Access uses your existing Moonlight pairing. No additional Sunshine administrator login is needed.")
             visible: !remote.connected
-        }
-
-        RowLayout {
-            Layout.fillWidth: true
-            visible: !remote.connected
-            Label { text: qsTr("User") }
-            TextField {
-                id: usernameInput
-                Layout.preferredWidth: 170
-                placeholderText: qsTr("Sunshine username")
-                text: "admin"
-            }
-            Label { text: qsTr("Password") }
-            TextField {
-                id: passwordInput
-                Layout.fillWidth: true
-                echoMode: TextInput.Password
-                placeholderText: qsTr("Sunshine password")
-                onAccepted: connectButton.clicked()
-            }
-            Button {
-                id: connectButton
-                text: qsTr("Connect")
-                enabled: !remote.busy
-                onClicked: {
-                    remote.login(root.hostInfo, usernameInput.text, passwordInput.text)
-                    passwordInput.text = ""
-                }
-            }
         }
 
         RowLayout {
@@ -76,6 +47,11 @@ Item {
                 color: remote.status.indexOf("failed") >= 0 || remote.status.indexOf("denied") >= 0
                      ? "#f36a6a" : palette.text
                 wrapMode: Text.WordWrap
+            }
+            Button {
+                text: qsTr("Retry")
+                visible: !remote.connected && !remote.busy
+                onClicked: remote.connectPaired(root.hostInfo)
             }
         }
 
