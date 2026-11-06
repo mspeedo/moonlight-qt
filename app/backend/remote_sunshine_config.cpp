@@ -18,6 +18,30 @@ RemoteSunshineConfig::RemoteSunshineConfig(QObject* parent) : QObject(parent)
     m_Network.setProxy(QNetworkProxy(QNetworkProxy::NoProxy));
 }
 
+void RemoteSunshineConfig::close()
+{
+    // Close our standalone administration connections when leaving the page,
+    // without affecting ComputerManager's separate host polling connection.
+    m_Closing = true;
+    if (m_ActiveReply) {
+        QNetworkReply* reply = m_ActiveReply.data();
+        m_ActiveReply.clear();
+        reply->disconnect(this);
+        reply->abort();
+        reply->deleteLater();
+    }
+    m_Network.clearConnectionCache();
+    m_Authorization.fill('\0');
+    m_Authorization.clear();
+    m_Csrf.clear();
+    m_RetryAction.clear();
+    m_RetryPath.clear();
+    m_RetryMethod.clear();
+    m_RetryBody = QJsonObject();
+    m_Connected = false;
+    m_Busy = false;
+}
+
 void RemoteSunshineConfig::fail(const QString& message)
 {
     m_Status = message;
@@ -27,6 +51,7 @@ void RemoteSunshineConfig::fail(const QString& message)
 void RemoteSunshineConfig::connectPaired(const QVariantMap& host)
 {
     if (m_Busy) return;
+    m_Closing = false;
     const auto address = host.value("address").toString();
     const auto adminPort = host.value("port").toInt();
     const auto gameStreamPort = host.value("gameStreamHttpsPort").toInt();
@@ -63,7 +88,7 @@ void RemoteSunshineConfig::request(const QString& action, const QString& path,
                                    const QByteArray& method, const QJsonObject& body)
 {
     const bool gameStreamAuth = action == "pairedToken";
-    if (m_Busy || m_BaseUrl.isEmpty() || m_Cert.isNull() ||
+    if (m_Closing || m_Busy || m_BaseUrl.isEmpty() || m_Cert.isNull() ||
         (!gameStreamAuth && m_Authorization.isEmpty())) return;
 
     QUrl url = gameStreamAuth ? m_GameStreamUrl : m_BaseUrl;
@@ -79,6 +104,15 @@ void RemoteSunshineConfig::request(const QString& action, const QString& path,
     req.setAttribute(QNetworkRequest::Http2AllowedAttribute, false);
 #endif
     req.setRawHeader("Accept", "application/json");
+    // NvHTTP::openConnection() already disables persistent connections.
+    // Reuse the same policy here: our mTLS grant request hits that same
+    // GameStream HTTPS listener, which does not tolerate idle keep-alives.
+    req.setRawHeader("Connection", "close");
+#if QT_VERSION >= QT_VERSION_CHECK(6, 12, 0)
+    req.setAttribute(QNetworkRequest::ConnectionCacheExpiryTimeoutSecondsAttribute, -1);
+#elif QT_VERSION >= QT_VERSION_CHECK(6, 3, 0)
+    req.setAttribute(QNetworkRequest::ConnectionCacheExpiryTimeoutSecondsAttribute, 0);
+#endif
     req.setAttribute(QNetworkRequest::CacheLoadControlAttribute, QNetworkRequest::AlwaysNetwork);
 #if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
     req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::ManualRedirectPolicy);
@@ -95,6 +129,7 @@ void RemoteSunshineConfig::request(const QString& action, const QString& path,
         reply = m_Network.sendCustomRequest(req, method, content);
     }
 
+    m_ActiveReply = reply;
     m_Busy = true;
     emit stateChanged();
 
@@ -127,7 +162,12 @@ void RemoteSunshineConfig::request(const QString& action, const QString& path,
     });
 
     connect(reply, &QNetworkReply::finished, this, [this, reply, action, path, method, body]() {
+        m_ActiveReply.clear();
         m_Busy = false;
+        if (m_Closing) {
+            reply->deleteLater();
+            return;
+        }
         const bool certificateMatches = reply->sslConfiguration().peerCertificate() == m_Cert;
         const int statusCode = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
         const auto error = reply->error();
