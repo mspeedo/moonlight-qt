@@ -181,6 +181,26 @@ CenteredGridView {
                     visible: model.online && model.paired
                 }
                 NavigableMenuItem {
+                    text: qsTr("Sunshine Remote Settings")
+                    visible: model.online && model.paired && model.sunshine
+                    onTriggered: {
+                        var host = computerModel.sunshineAdminInfo(index)
+                        if (!host.address) {
+                            errorDialog.text = qsTr("Unable to determine Sunshine's secure administration address.")
+                            errorDialog.open()
+                            return
+                        }
+                        var component = Qt.createComponent("RemoteSunshineView.qml")
+                        if (component.status === Component.Error) {
+                            errorDialog.text = component.errorString()
+                            errorDialog.open()
+                            return
+                        }
+                        var view = component.createObject(stackView, {"hostInfo": host})
+                        if (view) stackView.push(view)
+                    }
+                }
+                NavigableMenuItem {
                     text: qsTr("Wake PC")
                     onTriggered: computerModel.wakeComputer(index)
                     visible: !model.online && model.wakeable
