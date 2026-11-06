@@ -124,10 +124,21 @@ void RemoteSunshineConfig::request(const QString& action, const QString& path,
         }
 
         if (action == "restart") {
-            // The server is expected to terminate the HTTP connection during
-            // a successful restart. We cannot infer completion from the reply.
-            m_Status = tr("Restart requested. Reconnect after Sunshine starts again.");
-            emit stateChanged();
+            // Sunshine's restart() may terminate the HTTPS connection without
+            // a response. Never report a definite successful restart here.
+            if (statusCode == 401) {
+                fail(tr("Sunshine rejected the restart: invalid administrator credentials."));
+            } else if (statusCode == 403) {
+                fail(tr("Sunshine denied the restart request."));
+            } else if (statusCode >= 400) {
+                fail(tr("Sunshine rejected restart (HTTP %1).").arg(statusCode));
+            } else if (statusCode >= 200 && statusCode < 300) {
+                fail(tr("Restart request accepted. Reconnect to verify Sunshine is running."));
+            } else if (error == QNetworkReply::RemoteHostClosedError) {
+                fail(tr("Sunshine closed the connection after the restart request. Reconnect to verify."));
+            } else {
+                fail(tr("Restart could not be confirmed (network error %1).").arg(int(error)));
+            }
             return;
         }
         if (error != QNetworkReply::NoError || statusCode < 200 || statusCode >= 300) {
