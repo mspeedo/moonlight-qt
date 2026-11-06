@@ -96,10 +96,12 @@ void RemoteSunshineConfig::request(const QString& action, const QString& path,
 
     connect(reply, &QNetworkReply::sslErrors, this,
             [this, reply](const QList<QSslError>& errors) {
-        if (reply->sslConfiguration().peerCertificate() != m_Cert) return;
+        if (errors.isEmpty() || m_Cert.isNull()) return;
         for (const QSslError& error : errors) {
             if (error.certificate() != m_Cert) return;
         }
+        // Accept only errors for the exact paired cert. The encrypted()
+        // callback separately checks the peer certificate before HTTP data.
         reply->ignoreSslErrors(errors);
     });
 
