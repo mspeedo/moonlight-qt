@@ -301,7 +301,7 @@ ApplicationWindow {
                 active: stackView.currentItem instanceof AppView &&
                         Boolean(stackView.currentItem.sunshineHostInfo.address)
                 visible: active
-                Layout.preferredWidth: active ? 318 : 0
+                Layout.preferredWidth: active ? 355 : 0
                 Layout.preferredHeight: 42
                 sourceComponent: SunshineProfileSwitcher {
                     hostInfo: stackView.currentItem ? stackView.currentItem.sunshineHostInfo : ({})
