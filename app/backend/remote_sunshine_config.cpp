@@ -206,7 +206,8 @@ void RemoteSunshineConfig::setOption(const QString& key, const QString& value)
 
 void RemoteSunshineConfig::removeOption(const QString& key)
 {
-    if (m_Values.remove(key) > 0) {
+    if (m_Values.contains(key)) {
+        m_Values.remove(key);
         m_Dirty = true;
         rebuildSettings();
     }
