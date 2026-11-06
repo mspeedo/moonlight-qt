@@ -85,6 +85,15 @@ void RemoteSunshineConfig::request(const QString& action, const QString& path,
     // Sunshine uses its GameStream pairing certificate on the web UI HTTPS
     // endpoint. Trust *only that exact certificate*, not arbitrary self-signed
     // certificates, and never disable verification globally.
+    // QNetworkReply::encrypted is emitted after the handshake and *before*
+    // HTTP request data (including the Basic admin header) is transmitted.
+    // Enforce the certificate pin even if a forged certificate is CA-trusted
+    // and therefore never produces sslErrors().
+    connect(reply, &QNetworkReply::encrypted, this, [this, reply]() {
+        if (reply->sslConfiguration().peerCertificate() != m_Cert)
+            reply->abort();
+    });
+
     connect(reply, &QNetworkReply::sslErrors, this,
             [this, reply](const QList<QSslError>& errors) {
         if (reply->sslConfiguration().peerCertificate() != m_Cert) return;
@@ -101,10 +110,16 @@ void RemoteSunshineConfig::request(const QString& action, const QString& path,
 
     connect(reply, &QNetworkReply::finished, this, [this, reply, action]() {
         m_Busy = false;
+        const bool certificateMatches = reply->sslConfiguration().peerCertificate() == m_Cert;
         const int statusCode = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
         const auto error = reply->error();
         const QByteArray data = reply->readAll();
         reply->deleteLater();
+
+        if (!certificateMatches) {
+            fail(tr("TLS identity mismatch: Sunshine certificate no longer matches the paired PC."));
+            return;
+        }
 
         if (action == "restart") {
             // The server is expected to terminate the HTTP connection during
