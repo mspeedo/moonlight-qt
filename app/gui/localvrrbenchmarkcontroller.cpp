@@ -96,6 +96,8 @@ void LocalVrrBenchmarkController::start(QObject* guiWindow, bool variableFps,
         report.insert(QStringLiteral("compositionControl"), stats.compositionControl);
         report.insert(QStringLiteral("scanoutPath"), stats.scanoutPath);
         report.insert(QStringLiteral("scanoutEvidence"), stats.scanoutEvidence);
+        report.insert(QStringLiteral("sdlWindowBackend"), stats.sdlWindowBackend);
+        report.insert(QStringLiteral("vulkanPresentMode"), stats.vulkanPresentMode);
         report.insert(QStringLiteral("csv"), LocalVrrTest::lastCsvPath());
         report.insert(QStringLiteral("exitCode"), exitCode);
         report.insert(QStringLiteral("mode"), variableFps
