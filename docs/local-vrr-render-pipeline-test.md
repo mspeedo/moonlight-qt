@@ -56,6 +56,17 @@ seconds plus one second of warm-up). If a manual run ends during warm-up,
 the results contain no measurement events. Menu navigation uses
 Moonlight's existing SteamOS gamepad-to-Tab focus behavior.
 
+The default Qt backend depends on the SteamOS launch environment. To
+compare the confirmed XWayland renderer with a native Wayland renderer,
+set the **Steam launch options** of the Moonlight shortcut to
+`env QT_QPA_PLATFORM=wayland %command%`, leaving all VRR Benchmark
+settings unchanged. `main.cpp` selects SDL's Wayland video driver when
+Qt is running on Wayland. The benchmark's **Actual SDL window backend**
+must say `Native Wayland` for the comparison to be valid. Remove the
+launch-option override to return to the previous Qt/SDL display selection.
+If the local Steam shortcut uses a nonstandard wrapper, set the same
+environment variable before its Flatpak run command instead.
+
 No terminal command, manually added launch argument or second Steam shortcut
 is required. The experimental Flatpak grants both Wayland and X11 sockets
 instead of fallback-X11, because Gamescope's composition control lives on
@@ -105,7 +116,14 @@ XWayland property when the benchmark finishes):
 flatpak run com.moonlight_stream.Moonlight --local-vrr-test --vrr-constant --vrr-force-composition
 ```
 
-If the Gamescope XWayland root cannot be verified or the control cannot be
+The composition switch now verifies the current X11 root using the
+per-XWayland-server Gamescope properties `GAMESCOPE_XWAYLAND_SERVER_ID`
+and/or `GAMESCOPE_PID`, falling back to `GAMESCOPE_VRR_CAPABLE` for older
+Gamescope versions. SteamOS may launch Moonlight on a *non-primary* XWayland
+server; only Gamescope's primary server receives `GAMESCOPE_VRR_CAPABLE`.
+Checking that property alone previously caused false code-8 failures.
+
+If the X11 root cannot be verified as Gamescope or the control cannot be
 set, a forced-composition benchmark exits with code 8 rather than silently
 running as an automatic-mode comparison. The setting is restored on ordinary
 benchmark exit and handled errors, but an externally killed/crashed process
