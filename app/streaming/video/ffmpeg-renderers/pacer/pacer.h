@@ -6,6 +6,7 @@
 #include <QQueue>
 #include <QMutex>
 #include <QWaitCondition>
+#include <atomic>
 
 // The maximum number of frames pacer will ever hold is:
 // - 3 frames in the pacing queue
@@ -32,7 +33,10 @@ public:
 class Pacer
 {
 public:
-    Pacer(IFFmpegRenderer* renderer, PVIDEO_STATS videoStats);
+    Pacer(IFFmpegRenderer* renderer, PVIDEO_STATS videoStats, bool diagnosticMode = false);
+
+    // Used only by the isolated local renderer test; never set for streaming.
+    void setDiagnosticAcquireLate(bool enabled) { m_DiagnosticAcquireLate.store(enabled, std::memory_order_relaxed); }
 
     ~Pacer();
 
@@ -70,6 +74,8 @@ private:
     AVFrame* m_DeferredFreeFrame;
     bool m_Stopping;
     bool m_RenderLatestFrame;
+    bool m_DiagnosticMode;
+    std::atomic<bool> m_DiagnosticAcquireLate { false };
 
     IVsyncSource* m_VsyncSource;
     IFFmpegRenderer* m_VsyncRenderer;
