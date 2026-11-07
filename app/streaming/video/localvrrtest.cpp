@@ -114,12 +114,36 @@ public:
             return;
         }
         m_Root = DefaultRootWindow(m_Display);
-        const Atom signature = XInternAtom(m_Display, "GAMESCOPE_VRR_CAPABLE", True);
+
+        // SteamOS Gamescope commonly runs multiple XWayland servers. VRR_CAPABLE
+        // is written only on the primary XWayland root (server 0), so the
+        // game's actual XWayland DISPLAY may legitimately lack that property.
+        // Gamescope publishes these identity properties on EVERY server.
+        const Atom serverIdAtom = XInternAtom(m_Display,
+                                              "GAMESCOPE_XWAYLAND_SERVER_ID", True);
+        const Atom pidAtom = XInternAtom(m_Display, "GAMESCOPE_PID", True);
+        unsigned long serverId = 0, gamescopePid = 0;
+        const bool hasServerId = x11Cardinal(m_Display, m_Root, serverIdAtom, &serverId);
+        const bool hasGamescopePid = x11Cardinal(m_Display, m_Root, pidAtom, &gamescopePid) &&
+                                     gamescopePid != 0;
+        // Backward compatibility with older installations that expose only the
+        // traditional primary-root VRR_CAPABLE flag.
+        const Atom vrrCapableAtom = XInternAtom(m_Display,
+                                                "GAMESCOPE_VRR_CAPABLE", True);
         unsigned long capable = 0;
-        if (!x11Cardinal(m_Display, m_Root, signature, &capable)) {
-            m_Status = QStringLiteral("X11 root is not a verified Gamescope root");
+        const bool hasVrrMarker = x11Cardinal(m_Display, m_Root,
+                                              vrrCapableAtom, &capable);
+        if (!hasServerId && !hasGamescopePid && !hasVrrMarker) {
+            m_Status = QStringLiteral(
+                "Connected X11 root has no Gamescope identity properties");
             return;
         }
+        qInfo() << "VRR Gamescope XWayland control:"
+                << "DISPLAY" << qgetenv("DISPLAY")
+                << "server ID" << (hasServerId ? QString::number(serverId)
+                                                : QStringLiteral("unavailable"))
+                << "Gamescope PID" << (hasGamescopePid ? QString::number(gamescopePid)
+                                                       : QStringLiteral("unavailable"));
         m_ForceAtom = XInternAtom(m_Display, "GAMESCOPE_COMPOSITE_FORCE", False);
         m_HadOriginal = x11Cardinal(m_Display, m_Root, m_ForceAtom, &m_Original);
         const unsigned long requested = force ? 1 : 0;
@@ -134,7 +158,10 @@ public:
             return;
         }
         m_Ready = true;
-        m_Status = QStringLiteral("Gamescope X11 control set; no compositor acknowledgement");
+        m_Status = hasServerId
+            ? QStringLiteral("Gamescope XWayland server %1: control set (no compositor acknowledgement)")
+                  .arg(serverId)
+            : QStringLiteral("Gamescope X11 control set (no compositor acknowledgement)");
         // Intern the name even if the compositor has not yet published its
         // first path decision; otherwise a fresh instrumented build would be
         // incorrectly treated as unsupported for the entire benchmark.
