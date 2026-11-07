@@ -8,6 +8,7 @@ rename-icon: moonlight
 # separate ~100 MB .Debug extension that adds thousands of R2 objects.
 build-options:
   strip: true
+  no-debuginfo: true
 finish-args:
   - --share=network
   - --socket=fallback-x11

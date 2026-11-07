@@ -75,15 +75,10 @@ case "${1:-}" in
     rm -f "$probe_file"
     echo "R2 upload preflight passed."
 
-    # An empty bucket is valid on first release. Existing OSTree objects
-    # are required for incremental upgrades on subsequent releases.
-    rclone_checked lsf "$repo_remote" --max-depth 1 >/dev/null
-    mkdir -p repo
-    rclone_checked copy "$repo_remote" repo/ \
-      --exclude '/moonlight-fork.flatpakrepo' \
-      --exclude '/moonlight-latest.json'
+    # No R2 restore: flatpak-builder creates a fresh local OSTree repository.
+    # Existing content-addressed objects remain on R2 between releases.
     echo "publish_ready=true" >> "$GITHUB_OUTPUT"
-    echo "Existing R2 OSTree repository restored (empty on first publication)."
+    echo "R2 upload verified; no repository download is necessary."
     ;;
 
   publish)
@@ -91,8 +86,8 @@ case "${1:-}" in
     [[ -d repo ]] || die "Missing OSTree repository"
     configure_r2_endpoint
     repo_remote="r2:${R2_BUCKET}/flatpak/"
+    # Sign the repository index; no slow static-delta generation.
     flatpak build-update-repo \
-      --generate-static-deltas \
       --gpg-sign="$FLATPAK_GPG_KEY_ID" \
       repo
 
@@ -109,9 +104,17 @@ DefaultBranch=master
 GPGKey=$public_key
 EOF
 
-    # Publish immutable content-addressed files first; mutable refs and signed
-    # summary last. Do not delete old objects while clients may still use them.
+    # Only upload missing immutable OSTree objects. Existing objects use
+    # content-hash paths and are safely reusable across independent builds.
+    # --fast-list avoids per-directory S3 listing round trips.
+    rclone_checked copy repo/objects/ "${repo_remote}objects/" \
+      --ignore-existing --fast-list
+
+    # Upload repository metadata, without duplicating objects or exposing
+    # the new signed summary until all commit objects and refs are present.
     rclone_checked copy repo/ "$repo_remote" \
+      --fast-list \
+      --exclude '/objects/**' \
       --exclude '/summary' \
       --exclude '/summary.sig' \
       --exclude '/refs/**' \
@@ -151,7 +154,7 @@ EOF
       echo "- Repository: $public_url"
       echo "- Remote descriptor: $public_url/moonlight-fork.flatpakrepo"
       echo '- Signed commits and repository summary: yes'
-      echo '- Incremental OSTree history: preserved'
+      echo '- Existing OSTree objects: preserved; no remote restore or static deltas'
       echo "- Latest release index: $public_url/moonlight-latest.json"
     } >> "$GITHUB_STEP_SUMMARY"
     ;;

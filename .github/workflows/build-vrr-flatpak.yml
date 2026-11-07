@@ -105,7 +105,7 @@ jobs:
           print(f"Pinned Moonlight Qt to {os.environ['SOURCE_SHA']}")
           PY
 
-      - name: Restore and configure signed Flatpak R2 repository
+      - name: Validate and configure signed Flatpak R2 publication
         id: r2
         if: github.ref == 'refs/heads/feature/flatpak-update-page'
         shell: bash
@@ -148,7 +148,8 @@ jobs:
             --disable-rofiles-fuse \
             --user
 
-      - name: Create installable Flatpak bundle
+      - name: Create installable Flatpak bundle (non-R2 branches only)
+        if: github.ref != 'refs/heads/feature/flatpak-update-page'
         shell: bash
         run: |
           flatpak build-bundle \
@@ -156,7 +157,8 @@ jobs:
             "Moonlight-${{ steps.source.outputs.safe_branch }}-${{ steps.source.outputs.short_sha }}.flatpak" \
             com.moonlight_stream.Moonlight
 
-      - name: Upload Flatpak artifact
+      - name: Upload Flatpak artifact (non-R2 branches only)
+        if: github.ref != 'refs/heads/feature/flatpak-update-page'
         uses: actions/upload-artifact@v7
         with:
           name: Moonlight-${{ steps.source.outputs.safe_branch }}-${{ steps.source.outputs.short_sha }}
