@@ -1,7 +1,7 @@
 diff --git a/src/vulkan/context.c b/src/vulkan/context.c
 --- a/src/vulkan/context.c
 +++ b/src/vulkan/context.c
-@@ -1123,10 +1123,12 @@ static bool has_synchronized_queues(const VkPhysicalDeviceFeatures2 *features)
+@@ -1124,9 +1124,11 @@ static bool has_synchronized_queues(const VkPhysicalDeviceFeatures2 *features)
  {
  #ifdef VK_KHR_internally_synchronized_queues
 -    const VkPhysicalDeviceInternallySynchronizedQueuesFeaturesKHR *isq = vk_find_struct(features,
