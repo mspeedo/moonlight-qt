@@ -18,6 +18,7 @@ struct Snapshot {
     double producePeakMs = 0, acquirePeakMs = 0, renderPeakMs = 0, submitPeakMs = 0, presentPeakMs = 0;
     QString compositionRequest, compositionControl, scanoutPath, scanoutEvidence;
     QString sdlWindowBackend, vulkanPresentMode;
+    QString pipelinePresentRequest, pipelineDepth, pipelineWait, pipelineQueue;
 };
 bool active();
 // True only after the one-second unmeasured startup warm-up.
