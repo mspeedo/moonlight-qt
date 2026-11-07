@@ -12,13 +12,14 @@ No new streaming protocol messages, third-party web renderer, WebEngine dependen
 
 - Open the settings screen automatically using Moonlight's existing paired-client TLS identity, with no additional login. Scoped access expires after 30 minutes and is transparently renewed once if necessary.
 - Load existing non-default options, edit values, reset overrides, or add a new option by Sunshine config key.
+- **NVENC tab:** native Qt Quick form mirroring the NVIDIA NVENC page in this Sunshine fork, with performance-preset, split-frame and two-pass dropdowns; spatial AQ, realtime HAGS, low-latency power, DXGI and CAVLC checkboxes; and a clamped 0–400 VBV/HRD numeric control. Uses Sunshine's defaults when an override is absent, hides Windows-only controls for other hosts, and stages changes in the same shared configuration model as the raw editor. Save and Save & Restart use the same existing paired-authorized endpoints.
 - Save settings, save-and-restart, or restart Sunshine without editing.
 - Create host-stored named presets, switch-and-restart, and delete presets (requires the corresponding Sunshine fork).
 - **App-list quick switcher:** on a paired Sunshine host's game/app selection screen, the native top toolbar offers a **Profile** selector and **Apply** button. It loads the same host-stored presets using the existing paired-certificate authorization; applying a profile immediately stages it and requests a Sunshine restart. No extra account login or full settings-page navigation is needed. It is hidden for NVIDIA/non-Sunshine hosts.
 
 ## Important limitations
 
-- **This is an advanced key/value settings editor**, not yet a reproduction of Sunshine's full categorized settings form. `GET /api/config` returns only configured overrides. For a setting at its default value, enter its key manually. Special complex options such as `global_prep_cmd` need careful JSON formatting; use the native Sunshine web UI for these until a typed schema/editor is built.
+- **The Settings tab is still an advanced key/value editor**, not a reproduction of Sunshine's complete categorized form. The NVENC tab is a dedicated typed replication of the NVIDIA section. `GET /api/config` returns only configured overrides. For a setting at its default value, enter its key manually. Special complex options such as `global_prep_cmd` need careful JSON formatting; use the native Sunshine web UI for these until a typed schema/editor is built.
 - Opening the page requests a narrow, expiring token. No administrative changes happen automatically merely because a PC is paired.
 - Saving updates the on-disk configuration; Sunshine must be restarted to apply new settings.
 - A preset switch discards unsaved Moonlight-side edits, stages the preset and requests Sunshine restart. Restart can terminate the HTTPS reply and disconnect a stream; no completion is asserted.
