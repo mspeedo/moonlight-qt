@@ -8,8 +8,12 @@ die() { echo "::error::$*" >&2; exit 1; }
 
 # Avoid infinite retries on authentication, API or S3 endpoint errors.
 rclone_checked() {
-  timeout --signal=TERM 480s rclone --s3-no-head --retries 1 --low-level-retries 1 \
-    --contimeout 12s --timeout 35s "$@"
+  # Cloudflare R2 may return temporary 503s when many objects are written.
+  # Retry with backoff, limit request rate, and show periodic transfer stats.
+  timeout --signal=TERM 1200s rclone --s3-no-head \
+    --retries 5 --low-level-retries 3 --retries-sleep 8s \
+    --transfers 4 --checkers 8 --tpslimit 12 \
+    --contimeout 12s --timeout 45s --stats 30s --stats-one-line "$@"
 }
 
 # The next GitHub Actions step overrides GITHUB_ENV with step-specific env.
