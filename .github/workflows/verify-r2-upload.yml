@@ -57,7 +57,7 @@ jobs:
           trap 'rm -f "$tmp"' EXIT
           printf 'Moonlight Flatpak R2 S3 verification\n' > "$tmp"
           r2() {
-            timeout 45s rclone --retries 1 --low-level-retries 1 \
+            timeout 45s rclone --s3-no-head --retries 1 --low-level-retries 1 \
               --contimeout 10s --timeout 20s "$@"
           }
           echo "Probing R2 S3 object upload..."
