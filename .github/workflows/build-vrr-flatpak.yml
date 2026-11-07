@@ -16,6 +16,7 @@ on:
       - '.github/workflows/build-vrr-flatpak.yml'
       - 'app/backend/remote_sunshine_config.*'
       - 'app/gui/RemoteSunshineView.qml'
+      - 'app/gui/RemoteSunshineNvencView.qml'
       - 'app/gui/SunshineProfileSwitcher.qml'
       - 'app/gui/AppView.qml'
       - 'app/gui/main.qml'
