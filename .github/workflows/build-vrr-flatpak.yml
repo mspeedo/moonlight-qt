@@ -12,6 +12,7 @@ on:
     branches:
       - vrr-image-adjustments
       - feature/remote-sunshine-settings
+      - feature/flatpak-update-page
 
 concurrency:
   group: moonlight-flatpak-${{ github.ref }}
