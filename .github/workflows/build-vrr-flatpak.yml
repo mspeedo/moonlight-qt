@@ -16,7 +16,9 @@ on:
 
 concurrency:
   group: moonlight-flatpak-${{ github.ref }}
-  cancel-in-progress: false
+  # Feature branch builds supersede each other; signed publication on the
+  # main feature branch is never canceled by this updater branch.
+  cancel-in-progress: ${{ github.ref == 'refs/heads/feature/flatpak-update-page' }}
 
 jobs:
   build:
