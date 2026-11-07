@@ -6,7 +6,9 @@ command: moonlight
 rename-icon: moonlight
 finish-args:
   - --share=network
-  - --socket=fallback-x11
+  # The local VRR diagnostic needs XWayland root-property access while Qt/SDL
+  # may run on native Wayland. This branch deliberately exposes both sockets.
+  - --socket=x11
   - --socket=wayland
   - --share=ipc
   - --socket=pulseaudio
