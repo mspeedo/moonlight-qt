@@ -1,0 +1,102 @@
+name: Cleanup obsolete Moonlight R2 uploads
+
+permissions:
+  contents: read
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feature/flatpak-update-page
+    paths:
+      - .github/workflows/cleanup-r2-legacy.yml
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - name: Install isolated S3 client
+        shell: bash
+        run: |
+          python3 -m venv "$RUNNER_TEMP/r2-cleanup-venv"
+          "$RUNNER_TEMP/r2-cleanup-venv/bin/pip" install -q 'boto3>=1.35,<2'
+
+      - name: Delete only obsolete root-level R2 objects
+        shell: bash
+        env:
+          R2_BUCKET: ${{ vars.R2_BUCKET }}
+          R2_ENDPOINT: ${{ vars.R2_ENDPOINT }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/r2-cleanup-venv/bin/python" - <<'PY'
+          import os
+          import re
+          import sys
+          from botocore.config import Config
+          import boto3
+
+          bucket = os.environ["R2_BUCKET"].strip()
+          endpoint = os.environ["R2_ENDPOINT"].rstrip("/")
+          endpoint = endpoint.removesuffix("/" + bucket)
+          if not re.fullmatch(r"https://[^/]+\.r2\.cloudflarestorage\.com", endpoint):
+              raise SystemExit("Unexpected R2 endpoint; refusing destructive operation")
+          if bucket != "moonlight-updates":
+              raise SystemExit("Unexpected bucket; refusing destructive operation")
+
+          s3 = boto3.client(
+              "s3",
+              endpoint_url=endpoint,
+              aws_access_key_id=os.environ["R2_ACCESS_KEY_ID"],
+              aws_secret_access_key=os.environ["R2_SECRET_ACCESS_KEY"],
+              region_name="auto",
+              config=Config(signature_version="s3v4",
+                            retries={"max_attempts": 5, "mode": "standard"}),
+          )
+          # Never touch flatpak/: it contains the new, signed update repository.
+          def allowed(key):
+              return (
+                  key == "moonlight-updates"
+                  or key.startswith("moonlight-updates/")
+                  or bool(re.fullmatch(r"ci-probe-[0-9]+-[0-9]+\.txt", key))
+              )
+
+          targets = {}
+          for prefix in ("moonlight-updates", "ci-probe-"):
+              pages = s3.get_paginator("list_objects_v2").paginate(
+                  Bucket=bucket, Prefix=prefix
+              )
+              for page in pages:
+                  for item in page.get("Contents", []):
+                      key = item["Key"]
+                      if allowed(key):
+                          targets[key] = item.get("Size", 0)
+          keys = sorted(targets)
+          if len(keys) > 50000:
+              raise SystemExit("Unexpectedly large cleanup; refusing")
+          if any(k.startswith("flatpak/") or not allowed(k) for k in keys):
+              raise SystemExit("Cleanup safety check failed")
+          size = sum(targets.values())
+          print(f"Whitelisted obsolete objects: {len(keys)}; total: {size:,} bytes")
+          print("Legacy nested prefix:", sum(k.startswith("moonlight-updates/") for k in keys))
+          print("Legacy conflicting object:", int("moonlight-updates" in targets))
+          print("Root CI probes:", sum(k.startswith("ci-probe-") for k in keys))
+          sys.stdout.flush()
+          for start in range(0, len(keys), 100):
+              batch = keys[start:start+100]
+              response = s3.delete_objects(
+                  Bucket=bucket,
+                  Delete={"Objects": [{"Key": key} for key in batch], "Quiet": True}
+              )
+              errors = response.get("Errors", [])
+              if errors:
+                  raise RuntimeError(f"Failed deleting batch {start//100+1}: {errors[:3]}")
+              print(f"Deleted {min(start+len(batch),len(keys))}/{len(keys)} obsolete objects")
+          print("Cleanup complete. No objects under flatpak/ were modified.")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
+              summary.write("## Safe R2 legacy cleanup\n\n")
+              summary.write(f"- Deleted: **{len(keys)}** obsolete objects ({size:,} bytes)\n")
+              summary.write("- Protected: **flatpak/** signed update repository, untouched\n")
+          PY
