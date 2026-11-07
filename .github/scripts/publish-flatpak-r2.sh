@@ -57,7 +57,10 @@ case "${1:-}" in
 
     # Validate R2 write, read and delete permissions before compiling.
     probe_file="$RUNNER_TEMP/moonlight-r2-probe.txt"
-    probe_object="r2:${R2_BUCKET}/ci-probe-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.txt"
+    # Keep all new releases under a clean prefix. Old failed root-level
+    # uploads contained a file and directory with the same name.
+    repo_remote="r2:${R2_BUCKET}/flatpak/"
+    probe_object="${repo_remote}ci-probe-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.txt"
     printf '%s\n' "Moonlight R2 upload validation" > "$probe_file"
     rclone_checked copyto "$probe_file" "$probe_object" ||
       die "R2 write preflight denied. Check Object Read & Write permission, account and bucket scope."
@@ -70,9 +73,9 @@ case "${1:-}" in
 
     # An empty bucket is valid on first release. Existing OSTree objects
     # are required for incremental upgrades on subsequent releases.
-    rclone_checked lsf "r2:${R2_BUCKET}/" --max-depth 1 >/dev/null
+    rclone_checked lsf "$repo_remote" --max-depth 1 >/dev/null
     mkdir -p repo
-    rclone_checked copy "r2:${R2_BUCKET}/" repo/ \
+    rclone_checked copy "$repo_remote" repo/ \
       --exclude '/moonlight-fork.flatpakrepo' \
       --exclude '/moonlight-latest.json'
     echo "publish_ready=true" >> "$GITHUB_OUTPUT"
@@ -83,12 +86,13 @@ case "${1:-}" in
     [[ -n "${FLATPAK_GPG_KEY_ID:-}" ]] || die "Missing key fingerprint from prepare step"
     [[ -d repo ]] || die "Missing OSTree repository"
     configure_r2_endpoint
+    repo_remote="r2:${R2_BUCKET}/flatpak/"
     flatpak build-update-repo \
       --generate-static-deltas \
       --gpg-sign="$FLATPAK_GPG_KEY_ID" \
       repo
 
-    public_url="${R2_PUBLIC_URL%/}"
+    public_url="${R2_PUBLIC_URL%/}/flatpak"
     public_key="$(gpg --batch --export "$FLATPAK_GPG_KEY_ID" | base64 -w 0)"
     [[ -n "$public_key" ]] || die "Failed to export GPG public key"
     cat > moonlight-fork.flatpakrepo <<EOF
@@ -103,17 +107,17 @@ EOF
 
     # Publish immutable content-addressed files first; mutable refs and signed
     # summary last. Do not delete old objects while clients may still use them.
-    rclone_checked copy repo/ "r2:${R2_BUCKET}/" \
+    rclone_checked copy repo/ "$repo_remote" \
       --exclude '/summary' \
       --exclude '/summary.sig' \
       --exclude '/refs/**' \
       --exclude '/tmp/**' \
       --exclude '/state/**' \
       --exclude '*.lock'
-    rclone_checked copy repo/refs/ "r2:${R2_BUCKET}/refs/"
-    rclone_checked copyto repo/summary.sig "r2:${R2_BUCKET}/summary.sig"
-    rclone_checked copyto repo/summary "r2:${R2_BUCKET}/summary"
-    rclone_checked copyto moonlight-fork.flatpakrepo "r2:${R2_BUCKET}/moonlight-fork.flatpakrepo"
+    rclone_checked copy repo/refs/ "${repo_remote}refs/"
+    rclone_checked copyto repo/summary.sig "${repo_remote}summary.sig"
+    rclone_checked copyto repo/summary "${repo_remote}summary"
+    rclone_checked copyto moonlight-fork.flatpakrepo "${repo_remote}moonlight-fork.flatpakrepo"
 
     # Publish this index LAST, after all signed OSTree data is available.
     # Moonlight uses it for a real on-demand check rather than waiting for
@@ -124,7 +128,7 @@ EOF
     cat > moonlight-latest.json <<EOF
 {"schema":1,"app_id":"com.moonlight_stream.Moonlight","arch":"x86_64","branch":"master","ostree_commit":"$ostree_commit","git_commit":"$GITHUB_SHA","published_at":"$published_at"}
 EOF
-    rclone_checked copyto moonlight-latest.json "r2:${R2_BUCKET}/moonlight-latest.json"
+    rclone_checked copyto moonlight-latest.json "${repo_remote}moonlight-latest.json"
 
     # Public access must be separately enabled on the R2 bucket.
     curl --fail --silent --show-error --location --retry 3 --retry-delay 2 \
