@@ -114,6 +114,7 @@ public:
         m_ForceAtom = XInternAtom(m_Display, "GAMESCOPE_COMPOSITE_FORCE", False);
         m_HadOriginal = x11Cardinal(m_Display, m_Root, m_ForceAtom, &m_Original);
         const unsigned long requested = force ? 1 : 0;
+        m_Changed = true; // Restore even if read-back verification fails.
         XChangeProperty(m_Display, m_Root, m_ForceAtom, XA_CARDINAL, 32,
                         PropModeReplace, reinterpret_cast<const unsigned char*>(&requested), 1);
         XSync(m_Display, False);
@@ -123,7 +124,6 @@ public:
             m_Status = QStringLiteral("Gamescope control property read-back failed");
             return;
         }
-        m_Changed = true;
         m_Ready = true;
         m_Status = QStringLiteral("Gamescope X11 control set; no compositor acknowledgement");
         m_ScanoutAtom = XInternAtom(m_Display,
@@ -335,7 +335,7 @@ int producerThread(void* context)
 SDL_Surface* createHud(const Snapshot& s, bool late)
 {
     // Rendering the HUD at 2 Hz keeps its upload overhead out of most frames.
-    QImage image(930, 315, QImage::Format_ARGB32);
+    QImage image(930, 390, QImage::Format_ARGB32);
     image.fill(Qt::transparent);
     QPainter painter(&image);
     painter.setRenderHint(QPainter::TextAntialiasing, true);
@@ -365,6 +365,8 @@ SDL_Surface* createHud(const Snapshot& s, bool late)
                     .arg(s.presented)
                 : QString("unavailable on this window/backend")),
         QString("Compositor discarded %1 | CPU submit != display time").arg(s.discarded),
+        QString("Composition: %1").arg(s.compositionRequest),
+        QString("Scanout path: %1").arg(s.scanoutPath),
         QString("X: 90/variable | Y: early/late | B: exit | A/H: HUD")
     };
     for (int i = 0; i < lines.size(); ++i)
