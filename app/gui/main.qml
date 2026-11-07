@@ -445,6 +445,22 @@ ApplicationWindow {
                 }
             }
 
+            Button {
+                id: vrrBenchmarkButton
+                visible: Qt.platform.os === "linux" &&
+                         (stackView.currentItem instanceof PcView ||
+                          stackView.currentItem instanceof SettingsView ||
+                          stackView.currentItem instanceof LocalVrrBenchmarkView)
+                text: qsTr("VRR Benchmark")
+                font.pointSize: 12
+                onClicked: navigateTo("qrc:/gui/LocalVrrBenchmarkView.qml", LocalVrrBenchmarkView)
+                Keys.onDownPressed: {
+                    stackView.currentItem.forceActiveFocus(Qt.TabFocusReason)
+                }
+                ToolTip.visible: hovered
+                ToolTip.text: qsTr("Offline Gamescope VRR smoothness benchmark")
+            }
+
             NavigableToolButton {
                 id: settingsButton
 
