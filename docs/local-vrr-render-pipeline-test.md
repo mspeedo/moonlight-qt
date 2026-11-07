@@ -148,6 +148,17 @@ samples this property while running, when present, and marks the source.
 Without such compositor-side instrumentation it does not invent an actual
 scanout result.
 
+A source patch for an optional instrumented Gamescope build is checked in as
+[`docs/gamescope-scanout-path-telemetry.patch`](gamescope-scanout-path-telemetry.patch).
+It publishes the actual successful DRM backend decision (1=hardware-plane
+scanout, 2=GPU composition) only when the path changes, so it does not send
+an X11 event on every frame. This patch targets current upstream Gamescope
+and **is not present in ordinary SteamOS Gamescope installations**. It has
+not yet been built or device-tested and must not be confused with working
+scanout-path reporting on stock SteamOS. The Moonlight test probes the property
+without requiring it, so no Gamescope system modification is necessary just
+to run the A/B forced-composition comparison.
+
 If the Wayland presentation protocol is unsupported, the HUD clearly reports
 unavailable; it never substitutes CPU submit time as a measured display time.
 
