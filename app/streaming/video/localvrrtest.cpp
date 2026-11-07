@@ -43,6 +43,7 @@ std::uint64_t g_LastProduced = 0, g_LastSubmit = 0, g_LastPresented = 0;
 bool g_PresentationSupported = false;
 QString g_LastCsvPath;
 std::atomic<bool> g_Stop {false};
+std::atomic<bool> g_ProducerFailed {false};
 std::atomic<bool> g_Variable {true};
 constexpr int kWidth = 960, kHeight = 540;
 
@@ -172,6 +173,7 @@ int producerThread(void* context)
         AVFrame* frame = makeFrame(static_cast<std::uint64_t>(elapsed));
         if (!frame) {
             SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "VRR diagnostic frame allocation failed");
+            g_ProducerFailed.store(true);
             g_Stop.store(true);
             break;
         }
@@ -306,6 +308,7 @@ int run(const QStringList& args)
         g_LastCsvPath.clear();
     }
     g_Stop.store(false);
+    g_ProducerFailed.store(false);
     g_Variable.store(!args.contains("--vrr-constant"));
     bool late = args.contains("--vrr-acquire-late");
     bool showHud = !args.contains("--vrr-hud-off");
@@ -330,8 +333,10 @@ int run(const QStringList& args)
         1280, 800, SDL_WINDOW_VULKAN | SDL_WINDOW_FULLSCREEN_DESKTOP | SDL_WINDOW_SHOWN);
     if (!window) {
         qWarning() << "VRR diagnostic window failed:" << SDL_GetError();
+        SDL_QuitSubSystem(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER);
         return 1;
     }
+    const int previousCursor = SDL_ShowCursor(SDL_QUERY);
     SDL_ShowCursor(SDL_DISABLE);
     g_PresentationSupported = initPresentationFeedback(window);
     qInfo() << "Wayland compositor presentation feedback:" << g_PresentationSupported;
@@ -422,6 +427,7 @@ int run(const QStringList& args)
                     }
                     g_Stop.store(true);
                     SDL_WaitThread(thread, nullptr);
+                    if (g_ProducerFailed.load()) result = 7;
                 }
                 // Pacer is destroyed while the renderer is still alive;
                 // it drains queued frames and releases pending swapchain images.
@@ -431,8 +437,9 @@ int run(const QStringList& args)
     }
     shutdownPresentationFeedback();
     if (controller) SDL_GameControllerClose(controller);
-    SDL_ShowCursor(SDL_ENABLE);
+    SDL_ShowCursor(previousCursor);
     SDL_DestroyWindow(window);
+    SDL_QuitSubSystem(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER);
     exportCsv();
     return result;
 }
