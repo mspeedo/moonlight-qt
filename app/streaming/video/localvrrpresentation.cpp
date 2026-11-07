@@ -19,7 +19,7 @@ namespace {
 // This is the version 1 stable Wayland presentation-time wire protocol.
 // Keep the tiny local interface definitions instead of requiring generated
 // SDK headers (which are not installed by all Flatpak runtimes).
-const wl_interface kFeedbackInterface;
+extern const wl_interface kFeedbackInterface;
 const wl_interface* kFeedbackRequestTypes[] = { &wl_surface_interface, &kFeedbackInterface };
 const wl_message kPresentationRequests[] = {
     { "destroy", "", nullptr },
