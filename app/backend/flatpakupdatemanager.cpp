@@ -3,7 +3,7 @@
 #include <QFile>
 #include <QTimer>
 
-#ifdef Q_OS_LINUX
+#if defined(Q_OS_LINUX) && !defined(STEAM_LINK)
 #include <QDBusConnection>
 #include <QDBusError>
 #include <QDBusMessage>
@@ -13,7 +13,7 @@
 #endif
 
 namespace {
-#ifdef Q_OS_LINUX
+#if defined(Q_OS_LINUX) && !defined(STEAM_LINK)
 constexpr auto kPortalService = "org.freedesktop.portal.Flatpak";
 constexpr auto kPortalPath = "/org/freedesktop/portal/Flatpak";
 constexpr auto kPortalInterface = "org.freedesktop.portal.Flatpak";
@@ -23,10 +23,10 @@ constexpr auto kMonitorInterface = "org.freedesktop.portal.Flatpak.UpdateMonitor
 
 FlatpakUpdateManager::FlatpakUpdateManager(QObject* parent)
     : QObject(parent),
-      m_runningVersion(QStringLiteral(VERSION_STR)),
+      m_runningVersion(QString::fromLatin1(VERSION_STR)),
       m_statusText(tr("Select Check for updates to ask Flatpak for a newer build."))
 {
-#ifdef Q_OS_LINUX
+#if defined(Q_OS_LINUX) && !defined(STEAM_LINK)
     // UpdateMonitor only works for Flatpak-installed applications.
     m_supported = QFile::exists(QStringLiteral("/.flatpak-info"));
 #endif
@@ -49,7 +49,7 @@ void FlatpakUpdateManager::setError(const QString& message)
 
 void FlatpakUpdateManager::disconnectMonitor()
 {
-#ifdef Q_OS_LINUX
+#if defined(Q_OS_LINUX) && !defined(STEAM_LINK)
     if (m_monitorPath.isEmpty()) {
         return;
     }
@@ -72,7 +72,7 @@ void FlatpakUpdateManager::disconnectMonitor()
 
 void FlatpakUpdateManager::checkForUpdates()
 {
-#ifndef Q_OS_LINUX
+#if !defined(Q_OS_LINUX) || defined(STEAM_LINK)
     setError(tr("In-app updates are available only in the Linux Flatpak."));
 #else
     if (!m_supported) {
@@ -185,7 +185,7 @@ void FlatpakUpdateManager::onUpdateAvailable(QVariantMap info)
 
 void FlatpakUpdateManager::installLatest()
 {
-#ifndef Q_OS_LINUX
+#if !defined(Q_OS_LINUX) || defined(STEAM_LINK)
     setError(tr("This feature requires a Linux Flatpak installation."));
 #else
     if (!m_supported || !m_updateAvailable || m_monitorPath.isEmpty() ||
