@@ -31,7 +31,9 @@ void LocalVrrBenchmarkController::clearHistory()
 
 void LocalVrrBenchmarkController::start(QObject* guiWindow, bool variableFps,
                                          bool acquireLate, int durationSeconds,
-                                         bool showHud, bool forceComposition)
+                                         bool showHud, bool forceComposition,
+                                         int presentMode, int swapchainDepth,
+                                         int presentWait, int queuePolicy)
 {
 #if defined(Q_OS_LINUX) && defined(HAVE_LIBPLACEBO_VULKAN)
     if (m_Running) return;
