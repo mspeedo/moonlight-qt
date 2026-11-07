@@ -2,6 +2,13 @@
 
 #include <QFile>
 #include <QTimer>
+#include <QNetworkAccessManager>
+#include <QNetworkReply>
+#include <QNetworkRequest>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QRegularExpression>
+#include <QSettings>
 
 #if defined(Q_OS_LINUX) && !defined(STEAM_LINK)
 #include <QDBusConnection>
@@ -18,18 +25,27 @@ constexpr auto kPortalService = "org.freedesktop.portal.Flatpak";
 constexpr auto kPortalPath = "/org/freedesktop/portal/Flatpak";
 constexpr auto kPortalInterface = "org.freedesktop.portal.Flatpak";
 constexpr auto kMonitorInterface = "org.freedesktop.portal.Flatpak.UpdateMonitor";
+// Public metadata only. The signed Flatpak repository remains the authority
+// for actual installation, not this JSON document.
+constexpr auto kLatestIndex = "https://pub-3a75f66f021b46f3a095b41d1a3c553b.r2.dev/moonlight-latest.json";
 #endif
 }
 
 FlatpakUpdateManager::FlatpakUpdateManager(QObject* parent)
     : QObject(parent),
       m_runningVersion(QString::fromLatin1(VERSION_STR)),
-      m_statusText(tr("Select Check for updates to ask Flatpak for a newer build."))
+      m_statusText(tr("Check R2 for the latest published Flatpak build."))
 {
 #if defined(Q_OS_LINUX) && !defined(STEAM_LINK)
     // UpdateMonitor only works for Flatpak-installed applications.
     m_supported = QFile::exists(QStringLiteral("/.flatpak-info"));
+    if (m_supported) {
+        const QSettings flatpakInfo(QStringLiteral("/.flatpak-info"), QSettings::IniFormat);
+        m_runningCommit = flatpakInfo.value(QStringLiteral("Instance/app-commit")).toString();
+        m_localCommit = m_runningCommit;
+    }
 #endif
+    m_network = new QNetworkAccessManager(this);
 }
 
 void FlatpakUpdateManager::setStatus(const QString& message)
@@ -67,6 +83,7 @@ void FlatpakUpdateManager::disconnectMonitor()
         QString::fromLatin1(kMonitorInterface), QStringLiteral("Close"));
     bus.asyncCall(close);
     m_monitorPath.clear();
+    m_portalReady = false;
 #endif
 }
 
@@ -89,6 +106,8 @@ void FlatpakUpdateManager::checkForUpdates()
     m_errorText.clear();
     m_updateAvailable = false;
     m_latestCommit.clear();
+    m_latestGitCommit.clear();
+    m_portalReady = false;
     m_checking = true;
     m_statusText = tr("Checking for available Flatpak updates...");
     emit changed();
@@ -143,16 +162,65 @@ void FlatpakUpdateManager::checkForUpdates()
             setError(tr("Flatpak returned an unexpected update monitor path."));
             return;
         }
+        m_portalReady = true;
+        emit changed();
     });
 
-    // This portal is notification-based; Flatpak may refresh its remote
-    // on a timer. Do not misrepresent a timeout as proof of no update.
+    // Unlike the portal's periodic polling, this HTTPS request is an actual
+    // on-demand check for the latest successfully published R2 revision.
+    QNetworkRequest request(QUrl(QString::fromLatin1(kLatestIndex)));
+    request.setRawHeader("Cache-Control", "no-cache");
+    request.setAttribute(QNetworkRequest::CacheLoadControlAttribute,
+                         QNetworkRequest::AlwaysNetwork);
+    auto* reply = m_network->get(request);
+    connect(reply, &QNetworkReply::finished, this, [this, reply, generation] {
+        const QByteArray bytes = reply->readAll();
+        const QNetworkReply::NetworkError networkError = reply->error();
+        const QString networkMessage = reply->errorString();
+        reply->deleteLater();
+        if (generation != m_generation || m_installing || !m_errorText.isEmpty()) {
+            return;
+        }
+        if (networkError != QNetworkReply::NoError) {
+            setError(tr("Could not read R2 update index: %1").arg(networkMessage));
+            return;
+        }
+        QJsonParseError parseError;
+        const QJsonDocument doc = QJsonDocument::fromJson(bytes, &parseError);
+        const QJsonObject json = doc.object();
+        const QString commit = json.value(QStringLiteral("ostree_commit")).toString();
+        if (doc.isNull() || !doc.isObject() ||
+            json.value(QStringLiteral("schema")).toInt() != 1 ||
+            json.value(QStringLiteral("app_id")).toString() != QStringLiteral("com.moonlight_stream.Moonlight") ||
+            json.value(QStringLiteral("arch")).toString() != QStringLiteral("x86_64") ||
+            json.value(QStringLiteral("branch")).toString() != QStringLiteral("master") ||
+            !QRegularExpression(QStringLiteral("^[a-f0-9]{64}$")).match(commit).hasMatch()) {
+            setError(tr("R2 returned an invalid Moonlight update index."));
+            return;
+        }
+        m_latestCommit = commit;
+        m_latestGitCommit = json.value(QStringLiteral("git_commit")).toString();
+        m_checking = false;
+        m_updateAvailable = !m_runningCommit.isEmpty() && m_latestCommit != m_runningCommit;
+        if (m_runningCommit.isEmpty()) {
+            m_statusText = tr("Cannot read the running Flatpak commit. Install from the Moonlight R2 remote.");
+        } else if (m_restartRequired) {
+            m_statusText = tr("A different build is already installed. Restart Moonlight to activate it.");
+        } else if (m_updateAvailable) {
+            m_statusText = tr("A newer published build is available from R2.");
+        } else {
+            m_statusText = tr("You're running the latest published R2 build.");
+        }
+        emit changed();
+    });
+
+    // A stalled metadata request must not lock the page permanently.
     QTimer::singleShot(12000, this, [this, generation] {
         if (generation != m_generation || !m_checking) {
             return;
         }
         m_checking = false;
-        m_statusText = tr("No update announced yet. Flatpak may still be refreshing the repository.");
+        m_statusText = tr("The R2 update index hasn't responded yet. Check your connection and try again.");
         emit changed();
     });
 #endif
@@ -160,25 +228,31 @@ void FlatpakUpdateManager::checkForUpdates()
 
 void FlatpakUpdateManager::onUpdateAvailable(QVariantMap info)
 {
-    m_checking = false;
-    m_errorText.clear();
-    m_runningCommit = info.value(QStringLiteral("running-commit")).toString();
+    const QString running = info.value(QStringLiteral("running-commit")).toString();
     const QString local = info.value(QStringLiteral("local-commit")).toString();
-    m_latestCommit = info.value(QStringLiteral("remote-commit")).toString();
+    const QString remote = info.value(QStringLiteral("remote-commit")).toString();
+    if (!running.isEmpty()) {
+        m_runningCommit = running;
+    }
+    if (!local.isEmpty()) {
+        m_localCommit = local;
+    }
 
-    // The instance may already be running an older deployment than the one
-    // currently installed. In that case it only needs a restart.
     m_restartRequired = !m_runningCommit.isEmpty() &&
-                        !local.isEmpty() && local != m_runningCommit;
+                        !m_localCommit.isEmpty() && m_localCommit != m_runningCommit;
 
-    m_updateAvailable = !m_latestCommit.isEmpty() &&
-                        !local.isEmpty() && m_latestCommit != local;
-    if (m_updateAvailable) {
-        m_statusText = tr("New Flatpak build available for installation.");
-    } else if (m_restartRequired) {
-        m_statusText = tr("A new build is already installed. Restart Moonlight when convenient.");
-    } else {
-        m_statusText = tr("Moonlight is up to date according to Flatpak.");
+    // A notification can arrive while the HTTPS request is still running.
+    // Do not replace R2's newest commit with a potentially stale poll result.
+    if (m_latestCommit.isEmpty() && !remote.isEmpty()) {
+        m_latestCommit = remote;
+        m_updateAvailable = !m_localCommit.isEmpty() && remote != m_localCommit;
+        if (m_updateAvailable) {
+            m_statusText = tr("Flatpak reported an available update.");
+        }
+    }
+    if (m_restartRequired) {
+        m_updateAvailable = false;
+        m_statusText = tr("An update is already installed; restart Moonlight when convenient.");
     }
     emit changed();
 }
@@ -188,8 +262,7 @@ void FlatpakUpdateManager::installLatest()
 #if !defined(Q_OS_LINUX) || defined(STEAM_LINK)
     setError(tr("This feature requires a Linux Flatpak installation."));
 #else
-    if (!m_supported || !m_updateAvailable || m_monitorPath.isEmpty() ||
-        m_installing || m_checking) {
+    if (!canInstall() || m_monitorPath.isEmpty()) {
         return;
     }
     m_errorText.clear();
@@ -203,7 +276,7 @@ void FlatpakUpdateManager::installLatest()
         QString::fromLatin1(kMonitorInterface), QStringLiteral("Update"));
     update << QString() << QVariantMap();
     auto* watcher = new QDBusPendingCallWatcher(
-        QDBusConnection::sessionBus().asyncCall(update, 30000), this);
+        QDBusConnection::sessionBus().asyncCall(update, 300000), this);
     connect(watcher, &QDBusPendingCallWatcher::finished, this,
             [this](QDBusPendingCallWatcher* call) {
         QDBusPendingReply<> result = *call;
@@ -238,7 +311,12 @@ void FlatpakUpdateManager::onProgress(QVariantMap info)
     } else if (status == 1) {
         m_installing = false;
         m_updateAvailable = false;
-        m_statusText = tr("No additional update was available for installation.");
+        m_restartRequired = !m_runningCommit.isEmpty() &&
+                            !m_localCommit.isEmpty() &&
+                            m_localCommit != m_runningCommit;
+        m_statusText = m_restartRequired
+            ? tr("The update was already installed. Restart Moonlight to activate it.")
+            : tr("Flatpak did not find an installable update. Try checking again later.");
     } else if (status == 3) {
         setError(info.value(QStringLiteral("error_message")).toString());
         return;
