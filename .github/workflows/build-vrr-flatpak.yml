@@ -6,8 +6,8 @@ permissions:
 
 on:
   workflow_dispatch:
-  # Build all new commits; publish only the remote-sunshine-settings
-  # branch when R2 secrets and variables are configured.
+  # Build updater branch and publish it as the signed R2 Moonlight build.
+  # Only the updater branch publishes from this workflow version.
   push:
     branches:
       - vrr-image-adjustments
@@ -16,9 +16,8 @@ on:
 
 concurrency:
   group: moonlight-flatpak-${{ github.ref }}
-  # Feature branch builds supersede each other; signed publication on the
-  # main feature branch is never canceled by this updater branch.
-  cancel-in-progress: ${{ github.ref == 'refs/heads/feature/flatpak-update-page' }}
+  # Never interrupt an in-progress signed publication.
+  cancel-in-progress: false
 
 jobs:
   build:
@@ -105,7 +104,7 @@ jobs:
 
       - name: Restore and configure signed Flatpak R2 repository
         id: r2
-        if: github.ref == 'refs/heads/feature/remote-sunshine-settings'
+        if: github.ref == 'refs/heads/feature/flatpak-update-page'
         shell: bash
         env:
           R2_BUCKET: ${{ vars.R2_BUCKET }}
@@ -165,6 +164,7 @@ jobs:
         shell: bash
         env:
           R2_BUCKET: ${{ vars.R2_BUCKET }}
+          R2_ENDPOINT: ${{ vars.R2_ENDPOINT }}
           R2_PUBLIC_URL: ${{ vars.R2_PUBLIC_URL }}
           FLATPAK_GPG_KEY_ID: ${{ steps.r2.outputs.key_id }}
           RCLONE_CONFIG_R2_TYPE: s3
