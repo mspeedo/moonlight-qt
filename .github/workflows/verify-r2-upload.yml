@@ -52,7 +52,7 @@ jobs:
             exit 1
           }
           export RCLONE_CONFIG_R2_ENDPOINT="$endpoint"
-          obj="r2:${R2_BUCKET}/ci-probe-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.txt"
+          obj="r2:${R2_BUCKET}/flatpak/ci-probe-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.txt"
           tmp="$(mktemp)"
           trap 'rm -f "$tmp"' EXIT
           printf 'Moonlight Flatpak R2 S3 verification\n' > "$tmp"
@@ -67,24 +67,24 @@ jobs:
           r2 cat "$obj" | cmp - "$tmp" ||
             { echo "::error::R2 GET denied or content mismatch"; exit 1; }
           echo "Verifying bucket listing..."
-          r2 lsf "r2:${R2_BUCKET}/" --max-depth 1 >/dev/null ||
+          r2 lsf "r2:${R2_BUCKET}/flatpak/" --max-depth 1 >/dev/null ||
             { echo "::error::R2 ListBucket denied"; exit 1; }
-          echo "Inspecting bucket-root layout before repository restore..."
-          r2 lsjson "r2:${R2_BUCKET}/" --max-depth 1 > "$RUNNER_TEMP/r2-root.json"
+          echo "Inspecting the dedicated flatpak/ prefix before repository restore..."
+          r2 lsjson "r2:${R2_BUCKET}/flatpak/" --max-depth 1 > "$RUNNER_TEMP/r2-root.json"
           python3 - "$RUNNER_TEMP/r2-root.json" <<'PY'
           import json, sys
           entries = json.load(open(sys.argv[1]))
           for item in entries[:50]:
               print(("DIR  " if item.get("IsDir") else "FILE ") + item["Path"])
-          print(f"Root entries: {len(entries)} (printed at most 50)")
+          print(f"Flatpak prefix entries: {len(entries)} (printed at most 50)")
           PY
           echo "Inspecting remote OSTree summary and repository config..."
-          if r2 cat "r2:${R2_BUCKET}/summary" >/dev/null 2>&1; then
+          if r2 cat "r2:${R2_BUCKET}/flatpak/summary" >/dev/null 2>&1; then
             echo "Root OSTree summary: present"
           else
             echo "Root OSTree summary: absent"
           fi
-          if r2 cat "r2:${R2_BUCKET}/config" >/dev/null 2>&1; then
+          if r2 cat "r2:${R2_BUCKET}/flatpak/config" >/dev/null 2>&1; then
             echo "Root OSTree config: present"
           else
             echo "Root OSTree config: absent"
