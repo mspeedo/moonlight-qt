@@ -27,6 +27,9 @@
 
 #ifdef HAVE_FFMPEG
 #include "streaming/video/ffmpeg.h"
+#if defined(Q_OS_LINUX) && defined(HAVE_LIBPLACEBO_VULKAN)
+#include "streaming/video/localvrrtest.h"
+#endif
 #endif
 
 #if defined(Q_OS_WIN32)
@@ -810,6 +813,19 @@ int main(int argc, char *argv[])
                 freopen_s(&fp, "NUL", "w", stderr);
             }
         }
+    }
+#endif
+
+#if defined(Q_OS_LINUX) && defined(HAVE_LIBPLACEBO_VULKAN)
+    // Dedicated, fully offline diagnostic: never constructs Session, connects a
+    // host, opens a decoder or changes stored streaming preferences.
+    if (app.arguments().contains("--local-vrr-test")) {
+        if (QGuiApplication::platformName().startsWith("wayland")) {
+            qputenv("SDL_VIDEODRIVER", "wayland");
+        } else if (QGuiApplication::platformName() == "xcb") {
+            qputenv("SDL_VIDEODRIVER", "x11");
+        }
+        return LocalVrrTest::run(app.arguments());
     }
 #endif
 
