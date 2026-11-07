@@ -6,7 +6,35 @@ connection, transport, capture, FFmpeg decoder or stream session**. Normal
 Moonlight startup and streaming are unaffected unless this explicit launch
 flag is present.
 
-## Installation and launching
+## Run from inside Moonlight (recommended for SteamOS Game Mode)
+
+Launch **Moonlight normally from Steam Game Mode** using the new Flatpak build.
+On the **Computers** or **Settings** page, select **VRR Benchmark** in the
+top toolbar (reachable with the controller's D-pad/left stick). This opens
+a dedicated gamepad-navigable page where you can configure:
+
+* **Producer cadence:** repeatable variable 80–110 FPS or fixed 90 FPS.
+* **Swapchain acquisition:** existing early ordering or experimental late ordering.
+* **Duration:** 30, 60, 120 seconds or manual stop.
+* **Diagnostic HUD:** on or off.
+
+Select **Start VRR benchmark**. The Moonlight Qt interface is hidden, and a
+fullscreen Vulkan diagnostic window opens in the **same Moonlight process**.
+This preserves the Steam launcher and Gamescope context. When the benchmark
+finishes or you press **B**, Moonlight's normal UI returns to the same page
+and displays the summary including average/max intervals, drops, reported
+compositor presentation intervals (when available), and the saved CSV path.
+
+During the fullscreen test, **X** toggles the producer cadence, **Y** toggles
+swapchain acquisition, **A** toggles HUD, and **B** returns to Moonlight.
+The UI selections are the starting configuration. Use separate timed runs
+without mid-run toggles for clean A/B comparisons. Menu navigation uses
+Moonlight's existing SteamOS gamepad-to-Tab focus behavior.
+
+No terminal command, manually added launch argument or second Steam shortcut
+is required. The test is reachable without connecting to a Sunshine host.
+
+## Optional command-line launching
 
 Install the `Moonlight-feature-local-vrr-render-pipeline-test-<sha>.flatpak`
 artifact from the feature branch's **Build - Moonlight Flatpak** GitHub Actions
