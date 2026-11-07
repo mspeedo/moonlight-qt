@@ -120,7 +120,9 @@ FocusScope {
                     RadioButton {
                         id: latestBuild
                         text: FlatpakUpdateManager.updateAvailable
-                              ? qsTr("Latest available build · %1").arg(FlatpakUpdateManager.latestCommit.substring(0, 12))
+                              ? qsTr("Latest available build · %1").arg((FlatpakUpdateManager.latestGitCommit.length > 0
+                                   ? FlatpakUpdateManager.latestGitCommit.substring(0, 12)
+                                   : FlatpakUpdateManager.latestCommit.substring(0, 12)))
                               : qsTr("Latest available build")
                         checked: true
                         enabled: FlatpakUpdateManager.updateAvailable &&
@@ -141,10 +143,7 @@ FocusScope {
                         id: installButton
                         text: FlatpakUpdateManager.installing ? qsTr("Installing...") : qsTr("Install selected update")
                         enabled: FlatpakUpdateManager.supported &&
-                                 FlatpakUpdateManager.updateAvailable &&
-                                 !FlatpakUpdateManager.checking &&
-                                 !FlatpakUpdateManager.installing &&
-                                 !FlatpakUpdateManager.restartRequired
+                                 FlatpakUpdateManager.canInstall
                         onClicked: FlatpakUpdateManager.installLatest()
                         focusPolicy: Qt.StrongFocus
                     }
