@@ -704,9 +704,42 @@ bool PlVkRenderer::initialize(PDECODER_PARAMETERS params)
         }
     }
 
-    // Keep V-Sync at minimum depth. In VRR mode, allow one additional image in flight
-    // so rendering can overlap presentation without building a deep queue.
-    if (!createSwapchain(m_EnableVsync ? 1 : 2)) {
+#if defined(Q_OS_LINUX) && defined(HAVE_LIBPLACEBO_VULKAN)
+    // Local-only experiment: select a specific Vulkan WSI present mode,
+    // rather than forcing environment variables across the entire Flatpak.
+    // Unsupported modes fail explicitly; never silently switch test variants.
+    if (m_DiagnosticPipeline && m_DiagnosticPresentChoice != 0) {
+        VkPresentModeKHR candidate = VK_PRESENT_MODE_FIFO_KHR;
+        switch (m_DiagnosticPresentChoice) {
+        case 1: candidate = VK_PRESENT_MODE_IMMEDIATE_KHR; break;
+        case 2: candidate = VK_PRESENT_MODE_MAILBOX_KHR; break;
+        case 3: candidate = VK_PRESENT_MODE_FIFO_RELAXED_KHR; break;
+        case 4: candidate = VK_PRESENT_MODE_FIFO_KHR; break;
+        default:
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                         "Local VRR: invalid requested present mode");
+            return false;
+        }
+        if (candidate != VK_PRESENT_MODE_FIFO_KHR &&
+            !isPresentModeSupportedByPhysicalDevice(m_Vulkan->phys_device, candidate)) {
+            m_DiagnosticPresentUnsupported = true;
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                         "Local VRR: requested Vulkan present mode %d is unsupported",
+                         static_cast<int>(candidate));
+            return false;
+        }
+        m_VkPresentMode = candidate;
+    }
+#endif
+
+    // Default behavior is unchanged. Local diagnostic may request 1/2/3
+    // swapchain-depth values for a controlled queueing experiment.
+    int depth = m_EnableVsync ? 1 : 2;
+#if defined(Q_OS_LINUX) && defined(HAVE_LIBPLACEBO_VULKAN)
+    if (m_DiagnosticPipeline)
+        depth = m_DiagnosticDepth;
+#endif
+    if (!createSwapchain(depth)) {
         return false;
     }
 
@@ -1097,9 +1130,13 @@ void PlVkRenderer::waitToRender()
     // With libplacebo's Vulkan backend, swap_buffers waits for queued presents to finish.
     // Keep that synchronization for conventional V-Sync pacing, but skip it for the
     // unpaced VRR path so a completed decode is not held behind presentation completion.
-    if (m_EnableVsync) {
+    bool waitForPreviousPresent = m_EnableVsync;
+#if defined(Q_OS_LINUX) && defined(HAVE_LIBPLACEBO_VULKAN)
+    if (m_DiagnosticPipeline)
+        waitForPreviousPresent = m_DiagnosticWaitChoice == 1;
+#endif
+    if (waitForPreviousPresent)
         pl_swapchain_swap_buffers(m_Swapchain);
-    }
 #endif
 
     // Handle the swapchain being resized
@@ -1402,6 +1439,10 @@ void PlVkRenderer::renderFrame(AVFrame *frame)
 
 #if defined(Q_OS_LINUX) && defined(HAVE_LIBPLACEBO_VULKAN)
     if (LocalVrrTest::active()) LocalVrrTest::record(LocalVrrTest::Metric::Submit);
+    // Test whether explicitly draining the previous present *after* submit
+    // changes Gamescope VRR cadence. Never enabled for normal streaming.
+    if (m_DiagnosticPipeline && m_DiagnosticWaitChoice == 2)
+        pl_swapchain_swap_buffers(m_Swapchain);
 #endif
 
 #ifndef PLVK_USE_EARLY_RENDER_TO_WAIT
