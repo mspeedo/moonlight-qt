@@ -105,6 +105,18 @@ Flickable {
                 }
                 ColumnLayout {
                     Layout.fillWidth: true
+                    Label { text: qsTr("Gamescope composition path"); font.pointSize: 14 }
+                    ComboBox {
+                        id: compositionChoice
+                        Layout.fillWidth: true
+                        font.pointSize: 14
+                        model: [qsTr("Automatic (Gamescope chooses)"),
+                                qsTr("Force GPU composition (experimental)")]
+                        currentIndex: 0
+                    }
+                }
+                ColumnLayout {
+                    Layout.fillWidth: true
                     Label { text: qsTr("Benchmark length"); font.pointSize: 14 }
                     ComboBox {
                         id: durationChoice
@@ -138,7 +150,8 @@ Flickable {
                     var durations = [60, 30, 120, 0]
                     benchmark.start(root.Window.window, fpsChoice.currentIndex === 0,
                                     acquireChoice.currentIndex === 1,
-                                    durations[durationChoice.currentIndex], hudChoice.checked)
+                                    durations[durationChoice.currentIndex], hudChoice.checked,
+                                    compositionChoice.currentIndex === 1)
                 }
             }
             Label {
@@ -150,7 +163,7 @@ Flickable {
         }
         Label {
             Layout.fillWidth: true
-            text: qsTr("During the test: X switches frame rates • Y switches acquisition order • A toggles HUD • B returns to Moonlight. Keyboard: X/Y/H/Esc. The selected duration also ends automatically.")
+            text: qsTr("During the test: X switches frame rates • Y switches acquisition order • A toggles HUD • B returns to Moonlight. Keyboard: X/Y/H/Esc. Composition mode is fixed for each run. The selected duration also ends automatically.")
             wrapMode: Text.WordWrap
             font.pointSize: 13
         }
@@ -165,7 +178,7 @@ Flickable {
                 Label {
                     text: Object.keys(benchmark.results).length === 0
                           ? qsTr("Run a benchmark to display the results here.")
-                          : qsTr("CPU intervals are not display timestamps; Gamescope presentation feedback is shown only if supported.")
+                          : qsTr("Scanout path requires Gamescope-side telemetry. The forced-composition request alone is not a measurement. CPU intervals are not display timestamps.")
                     wrapMode: Text.WordWrap
                     Layout.fillWidth: true
                     font.pointSize: 13
@@ -175,6 +188,14 @@ Flickable {
                     columns: 2
                     columnSpacing: 25
                     rowSpacing: 5
+                    Label { text: qsTr("Requested composition mode"); font.pointSize: 13 }
+                    Label { font.pointSize: 13; wrapMode: Text.WordWrap; text: benchmark.results.compositionRequest || "—" }
+                    Label { text: qsTr("Gamescope control status"); font.pointSize: 13 }
+                    Label { font.pointSize: 13; wrapMode: Text.WordWrap; text: benchmark.results.compositionControl || "—" }
+                    Label { text: qsTr("Direct scanout / GPU composition"); font.pointSize: 13 }
+                    Label { font.pointSize: 13; wrapMode: Text.WordWrap; text: benchmark.results.scanoutPath || qsTr("Not measured") }
+                    Label { text: qsTr("Scanout evidence"); font.pointSize: 13 }
+                    Label { font.pointSize: 13; wrapMode: Text.WordWrap; text: benchmark.results.scanoutEvidence || qsTr("Not available") }
                     Label { text: qsTr("Frames produced / submitted / dropped"); font.pointSize: 13 }
                     Label {
                         font.pointSize: 13
@@ -225,6 +246,8 @@ Flickable {
                         font.pointSize: 12
                         wrapMode: Text.WordWrap
                         text: (index + 1) + ". " + modelData.mode + " | " + modelData.ordering +
+                              " | " + modelData.compositionRequest +
+                              " | " + modelData.scanoutPath +
                               " | " + (modelData.duration === 0 ? qsTr("manual") : modelData.duration + " s") +
                               "  — " + qsTr("drops") + ": " + modelData.dropped +
                               ", " + qsTr("acquire avg") + ": " + Number(modelData.acquireAvg).toFixed(2) + " ms" +
