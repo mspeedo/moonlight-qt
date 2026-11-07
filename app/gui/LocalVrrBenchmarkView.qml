@@ -203,6 +203,42 @@ Flickable {
                 }
             }
         }
+
+        GroupBox {
+            title: qsTr("A/B comparison history (current Moonlight session)")
+            Layout.fillWidth: true
+            font.pointSize: 14
+            ColumnLayout {
+                width: parent.width
+                spacing: 7
+                Label {
+                    visible: benchmark.history.length === 0
+                    Layout.fillWidth: true
+                    font.pointSize: 13
+                    text: qsTr("Run several configurations to compare them here.")
+                    wrapMode: Text.WordWrap
+                }
+                Repeater {
+                    model: benchmark.history
+                    delegate: Label {
+                        Layout.fillWidth: true
+                        font.pointSize: 12
+                        wrapMode: Text.WordWrap
+                        text: (index + 1) + ". " + modelData.mode + " | " + modelData.ordering +
+                              " | " + (modelData.duration === 0 ? qsTr("manual") : modelData.duration + " s") +
+                              "  — " + qsTr("drops") + ": " + modelData.dropped +
+                              ", " + qsTr("acquire avg") + ": " + Number(modelData.acquireAvg).toFixed(2) + " ms" +
+                              ", " + qsTr("present avg") + ": " +
+                              (modelData.presented > 1 ? Number(modelData.presentAvg).toFixed(2) + " ms" : "N/A")
+                    }
+                }
+                Button {
+                    text: qsTr("Clear comparison history")
+                    enabled: benchmark.history.length > 0 && !benchmark.running
+                    onClicked: benchmark.clearHistory()
+                }
+            }
+        }
     }
 
     function intervalText(metric) {
