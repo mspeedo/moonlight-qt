@@ -126,8 +126,11 @@ public:
         }
         m_Ready = true;
         m_Status = QStringLiteral("Gamescope X11 control set; no compositor acknowledgement");
+        // Intern the name even if the compositor has not yet published its
+        // first path decision; otherwise a fresh instrumented build would be
+        // incorrectly treated as unsupported for the entire benchmark.
         m_ScanoutAtom = XInternAtom(m_Display,
-                                   "GAMESCOPE_MOONLIGHT_SCANOUT_PATH", True);
+                                   "GAMESCOPE_MOONLIGHT_SCANOUT_PATH", False);
 #else
         m_Status = QStringLiteral("Built without X11 Gamescope control support");
 #endif
