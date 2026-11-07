@@ -89,6 +89,13 @@ jobs:
           else
             echo "Root OSTree config: absent"
           fi
+          echo "Verifying repository restore into a local directory..."
+          mkdir -p "$RUNNER_TEMP/flatpak-restore"
+          r2 copy "r2:${R2_BUCKET}/flatpak/" "$RUNNER_TEMP/flatpak-restore/" ||
+            { echo "::error::Failed to restore the isolated Flatpak repository prefix"; exit 1; }
+          test -f "$RUNNER_TEMP/flatpak-restore/$(basename "$obj")" ||
+            { echo "::error::R2 restore did not produce the expected object"; exit 1; }
+          echo "Local repository restore passed"
           echo "Verifying delete permission..."
           r2 deletefile "$obj" ||
             { echo "::error::R2 delete denied"; exit 1; }
