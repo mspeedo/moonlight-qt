@@ -447,6 +447,14 @@ void Pacer::renderFrame(AVFrame* frame)
         return;
     }
 
+    // Strict FIFO experiment: consume buffered frames in order, avoiding
+    // legacy adaptive post-render queue draining. The hard 3-frame queue
+    // limit in dropFrameForEnqueue() still protects memory and latency.
+    // This is never enabled by production streaming.
+    if (m_DiagnosticMode && !m_DiagnosticQueueLatest) {
+        return;
+    }
+
     // Drop frames if we have too many queued up for a while
     QMutexLocker frameQueueLocker(&m_FrameQueueLock);
 
