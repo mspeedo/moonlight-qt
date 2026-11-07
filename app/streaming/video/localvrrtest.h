@@ -17,6 +17,7 @@ struct Snapshot {
            submitAvgMs = 0, presentAvgMs = 0;
     double producePeakMs = 0, acquirePeakMs = 0, renderPeakMs = 0, submitPeakMs = 0, presentPeakMs = 0;
     QString compositionRequest, compositionControl, scanoutPath, scanoutEvidence;
+    QString sdlWindowBackend, vulkanPresentMode;
 };
 bool active();
 std::uint64_t nowUs();
