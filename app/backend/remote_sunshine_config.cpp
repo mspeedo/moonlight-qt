@@ -76,6 +76,7 @@ void RemoteSunshineConfig::connectPaired(const QVariantMap& host)
     m_Authorization.clear();
     m_Csrf.clear();
     m_Connected = false;
+    m_Platform.clear();
     m_Dirty = false;
     m_RefreshAttempted = false;
     m_RetryAction.clear();
@@ -259,6 +260,7 @@ void RemoteSunshineConfig::onResult(const QString& action, const QByteArray& dat
             request("config", "/api/config");
         }
     } else if (action == "config") {
+        m_Platform = obj.value("platform").toString().toLower();
         m_Values = obj;
         m_Values.remove("status");
         m_Values.remove("platform");
