@@ -63,6 +63,12 @@ jobs:
                   or bool(re.fullmatch(r"ci-probe-[0-9]+-[0-9]+\.txt", key))
               )
 
+          root = s3.list_objects_v2(Bucket=bucket, MaxKeys=30)
+          print("S3 bucket-root key count (first page):", root.get("KeyCount"))
+          print("S3 bucket-root samples:", [item["Key"] for item in root.get("Contents", [])[:30]])
+          print("S3 prefix count flatpak/:", s3.list_objects_v2(Bucket=bucket, Prefix="flatpak/", MaxKeys=2).get("KeyCount"))
+          sys.stdout.flush()
+
           targets = {}
           for prefix in ("moonlight-updates", "ci-probe-"):
               pages = s3.get_paginator("list_objects_v2").paginate(
