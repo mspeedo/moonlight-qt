@@ -175,10 +175,31 @@ CenteredGridView {
                     text: qsTr("View All Apps")
                     onTriggered: {
                         var component = Qt.createComponent("AppView.qml")
-                        var appView = component.createObject(stackView, {"computerIndex": index, "objectName": model.name, "showHiddenGames": true})
+                        var appView = component.createObject(stackView, {"computerIndex": index, "objectName": model.name, "showHiddenGames": true,
+                                                                           "sunshineHostInfo": computerModel.sunshineAdminInfo(index)})
                         stackView.push(appView)
                     }
                     visible: model.online && model.paired
+                }
+                NavigableMenuItem {
+                    text: qsTr("Sunshine Remote Settings")
+                    visible: model.online && model.paired && model.sunshine
+                    onTriggered: {
+                        var host = computerModel.sunshineAdminInfo(index)
+                        if (!host.address) {
+                            errorDialog.text = qsTr("Unable to determine Sunshine's secure administration address.")
+                            errorDialog.open()
+                            return
+                        }
+                        var component = Qt.createComponent("RemoteSunshineView.qml")
+                        if (component.status === Component.Error) {
+                            errorDialog.text = component.errorString()
+                            errorDialog.open()
+                            return
+                        }
+                        var view = component.createObject(stackView, {"hostInfo": host})
+                        if (view) stackView.push(view)
+                    }
                 }
                 NavigableMenuItem {
                     text: qsTr("Wake PC")
@@ -229,7 +250,8 @@ CenteredGridView {
                 else if (model.paired) {
                     // go to game view
                     var component = Qt.createComponent("AppView.qml")
-                    var appView = component.createObject(stackView, {"computerIndex": index, "objectName": model.name})
+                    var appView = component.createObject(stackView, {"computerIndex": index, "objectName": model.name,
+                                                                           "sunshineHostInfo": computerModel.sunshineAdminInfo(index)})
                     stackView.push(appView)
                 }
                 else {

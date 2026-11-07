@@ -175,6 +175,7 @@ SOURCES += \
     backend/nvcomputer.cpp \
     backend/nvhttp.cpp \
     backend/nvpairingmanager.cpp \
+    backend/remote_sunshine_config.cpp \
     backend/computermanager.cpp \
     backend/boxartmanager.cpp \
     backend/richpresencemanager.cpp \
@@ -219,6 +220,7 @@ HEADERS += \
     backend/nvcomputer.h \
     backend/nvhttp.h \
     backend/nvpairingmanager.h \
+    backend/remote_sunshine_config.h \
     backend/computermanager.h \
     backend/boxartmanager.h \
     backend/richpresencemanager.h \

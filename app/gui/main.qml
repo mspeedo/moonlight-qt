@@ -293,6 +293,22 @@ ApplicationWindow {
                 text: !titleLabel.visible ? stackView.currentItem.objectName : ""
             }
 
+            // Available directly while browsing apps on a paired Sunshine host.
+            // A Loader owns this small control, so leaving the app list closes
+            // its TLS connections without touching normal host polling.
+            Loader {
+                id: sunshineProfilesLoader
+                active: stackView.currentItem instanceof AppView &&
+                        Boolean(stackView.currentItem.sunshineHostInfo.address)
+                visible: active
+                Layout.preferredWidth: active ? 355 : 0
+                Layout.preferredHeight: 42
+                sourceComponent: SunshineProfileSwitcher {
+                    hostInfo: stackView.currentItem ? stackView.currentItem.sunshineHostInfo : ({})
+                    returnFocusItem: stackView.currentItem
+                }
+            }
+
             Label {
                 id: versionLabel
                 visible: stackView.currentItem instanceof SettingsView

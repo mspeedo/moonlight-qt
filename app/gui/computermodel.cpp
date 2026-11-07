@@ -34,6 +34,8 @@ QVariant ComputerModel::data(const QModelIndex& index, int role) const
         return computer->state == NvComputer::CS_ONLINE;
     case PairedRole:
         return computer->pairState == NvComputer::PS_PAIRED;
+    case SunshineRole:
+        return !computer->isNvidiaServerSoftware;
     case BusyRole:
         return computer->currentGameId != 0;
     case WakeableRole:
@@ -87,6 +89,29 @@ QVariant ComputerModel::data(const QModelIndex& index, int role) const
     }
 }
 
+QVariantMap ComputerModel::sunshineAdminInfo(int computerIndex) const
+{
+    if (computerIndex < 0 || computerIndex >= m_Computers.count()) return {};
+    NvComputer* computer = m_Computers.at(computerIndex);
+    QReadLocker lock(&computer->lock);
+    if (computer->state != NvComputer::CS_ONLINE ||
+        computer->pairState != NvComputer::PS_PAIRED ||
+        computer->isNvidiaServerSoftware ||
+        computer->serverCert.isNull() ||
+        computer->activeAddress.port() >= 65535 ||
+        computer->activeHttpsPort == 0) return {};
+
+    // Sunshine's web UI is GameStream's base HTTP port + 1 (normally 47990).
+    // A separately mapped administration port is intentionally unsupported.
+    return {
+        {"name", computer->name},
+        {"address", computer->activeAddress.address()},
+        {"port", int(computer->activeAddress.port()) + 1},
+        {"gameStreamHttpsPort", int(computer->activeHttpsPort)},
+        {"certificate", computer->serverCert.toDer().toBase64()}
+    };
+}
+
 int ComputerModel::rowCount(const QModelIndex& parent) const
 {
     // We should not return a count for valid index values,
@@ -105,6 +130,7 @@ QHash<int, QByteArray> ComputerModel::roleNames() const
     names[NameRole] = "name";
     names[OnlineRole] = "online";
     names[PairedRole] = "paired";
+    names[SunshineRole] = "sunshine";
     names[BusyRole] = "busy";
     names[WakeableRole] = "wakeable";
     names[StatusUnknownRole] = "statusUnknown";

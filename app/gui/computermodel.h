@@ -12,6 +12,7 @@ class ComputerModel : public QAbstractListModel
         NameRole = Qt::UserRole,
         OnlineRole,
         PairedRole,
+        SunshineRole,
         BusyRole,
         WakeableRole,
         StatusUnknownRole,
@@ -42,6 +43,9 @@ public:
     Q_INVOKABLE void wakeComputer(int computerIndex);
 
     Q_INVOKABLE void renameComputer(int computerIndex, QString name);
+
+    // Active Sunshine web UI endpoint and paired TLS certificate, never admin credentials.
+    Q_INVOKABLE QVariantMap sunshineAdminInfo(int computerIndex) const;
 
     Q_INVOKABLE Session* createSessionForCurrentGame(int computerIndex);
 

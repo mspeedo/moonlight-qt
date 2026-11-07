@@ -7,12 +7,25 @@ permissions:
 on:
   workflow_dispatch:
   # Push-triggered CI validation after common-c upstream sync (2026-11-02).
-  # One-time branch push kickoff when this workflow file changes.
+  # Validate the remote settings connection-lifecycle fix on this feature branch.
   push:
     branches:
       - vrr-image-adjustments
+      - feature/remote-sunshine-settings
     paths:
       - '.github/workflows/build-vrr-flatpak.yml'
+      - 'app/backend/remote_sunshine_config.*'
+      - 'app/gui/RemoteSunshineView.qml'
+      - 'app/gui/SunshineProfileSwitcher.qml'
+      - 'app/gui/AppView.qml'
+      - 'app/gui/main.qml'
+      - 'app/gui/PcView.qml'
+      - 'app/gui/computermodel.*'
+      - 'app/app.pro'
+      - 'app/main.cpp'
+      - 'app/qml.qrc'
+      - 'com.moonlight_stream.Moonlight.yaml'
+      - 'libplacebo-disable-internally-synchronized-queues.patch'
 
 concurrency:
   group: moonlight-flatpak-${{ github.ref }}
@@ -26,7 +39,7 @@ jobs:
 
     steps:
       - name: Checkout selected Moonlight branch
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
         with:
           submodules: false
           fetch-depth: 1
@@ -123,7 +136,7 @@ jobs:
             com.moonlight_stream.Moonlight
 
       - name: Upload Flatpak artifact
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: Moonlight-${{ steps.source.outputs.safe_branch }}-${{ steps.source.outputs.short_sha }}
           path: Moonlight-${{ steps.source.outputs.safe_branch }}-${{ steps.source.outputs.short_sha }}.flatpak

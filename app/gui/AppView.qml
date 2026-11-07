@@ -8,6 +8,8 @@ import SdlGamepadKeyNavigation 1.0
 
 CenteredGridView {
     property int computerIndex
+    // Resolved on the paired PC screen; empty for non-Sunshine hosts.
+    property var sunshineHostInfo: ({})
     property AppModel appModel : createModel()
     property bool activated
     property bool showHiddenGames

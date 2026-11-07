@@ -42,7 +42,8 @@ modules:
     sources:
       - type: git
         url: https://github.com/haasn/libplacebo.git
-        commit: e2972fdd09adacd383656738d7d280f0cd84a761
+        tag: v7.387.0
+        commit: 275f7dea27924cdd34ab2e6c20e448b6bc4fab65
       - type: patch
         path: libplacebo-disable-internally-synchronized-queues.patch
 
@@ -70,8 +71,8 @@ modules:
     sources:
       - type: git
         url: https://github.com/libsdl-org/SDL.git
-        tag: release-3.4.16
-        commit: fa2c02bb6e21974a89ea9824bc53c9932abe5f9c
+        tag: release-3.4.20
+        commit: f00dc919ca35b9756316e86c4777392de442f9b2
 
   - name: SDL2-compat
     buildsystem: cmake-ninja
@@ -83,8 +84,8 @@ modules:
     sources:
       - type: git
         url: https://github.com/libsdl-org/sdl2-compat.git
-        tag: release-2.32.72
-        # latest stable 2.32.72 (released 2026-09-02)
+        tag: release-2.32.74
+        commit: e4df8a55f20da762290a78c2bbe8f8d89d01486a
 
   - name: SDL2_ttf
     build-options:
@@ -187,5 +188,5 @@ modules:
         dest: qmdnsengine/qmdnsengine
       - type: git
         url: https://github.com/mdqinc/SDL_GameControllerDB.git
-        commit: c6d6e7ecca57ff106ef63350da3cc03728d88a5f
+        commit: 07af1d50187e94c861c9f9f5d8a55b148f11306b
         dest: app/SDL_GameControllerDB
