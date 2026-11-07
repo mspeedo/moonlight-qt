@@ -49,6 +49,7 @@
 #include "gui/computermodel.h"
 #include "gui/appmodel.h"
 #include "backend/autoupdatechecker.h"
+#include "backend/flatpakupdatemanager.h"
 #include "backend/computermanager.h"
 #include "backend/remote_sunshine_config.h"
 #include "backend/systemproperties.h"
@@ -955,6 +956,11 @@ int main(int argc, char *argv[])
                                                 [](QQmlEngine*, QJSEngine*) -> QObject* {
                                                     return new AutoUpdateChecker();
                                                 });
+    qmlRegisterSingletonType<FlatpakUpdateManager>("FlatpakUpdateManager", 1, 0,
+                                                     "FlatpakUpdateManager",
+                                                     [](QQmlEngine*, QJSEngine*) -> QObject* {
+                                                         return new FlatpakUpdateManager();
+                                                     });
     qmlRegisterSingletonType<SystemProperties>("SystemProperties", 1, 0,
                                                "SystemProperties",
                                                [](QQmlEngine*, QJSEngine*) -> QObject* {
