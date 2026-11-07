@@ -57,21 +57,41 @@ case "${1:-}" in
     probe_file="$RUNNER_TEMP/moonlight-r2-probe.txt"
     probe_object="r2:${R2_BUCKET}/ci-probe-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.txt"
     printf '%s\n' "Moonlight R2 upload validation" > "$probe_file"
-    rclone_checked copyto "$probe_file" "$probe_object" ||
-      die "R2 write preflight failed: verify S3 endpoint and token permissions"
-    rclone_checked cat "$probe_object" >/dev/null ||
-      die "R2 read preflight failed"
-    rclone_checked deletefile "$probe_object" ||
-      die "R2 cleanup preflight failed"
+    if ! rclone_checked copyto "$probe_file" "$probe_object"; then
+      rm -f "$probe_file"
+      echo "publish_ready=false" >> "$GITHUB_OUTPUT"
+      echo "::warning::R2 write preflight denied. A signed Flatpak bundle will still be built, but repository publication is skipped."
+      exit 0
+    fi
+    if ! rclone_checked cat "$probe_object" >/dev/null; then
+      echo "publish_ready=false" >> "$GITHUB_OUTPUT"
+      echo "::warning::R2 read preflight failed. The signed bundle will still be built."
+      exit 0
+    fi
+    if ! rclone_checked deletefile "$probe_object"; then
+      echo "publish_ready=false" >> "$GITHUB_OUTPUT"
+      echo "::warning::R2 cleanup preflight failed. The signed bundle will still be built."
+      exit 0
+    fi
     rm -f "$probe_file"
     echo "R2 upload preflight passed."
 
     # An empty bucket is valid on the first build. Preserve old objects.
-    rclone_checked lsf "r2:${R2_BUCKET}/" --max-depth 1 >/dev/null
+    if ! rclone_checked lsf "r2:${R2_BUCKET}/" --max-depth 1 >/dev/null; then
+      echo "publish_ready=false" >> "$GITHUB_OUTPUT"
+      echo "::warning::R2 listing failed. Continuing with signed Flatpak build only."
+      exit 0
+    fi
     mkdir -p repo
-    rclone_checked copy "r2:${R2_BUCKET}/" repo/ \
+    if ! rclone_checked copy "r2:${R2_BUCKET}/" repo/ \
       --exclude '/moonlight-fork.flatpakrepo' \
-      --exclude '/moonlight-latest.json'
+      --exclude '/moonlight-latest.json'; then
+      echo "publish_ready=false" >> "$GITHUB_OUTPUT"
+      echo "::warning::R2 repository restore failed. Continuing with signed Flatpak build only."
+      rm -rf repo
+      exit 0
+    fi
+    echo "publish_ready=true" >> "$GITHUB_OUTPUT"
     echo "Existing R2 OSTree repository restored (empty on first publication)."
     ;;
 
