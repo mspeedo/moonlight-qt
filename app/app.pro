@@ -345,6 +345,10 @@ cuda {
 }
 libplacebo {
     message(Vulkan support enabled via libplacebo)
+    unix:!macx {
+        SOURCES += streaming/video/localvrrtest.cpp
+        HEADERS += streaming/video/localvrrtest.h
+    }
 
     DEFINES += HAVE_LIBPLACEBO_VULKAN
     SOURCES += \
