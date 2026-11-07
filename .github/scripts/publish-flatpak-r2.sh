@@ -20,6 +20,8 @@ configure_r2_endpoint() {
   [[ "$endpoint" =~ ^https://[^/]+$ ]] ||
     die "R2_ENDPOINT must be an account-level HTTPS S3 endpoint, optionally followed by /$R2_BUCKET"
   export RCLONE_CONFIG_R2_ENDPOINT="$endpoint"
+  # Bucket-scoped Object-level API tokens may not call HeadBucket.
+  export RCLONE_CONFIG_R2_NO_CHECK_BUCKET=true
   echo "RCLONE_CONFIG_R2_ENDPOINT=$endpoint" >> "$GITHUB_ENV"
   echo "Using account-level R2 endpoint: $endpoint"
 }
@@ -57,40 +59,22 @@ case "${1:-}" in
     probe_file="$RUNNER_TEMP/moonlight-r2-probe.txt"
     probe_object="r2:${R2_BUCKET}/ci-probe-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.txt"
     printf '%s\n' "Moonlight R2 upload validation" > "$probe_file"
-    if ! rclone_checked copyto "$probe_file" "$probe_object"; then
-      rm -f "$probe_file"
-      echo "publish_ready=false" >> "$GITHUB_OUTPUT"
-      echo "::warning::R2 write preflight denied. A signed Flatpak bundle will still be built, but repository publication is skipped."
-      exit 0
-    fi
-    if ! rclone_checked cat "$probe_object" >/dev/null; then
-      echo "publish_ready=false" >> "$GITHUB_OUTPUT"
-      echo "::warning::R2 read preflight failed. The signed bundle will still be built."
-      exit 0
-    fi
-    if ! rclone_checked deletefile "$probe_object"; then
-      echo "publish_ready=false" >> "$GITHUB_OUTPUT"
-      echo "::warning::R2 cleanup preflight failed. The signed bundle will still be built."
-      exit 0
-    fi
+    rclone_checked copyto "$probe_file" "$probe_object" ||
+      die "R2 write preflight denied. Check Object Read & Write permission, account and bucket scope."
+    rclone_checked cat "$probe_object" >/dev/null ||
+      die "R2 read preflight denied."
+    rclone_checked deletefile "$probe_object" ||
+      die "R2 delete preflight denied."
     rm -f "$probe_file"
     echo "R2 upload preflight passed."
 
-    # An empty bucket is valid on the first build. Preserve old objects.
-    if ! rclone_checked lsf "r2:${R2_BUCKET}/" --max-depth 1 >/dev/null; then
-      echo "publish_ready=false" >> "$GITHUB_OUTPUT"
-      echo "::warning::R2 listing failed. Continuing with signed Flatpak build only."
-      exit 0
-    fi
+    # An empty bucket is valid on first release. Existing OSTree objects
+    # are required for incremental upgrades on subsequent releases.
+    rclone_checked lsf "r2:${R2_BUCKET}/" --max-depth 1 >/dev/null
     mkdir -p repo
-    if ! rclone_checked copy "r2:${R2_BUCKET}/" repo/ \
+    rclone_checked copy "r2:${R2_BUCKET}/" repo/ \
       --exclude '/moonlight-fork.flatpakrepo' \
-      --exclude '/moonlight-latest.json'; then
-      echo "publish_ready=false" >> "$GITHUB_OUTPUT"
-      echo "::warning::R2 repository restore failed. Continuing with signed Flatpak build only."
-      rm -rf repo
-      exit 0
-    fi
+      --exclude '/moonlight-latest.json'
     echo "publish_ready=true" >> "$GITHUB_OUTPUT"
     echo "Existing R2 OSTree repository restored (empty on first publication)."
     ;;
