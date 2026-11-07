@@ -137,14 +137,6 @@ FocusScope {
                         focusPolicy: Qt.StrongFocus
                     }
 
-                    Label {
-                        text: qsTr("MVP: only the newest build from your Flatpak remote is supported. Previous builds and rollback are not available.")
-                        font.pixelSize: 14
-                        color: "#B0BEC5"
-                        wrapMode: Text.Wrap
-                        Layout.fillWidth: true
-                    }
-
                     Button {
                         id: installButton
                         text: FlatpakUpdateManager.installing ? qsTr("Installing...") : qsTr("Install selected update")
