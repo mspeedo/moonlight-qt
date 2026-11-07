@@ -48,7 +48,9 @@ case "${1:-}" in
     # the previous OSTree objects so incremental static deltas can be generated.
     rclone lsf "r2:${R2_BUCKET}/" --max-depth 1 >/dev/null
     mkdir -p repo
-    rclone copy "r2:${R2_BUCKET}/" repo/ --exclude '/moonlight-fork.flatpakrepo'
+    rclone copy "r2:${R2_BUCKET}/" repo/ \
+      --exclude '/moonlight-fork.flatpakrepo' \
+      --exclude '/moonlight-latest.json'
     echo "Existing R2 OSTree repository restored (empty on first publication)."
     ;;
 
@@ -87,6 +89,17 @@ EOF
     rclone copyto repo/summary "r2:${R2_BUCKET}/summary"
     rclone copyto moonlight-fork.flatpakrepo "r2:${R2_BUCKET}/moonlight-fork.flatpakrepo"
 
+    # Publish this index LAST, after all signed OSTree data is available.
+    # Moonlight uses it for a real on-demand check rather than waiting for
+    # the portal's periodic (typically 30-minute) remote polling cycle.
+    ostree_commit="$(ostree --repo=repo rev-parse app/com.moonlight_stream.Moonlight/x86_64/master)"
+    [[ "$ostree_commit" =~ ^[a-f0-9]{64}$ ]] || die "Could not resolve the published Moonlight OSTree commit"
+    published_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    cat > moonlight-latest.json <<EOF
+{"schema":1,"app_id":"com.moonlight_stream.Moonlight","arch":"x86_64","branch":"master","ostree_commit":"$ostree_commit","git_commit":"$GITHUB_SHA","published_at":"$published_at"}
+EOF
+    rclone copyto moonlight-latest.json "r2:${R2_BUCKET}/moonlight-latest.json"
+
     # Public access must be separately enabled on the R2 bucket.
     curl --fail --silent --show-error --location --retry 3 --retry-delay 2 \
       "$public_url/summary" --output /dev/null \
@@ -94,6 +107,9 @@ EOF
     curl --fail --silent --show-error --location \
       "$public_url/moonlight-fork.flatpakrepo" --output /dev/null \
       || die "Public Flatpak remote descriptor is unreachable"
+    curl --fail --silent --show-error --location \
+      "$public_url/moonlight-latest.json" --output /dev/null \
+      || die "Public release index is unreachable"
 
     {
       echo '## Flatpak R2 publication'
@@ -102,6 +118,7 @@ EOF
       echo "- Remote descriptor: $public_url/moonlight-fork.flatpakrepo"
       echo '- Signed commits and repository summary: yes'
       echo '- Incremental OSTree history: preserved'
+      echo '- Latest release index: `$public_url/moonlight-latest.json`'
     } >> "$GITHUB_STEP_SUMMARY"
     ;;
 
