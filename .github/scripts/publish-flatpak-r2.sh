@@ -56,7 +56,6 @@ case "${1:-}" in
     [[ -n "${FLATPAK_GPG_KEY_ID:-}" ]] || die "Missing key fingerprint from prepare step"
     [[ -d repo ]] || die "Missing OSTree repository"
     flatpak build-update-repo \
-      --update-appstream \
       --generate-static-deltas \
       --gpg-sign="$FLATPAK_GPG_KEY_ID" \
       repo
