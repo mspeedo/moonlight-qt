@@ -163,54 +163,82 @@ Item {
                         }
                     }
 
-                    ListView {
-                        id: optionList
+                    // Unlike a virtualized ListView, Repeater keeps every
+                    // setting in the Tab focus chain even when scrolled away.
+                    // This matches native SettingsView's keyboard/gamepad flow.
+                    Flickable {
+                        id: optionScroller
                         Layout.fillWidth: true
                         Layout.fillHeight: true
                         clip: true
-                        spacing: 5
-                        model: remote.settings.filter(function(option) {
-                            return option.key.toLowerCase().indexOf(searchInput.text.toLowerCase()) !== -1
-                        })
-                        delegate: RowLayout {
-                            width: optionList.width - 12
-                            spacing: 8
-                            Label {
-                                font.pointSize: root.settingsFontPointSize
-                                text: modelData.key
-                                Layout.preferredWidth: 245
-                                elide: Text.ElideRight
-                                ToolTip {
-                                    visible: mouseOver.containsMouse
-                                    text: modelData.key
-                                    font.pointSize: root.settingsFontPointSize
+                        contentWidth: width
+                        contentHeight: optionColumn.height
+                        flickableDirection: Flickable.VerticalFlick
+                        boundsBehavior: Flickable.StopAtBounds
+                        ScrollBar.vertical: ScrollBar {}
+
+                        function ensureControlVisible(control) {
+                            if (!control)
+                                return
+                            var pos = control.mapToItem(optionColumn, 0, 0)
+                            var margin = 12
+                            var maxScroll = Math.max(0, contentHeight - height)
+                            if (pos.y - margin < contentY)
+                                contentY = Math.max(0, pos.y - margin)
+                            else if (pos.y + control.height + margin > contentY + height)
+                                contentY = Math.min(maxScroll, pos.y + control.height + margin - height)
+                        }
+
+                        Column {
+                            id: optionColumn
+                            width: optionScroller.width
+                            spacing: 5
+
+                            Repeater {
+                                model: remote.settings.filter(function(option) {
+                                    return option.key.toLowerCase().indexOf(searchInput.text.toLowerCase()) !== -1
+                                })
+                                delegate: RowLayout {
+                                    width: optionColumn.width - 12
+                                    spacing: 8
+                                    Label {
+                                        font.pointSize: root.settingsFontPointSize
+                                        text: modelData.key
+                                        Layout.preferredWidth: 245
+                                        elide: Text.ElideRight
+                                        ToolTip {
+                                            visible: mouseOver.containsMouse
+                                            text: modelData.key
+                                            font.pointSize: root.settingsFontPointSize
+                                        }
+                                        MouseArea {
+                                            id: mouseOver
+                                            anchors.fill: parent
+                                            hoverEnabled: true
+                                            acceptedButtons: Qt.NoButton
+                                        }
+                                    }
+                                    TextField {
+                                        font.pointSize: root.settingsFontPointSize
+                                        Layout.fillWidth: true
+                                        text: modelData.value
+                                        onActiveFocusChanged: {
+                                            if (activeFocus)
+                                                optionScroller.ensureControlVisible(this)
+                                        }
+                                        selectByMouse: true
+                                        onEditingFinished: remote.setOption(modelData.key, text)
+                                    }
+                                    Button {
+                                        font.pointSize: root.settingsFontPointSize
+                                        text: qsTr("Reset")
+                                        onActiveFocusChanged: {
+                                            if (activeFocus)
+                                                optionScroller.ensureControlVisible(this)
+                                        }
+                                        onClicked: remote.removeOption(modelData.key)
+                                    }
                                 }
-                                MouseArea {
-                                    id: mouseOver
-                                    anchors.fill: parent
-                                    hoverEnabled: true
-                                    acceptedButtons: Qt.NoButton
-                                }
-                            }
-                            TextField {
-                                font.pointSize: root.settingsFontPointSize
-                                Layout.fillWidth: true
-                                text: modelData.value
-                                onActiveFocusChanged: {
-                                    if (activeFocus)
-                                        optionList.positionViewAtIndex(index, ListView.Contain)
-                                }
-                                selectByMouse: true
-                                onEditingFinished: remote.setOption(modelData.key, text)
-                            }
-                            Button {
-                                font.pointSize: root.settingsFontPointSize
-                                text: qsTr("Reset")
-                                onActiveFocusChanged: {
-                                    if (activeFocus)
-                                        optionList.positionViewAtIndex(index, ListView.Contain)
-                                }
-                                onClicked: remote.removeOption(modelData.key)
                             }
                         }
                     }
