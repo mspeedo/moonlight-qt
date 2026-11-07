@@ -2,6 +2,9 @@
 #include "streaming/streamutils.h"
 #include "streaming/session.h"
 #include "streaming/streampipelinetelemetry.h"
+#if defined(Q_OS_LINUX) && defined(HAVE_LIBPLACEBO_VULKAN)
+#include "streaming/video/localvrrtest.h"
+#endif
 
 #ifdef Q_OS_WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -31,12 +34,13 @@ static_assert(PACER_MAX_OUTSTANDING_FRAMES == MAX_QUEUED_FRAMES + 2,
 // V-sync happens.
 #define TIMER_SLACK_MS 3
 
-Pacer::Pacer(IFFmpegRenderer* renderer, PVIDEO_STATS videoStats) :
+Pacer::Pacer(IFFmpegRenderer* renderer, PVIDEO_STATS videoStats, bool diagnosticMode) :
     m_RenderThread(nullptr),
     m_VsyncThread(nullptr),
     m_DeferredFreeFrame(nullptr),
     m_Stopping(false),
     m_RenderLatestFrame(false),
+    m_DiagnosticMode(diagnosticMode),
     m_VsyncSource(nullptr),
     m_VsyncRenderer(renderer),
     m_MaxVideoFps(0),
@@ -68,7 +72,9 @@ Pacer::~Pacer()
     }
     else {
         // Stop any further overlay callbacks
-        Session::get()->getOverlayManager().setOverlayRenderer(nullptr);
+        if (!m_DiagnosticMode) {
+            Session::get()->getOverlayManager().setOverlayRenderer(nullptr);
+        }
 
         // Notify the renderer that it is being destroyed soon
         // NB: This must happen on the same thread that calls renderFrame().
@@ -158,8 +164,14 @@ int Pacer::renderThread(void* context)
     }
 
     while (!me->m_Stopping) {
-        // Wait for the renderer to be ready for the next frame
-        me->m_VsyncRenderer->waitToRender();
+        // Baseline: acquire swapchain before waiting for decoded output.
+        // Experiment: wait for at least one frame, then acquire, then select newest.
+        // This deliberately changes no production streaming configuration.
+        const bool acquireLate = me->m_DiagnosticMode &&
+                me->m_DiagnosticAcquireLate.load(std::memory_order_relaxed);
+        if (!acquireLate) {
+            me->m_VsyncRenderer->waitToRender();
+        }
 
         // Acquire the frame queue lock to protect the queue and
         // the not empty condition
@@ -168,6 +180,12 @@ int Pacer::renderThread(void* context)
         // Wait for a frame to be ready to render
         while (!me->m_Stopping && me->m_RenderQueue.isEmpty()) {
             me->m_RenderQueueNotEmpty.wait(&me->m_FrameQueueLock);
+        }
+
+        if (acquireLate && !me->m_Stopping) {
+            me->m_FrameQueueLock.unlock();
+            me->m_VsyncRenderer->waitToRender();
+            me->m_FrameQueueLock.lock();
         }
 
         // Select the newest decoded output only after the renderer is ready.
@@ -179,6 +197,9 @@ int Pacer::renderThread(void* context)
             av_frame_free(&staleFrame);
             me->m_VideoStats->pacerDroppedFrames++;
             StreamPipelineTelemetry::pacerDrop();
+#if defined(Q_OS_LINUX) && defined(HAVE_LIBPLACEBO_VULKAN)
+            if (me->m_DiagnosticMode) LocalVrrTest::record(LocalVrrTest::Metric::Drop);
+#endif
             me->m_FrameQueueLock.lock();
         }
 
@@ -195,7 +216,9 @@ int Pacer::renderThread(void* context)
     }
 
     // Stop any further overlay callbacks
-    Session::get()->getOverlayManager().setOverlayRenderer(nullptr);
+    if (!me->m_DiagnosticMode) {
+        Session::get()->getOverlayManager().setOverlayRenderer(nullptr);
+    }
 
     // Notify the renderer that it is being destroyed soon
     // NB: This must happen on the same thread that calls renderFrame().
@@ -353,7 +376,9 @@ bool Pacer::initialize(SDL_Window* window, int maxVideoFps, bool enablePacing, b
     m_VsyncRenderer->prepareToRender();
 
     // Tell overlay manager to use this frontend renderer
-    Session::get()->getOverlayManager().setOverlayRenderer(m_VsyncRenderer);
+    if (!m_DiagnosticMode) {
+        Session::get()->getOverlayManager().setOverlayRenderer(m_VsyncRenderer);
+    }
 
     if (m_VsyncRenderer->isRenderThreadSupported()) {
         m_RenderThread = SDL_CreateThread(Pacer::renderThread, "PacerRender", this);
@@ -387,7 +412,14 @@ void Pacer::renderFrame(AVFrame* frame)
             StreamPipelineTelemetry::armRenderStart(pipelineRenderStartUs);
         }
     }
+    const uint64_t diagnosticRenderStartUs = m_DiagnosticMode ? LiGetMicroseconds() : 0;
     m_VsyncRenderer->renderFrame(frame);
+#if defined(Q_OS_LINUX) && defined(HAVE_LIBPLACEBO_VULKAN)
+    if (m_DiagnosticMode) {
+        LocalVrrTest::record(LocalVrrTest::Metric::Render,
+                             LiGetMicroseconds() - diagnosticRenderStartUs);
+    }
+#endif
     if (pipelineFrameNumber != 0) {
         StreamPipelineTelemetry::recordDecodedToRenderStart(
                     pipelineFrameNumber, pipelineRenderStartUs);
@@ -459,6 +491,9 @@ void Pacer::dropFrameForEnqueue(QQueue<AVFrame*>& queue)
     if (queue.size() == MAX_QUEUED_FRAMES) {
         AVFrame* frame = queue.dequeue();
         av_frame_free(&frame);
+#if defined(Q_OS_LINUX) && defined(HAVE_LIBPLACEBO_VULKAN)
+        if (m_DiagnosticMode) LocalVrrTest::record(LocalVrrTest::Metric::Drop);
+#endif
     }
 }
 
