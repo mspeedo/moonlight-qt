@@ -41,6 +41,7 @@ std::vector<Row> g_Rows;
 std::array<Stat, 8> g_Stats;
 std::uint64_t g_LastProduced = 0, g_LastSubmit = 0, g_LastPresented = 0;
 bool g_PresentationSupported = false;
+QString g_LastCsvPath;
 std::atomic<bool> g_Stop {false};
 std::atomic<bool> g_Variable {true};
 constexpr int kWidth = 960, kHeight = 540;
@@ -77,6 +78,15 @@ double peakMs(Metric metric)
 {
     return double(g_Stats[static_cast<int>(metric)].peak) / 1000.0;
 }
+double averageMs(Metric metric)
+{
+    const auto& stat = g_Stats[static_cast<int>(metric)];
+    const bool initialEmpty = metric == Metric::Produce || metric == Metric::Submit ||
+                              metric == Metric::Present;
+    const std::uint64_t samples = stat.count > (initialEmpty ? 1u : 0u)
+                                  ? stat.count - (initialEmpty ? 1u : 0u) : 0;
+    return samples ? double(stat.sum / samples) / 1000.0 : 0.0;
+}
 
 void exportCsv()
 {
@@ -101,8 +111,9 @@ void exportCsv()
         if (row.actualPresentUs != 0) stream << row.actualPresentUs;
         stream << '\n';
     }
+    g_LastCsvPath = filename;
     qInfo() << "VRR diagnostic CSV:" << filename
-            << "(actual presentation unavailable through libplacebo swapchain)";
+            << "Wayland presentation timestamps provided where available";
 }
 
 AVFrame* makeFrame(std::uint64_t elapsedUs)
@@ -252,6 +263,11 @@ void record(Metric metric, std::uint64_t value)
     if (g_Rows.size() < 500000)
         g_Rows.push_back({now, value, actualPresentUs, metric});
 }
+QString lastCsvPath()
+{
+    std::lock_guard<std::mutex> lock(g_Lock);
+    return g_LastCsvPath;
+}
 Snapshot snapshot()
 {
     std::lock_guard<std::mutex> lock(g_Lock);
@@ -266,6 +282,11 @@ Snapshot snapshot()
     s.renderMs = lastMs(Metric::Render);
     s.submitMs = lastMs(Metric::Submit);
     s.presentMs = lastMs(Metric::Present);
+    s.produceAvgMs = averageMs(Metric::Produce);
+    s.acquireAvgMs = averageMs(Metric::Acquire);
+    s.renderAvgMs = averageMs(Metric::Render);
+    s.submitAvgMs = averageMs(Metric::Submit);
+    s.presentAvgMs = averageMs(Metric::Present);
     s.producePeakMs = peakMs(Metric::Produce);
     s.acquirePeakMs = peakMs(Metric::Acquire);
     s.renderPeakMs = peakMs(Metric::Render);
@@ -276,10 +297,30 @@ Snapshot snapshot()
 
 int run(const QStringList& args)
 {
+    g_Enabled.store(false, std::memory_order_release);
+    {
+        std::lock_guard<std::mutex> lock(g_Lock);
+        g_Rows.clear();
+        g_Stats.fill({});
+        g_LastProduced = g_LastSubmit = g_LastPresented = 0;
+        g_LastCsvPath.clear();
+    }
     g_Stop.store(false);
     g_Variable.store(!args.contains("--vrr-constant"));
     bool late = args.contains("--vrr-acquire-late");
-    bool showHud = true;
+    bool showHud = !args.contains("--vrr-hud-off");
+    int durationSeconds = 0;
+    for (const QString& arg : args) {
+        if (arg.startsWith("--vrr-duration=")) {
+            bool ok = false;
+            const int seconds = arg.mid(QString("--vrr-duration=").length()).toInt(&ok);
+            if (!ok || seconds < 0 || seconds > 3600) {
+                qWarning() << "Invalid VRR duration:" << arg;
+                return 6;
+            }
+            durationSeconds = seconds;
+        }
+    }
     if (SDL_InitSubSystem(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER) != 0) {
         qWarning() << "VRR diagnostic SDL initialization failed:" << SDL_GetError();
         return 1;
@@ -333,7 +374,14 @@ int run(const QStringList& args)
                 } else {
                     Uint32 nextHudUpdate = 0;
                     bool running = true;
+                    const auto benchmarkStart = Clock::now();
                     while (running && !g_Stop.load()) {
+                        if (durationSeconds > 0 &&
+                            Clock::now() - benchmarkStart >=
+                                std::chrono::seconds(durationSeconds)) {
+                            running = false;
+                            break;
+                        }
                         SDL_Event event;
                         while (SDL_PollEvent(&event)) {
                             if (event.type == SDL_QUIT) running = false;
