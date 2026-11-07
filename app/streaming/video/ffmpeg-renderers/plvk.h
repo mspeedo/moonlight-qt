@@ -60,6 +60,21 @@ public:
     {
         return m_Swapchain ? m_VkPresentMode : VK_PRESENT_MODE_MAX_ENUM_KHR;
     }
+
+    // Configured before initialize() by the standalone benchmark ONLY.
+    // Present: 0=auto, 1=Immediate, 2=Mailbox, 3=FIFO relaxed, 4=FIFO.
+    // Wait: 0=none, 1=before acquire, 2=after submit.
+    // All normal streaming renderers retain the existing behavior.
+    void configureDiagnosticPipeline(int presentChoice, int depth, int waitChoice)
+    {
+        m_DiagnosticPipeline = true;
+        m_DiagnosticPresentChoice = presentChoice;
+        m_DiagnosticDepth = depth;
+        m_DiagnosticWaitChoice = waitChoice;
+    }
+
+    int diagnosticSwapchainDepth() const { return m_SwapchainDepth; }
+    bool diagnosticPresentModeUnsupported() const { return m_DiagnosticPresentUnsupported; }
 #endif
     virtual bool notifyWindowChanged(PWINDOW_STATE_CHANGE_INFO) override;
     virtual int getRendererAttributes() override;
@@ -110,6 +125,13 @@ private:
     // Stream state
     int m_MaxVideoFps;
     bool m_EnableVsync = false;
+#if defined(HAVE_LIBPLACEBO_VULKAN) && defined(Q_OS_LINUX)
+    bool m_DiagnosticPipeline = false;
+    bool m_DiagnosticPresentUnsupported = false;
+    int m_DiagnosticPresentChoice = 0;
+    int m_DiagnosticDepth = 2;
+    int m_DiagnosticWaitChoice = 0;
+#endif
 
     // The libplacebo rendering state
     pl_log m_Log = nullptr;
