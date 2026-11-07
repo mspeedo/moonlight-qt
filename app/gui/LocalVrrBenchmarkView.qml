@@ -105,6 +105,55 @@ Flickable {
                 }
                 ColumnLayout {
                     Layout.fillWidth: true
+                    Label { text: qsTr("Vulkan present mode"); font.pointSize: 14 }
+                    ComboBox {
+                        id: presentModeChoice
+                        Layout.fillWidth: true
+                        font.pointSize: 14
+                        model: [qsTr("Automatic (existing default)"),
+                                "IMMEDIATE", "MAILBOX", "FIFO_RELAXED", "FIFO"]
+                        currentIndex: 0
+                    }
+                }
+                ColumnLayout {
+                    Layout.fillWidth: true
+                    Label { text: qsTr("Vulkan swapchain depth"); font.pointSize: 14 }
+                    ComboBox {
+                        id: bufferDepthChoice
+                        Layout.fillWidth: true
+                        font.pointSize: 14
+                        model: [qsTr("1 (minimal)"), qsTr("2 (current baseline)"),
+                                qsTr("3 (more buffered)")]
+                        currentIndex: 1
+                    }
+                }
+                ColumnLayout {
+                    Layout.fillWidth: true
+                    Label { text: qsTr("Presentation completion wait"); font.pointSize: 14 }
+                    ComboBox {
+                        id: presentWaitChoice
+                        Layout.fillWidth: true
+                        font.pointSize: 14
+                        model: [qsTr("None (current VRR baseline)"),
+                                qsTr("Wait before acquire"),
+                                qsTr("Wait after submit")]
+                        currentIndex: 0
+                    }
+                }
+                ColumnLayout {
+                    Layout.fillWidth: true
+                    Label { text: qsTr("Pacer frame selection"); font.pointSize: 14 }
+                    ComboBox {
+                        id: queueChoice
+                        Layout.fillWidth: true
+                        font.pointSize: 14
+                        model: [qsTr("Newest available (baseline)"),
+                                qsTr("FIFO / oldest queued")]
+                        currentIndex: 0
+                    }
+                }
+                ColumnLayout {
+                    Layout.fillWidth: true
                     Label { text: qsTr("Gamescope composition path"); font.pointSize: 14 }
                     ComboBox {
                         id: compositionChoice
@@ -151,7 +200,11 @@ Flickable {
                     benchmark.start(root.Window.window, fpsChoice.currentIndex === 0,
                                     acquireChoice.currentIndex === 1,
                                     durations[durationChoice.currentIndex], hudChoice.checked,
-                                    compositionChoice.currentIndex === 1)
+                                    compositionChoice.currentIndex === 1,
+                                    presentModeChoice.currentIndex,
+                                    bufferDepthChoice.currentIndex + 1,
+                                    presentWaitChoice.currentIndex,
+                                    queueChoice.currentIndex)
                 }
             }
             Label {
@@ -163,7 +216,7 @@ Flickable {
         }
         Label {
             Layout.fillWidth: true
-            text: qsTr("The first second is an unmeasured warm-up. Frames render normally, but stats and CSV begin afterward; timed runs include the full selected measured duration. During the test: X switches frame rates • Y switches acquisition order • A toggles HUD • B returns to Moonlight. Keyboard: X/Y/H/Esc. Composition mode is fixed for each run.")
+            text: qsTr("Experiment settings are fixed per run (restart to compare). Unsupported Vulkan present modes fail rather than silently falling back. The first second is an unmeasured warm-up; selected timed durations are measured after it. During the test: X switches frame rate • Y switches acquisition order • A toggles HUD • B exits. Keyboard: X/Y/H/Esc.")
             wrapMode: Text.WordWrap
             font.pointSize: 13
         }
@@ -188,6 +241,14 @@ Flickable {
                     columns: 2
                     columnSpacing: 25
                     rowSpacing: 5
+                    Label { text: qsTr("Vulkan present-mode request"); font.pointSize: 13 }
+                    Label { font.pointSize: 13; text: benchmark.results.pipelinePresentRequest || "—" }
+                    Label { text: qsTr("Swapchain depth"); font.pointSize: 13 }
+                    Label { font.pointSize: 13; text: benchmark.results.pipelineDepth || "—" }
+                    Label { text: qsTr("Present completion wait"); font.pointSize: 13 }
+                    Label { font.pointSize: 13; text: benchmark.results.pipelineWait || "—" }
+                    Label { text: qsTr("Pacer queue strategy"); font.pointSize: 13 }
+                    Label { font.pointSize: 13; text: benchmark.results.pipelineQueue || "—" }
                     Label { text: qsTr("Actual SDL window backend"); font.pointSize: 13 }
                     Label { font.pointSize: 13; wrapMode: Text.WordWrap; text: benchmark.results.sdlWindowBackend || qsTr("Not detected") }
                     Label { text: qsTr("Vulkan swapchain present mode"); font.pointSize: 13 }
@@ -252,6 +313,9 @@ Flickable {
                         text: (index + 1) + ". " + modelData.mode + " | " + modelData.ordering +
                               " | " + modelData.sdlWindowBackend +
                               " | " + modelData.vulkanPresentMode +
+                              " | depth " + modelData.pipelineDepth +
+                              " | " + modelData.pipelineWait +
+                              " | queue " + modelData.pipelineQueue +
                               " | " + modelData.compositionRequest +
                               " | " + modelData.scanoutPath +
                               " | " + (modelData.duration === 0 ? qsTr("manual") : modelData.duration + " s") +
