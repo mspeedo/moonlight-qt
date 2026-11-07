@@ -6,6 +6,7 @@ import QtQuick.Controls.Material 2.2
 
 import ComputerManager 1.0
 import AutoUpdateChecker 1.0
+import FlatpakUpdateManager 1.0
 import StreamingPreferences 1.0
 import SystemProperties 1.0
 import SdlGamepadKeyNavigation 1.0
@@ -396,6 +397,24 @@ ApplicationWindow {
                     AutoUpdateChecker.onUpdateAvailable.connect(updateAvailable)
                     AutoUpdateChecker.start()
                 }
+
+                Keys.onDownPressed: {
+                    stackView.currentItem.forceActiveFocus(Qt.TabFocus)
+                }
+            }
+
+            // Opens the in-app Flatpak updater without leaving Gamescope.
+            NavigableToolButton {
+                id: flatpakUpdatesButton
+                visible: FlatpakUpdateManager.supported
+                iconSource: "qrc:/res/update.svg"
+                onClicked: navigateTo("qrc:/gui/UpdatesView.qml", UpdatesView)
+
+                ToolTip.delay: 1000
+                ToolTip.timeout: 3000
+                ToolTip.visible: hovered
+                ToolTip.text: qsTr("Flatpak Updates") +
+                              (FlatpakUpdateManager.restartRequired ? qsTr(" — Restart required") : "")
 
                 Keys.onDownPressed: {
                     stackView.currentItem.forceActiveFocus(Qt.TabFocus)
