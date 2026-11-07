@@ -31,7 +31,7 @@ void LocalVrrBenchmarkController::clearHistory()
 
 void LocalVrrBenchmarkController::start(QObject* guiWindow, bool variableFps,
                                          bool acquireLate, int durationSeconds,
-                                         bool showHud)
+                                         bool showHud, bool forceComposition)
 {
 #if defined(Q_OS_LINUX) && defined(HAVE_LIBPLACEBO_VULKAN)
     if (m_Running) return;
@@ -58,6 +58,7 @@ void LocalVrrBenchmarkController::start(QObject* guiWindow, bool variableFps,
     if (!variableFps) options << QStringLiteral("--vrr-constant");
     if (acquireLate) options << QStringLiteral("--vrr-acquire-late");
     if (!showHud) options << QStringLiteral("--vrr-hud-off");
+    if (forceComposition) options << QStringLiteral("--vrr-force-composition");
     if (durationSeconds > 0)
         options << QStringLiteral("--vrr-duration=%1").arg(durationSeconds);
 
@@ -91,6 +92,10 @@ void LocalVrrBenchmarkController::start(QObject* guiWindow, bool variableFps,
         report.insert(QStringLiteral("renderMax"), stats.renderPeakMs);
         report.insert(QStringLiteral("submitMax"), stats.submitPeakMs);
         report.insert(QStringLiteral("presentMax"), stats.presentPeakMs);
+        report.insert(QStringLiteral("compositionRequest"), stats.compositionRequest);
+        report.insert(QStringLiteral("compositionControl"), stats.compositionControl);
+        report.insert(QStringLiteral("scanoutPath"), stats.scanoutPath);
+        report.insert(QStringLiteral("scanoutEvidence"), stats.scanoutEvidence);
         report.insert(QStringLiteral("csv"), LocalVrrTest::lastCsvPath());
         report.insert(QStringLiteral("exitCode"), exitCode);
         report.insert(QStringLiteral("mode"), variableFps
@@ -128,6 +133,7 @@ void LocalVrrBenchmarkController::start(QObject* guiWindow, bool variableFps,
     Q_UNUSED(acquireLate)
     Q_UNUSED(durationSeconds)
     Q_UNUSED(showHud)
+    Q_UNUSED(forceComposition)
     setStatus(QStringLiteral("Vulkan local VRR diagnostic is only available on Linux Flatpak"));
 #endif
 }
