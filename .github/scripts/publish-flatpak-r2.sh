@@ -21,6 +21,17 @@ case "${1:-}" in
 
     [[ "$R2_ENDPOINT" == https://* ]] || die "R2_ENDPOINT must be an HTTPS S3 endpoint"
     [[ "$R2_PUBLIC_URL" == https://* ]] || die "R2_PUBLIC_URL must be an HTTPS public-bucket URL"
+
+    # Cloudflare may display a bucket-suffixed S3 URL, while rclone
+    # expects the account-level endpoint (it adds the bucket separately).
+    normalized_endpoint="${R2_ENDPOINT%/}"
+    normalized_endpoint="${normalized_endpoint%/${R2_BUCKET}}"
+    if [[ "$normalized_endpoint" == */*/*/* ]]; then
+      die "R2_ENDPOINT must be an account-level S3 URL, optionally followed by /$R2_BUCKET"
+    fi
+    export RCLONE_CONFIG_R2_ENDPOINT="$normalized_endpoint"
+    echo "RCLONE_CONFIG_R2_ENDPOINT=$normalized_endpoint" >> "$GITHUB_ENV"
+    echo "Normalized R2 S3 endpoint for bucket $R2_BUCKET"
     export GNUPGHOME="${RUNNER_TEMP}/moonlight-flatpak-gnupg"
     mkdir -p "$GNUPGHOME"
     chmod 700 "$GNUPGHOME"
