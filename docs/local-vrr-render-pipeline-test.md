@@ -15,6 +15,16 @@ a dedicated gamepad-navigable page where you can configure:
 
 * **Producer cadence:** repeatable variable 80–110 FPS or fixed 90 FPS.
 * **Swapchain acquisition:** existing early ordering or experimental late ordering.
+* **Vulkan present mode:** automatic baseline preference, IMMEDIATE, MAILBOX,
+  FIFO_RELAXED or FIFO. An explicitly requested unsupported mode fails the
+  benchmark (exit code 10) instead of silently using another.
+* **Swapchain depth:** 1, 2 (existing baseline), or 3 Vulkan images requested
+  through libplacebo.
+* **Presentation wait policy:** none (baseline), block on libplacebo
+  `pl_swapchain_swap_buffers()` before the next acquisition, or wait after
+  submitting the current frame.
+* **Frame selection:** newest available (baseline) or FIFO in the Pacer render
+  queue. The bounded queue still discards frames if it becomes full.
 * **Duration:** 30, 60, 120 **measured** seconds or manual stop; a separate
   one-second unmeasured warm-up precedes every run.
 * **Gamescope composition:** automatic selection or request forced full GPU composition
@@ -31,7 +41,7 @@ finishes or you press **B**, Moonlight's normal UI returns to the same page
 and displays the summary including average/max intervals, drops, reported
 compositor presentation intervals (when available), Gamescope composition
 request/status, scanout-path evidence, SDL window subsystem and Vulkan
-present mode, and the saved CSV path.
+present mode, the selected pipeline combination, and the saved CSV path.
 
 During the fullscreen test, **X** toggles the producer cadence, **Y** toggles
 swapchain acquisition, **A** toggles HUD, and **B** returns to Moonlight.
@@ -63,6 +73,24 @@ Launch the diagnostic with:
 ```sh
 flatpak run com.moonlight_stream.Moonlight --local-vrr-test
 ```
+
+To test another pipeline combination without changing normal streaming,
+use the **VRR Benchmark** page. All selections are fixed for that run except
+the existing X/Y cadence/acquisition shortcuts. For command-line testing, the
+options are:
+
+| CLI flag | Values | Baseline |
+| --- | --- | --- |
+| `--vrr-present-mode=N` | 0=auto, 1=Immediate, 2=Mailbox, 3=FIFO relaxed, 4=FIFO | 0 |
+| `--vrr-swapchain-depth=N` | 1, 2 or 3 | 2 |
+| `--vrr-present-wait=N` | 0=none, 1=before acquire, 2=after submit | 0 |
+| `--vrr-queue-policy=N` | 0=newest, 1=FIFO | 0 |
+| `--vrr-acquire-late` | absent=early, present=late | early |
+
+The selected present mode refers to Vulkan's requested WSI mode, not an
+independent display-flip measurement. For the existing baseline, IMMEDIATE is
+preferred when the Vulkan surface supports it. A Mesa WSI environment override
+may change the driver's effective choice.
 
 For immediate 90-FPS baseline:
 
@@ -208,11 +236,27 @@ renderer durations include rendering submission work, not GPU execution time.
 Frames dropped by the bounded Pacer queue are counted as drops; internal
 compositor discards are recorded separately.
 
-**Suggested comparison:** with SteamOS VRR ON and the performance OSD OFF,
-run fixed 90 FPS for 60 seconds using automatic composition, then repeat with
-forced GPU composition; retain the same acquisition order, screen refresh and
-other settings. Only after that repeat with the Steam performance OSD ON.
-Also compare 90 FPS early/late and variable 80–110 FPS early/late if required.
+**Suggested comparison:** On the Legion Go S with 120 Hz, VRR ON,
+Steam performance OSD OFF, fixed 90 FPS, and Gamescope composition set to
+Automatic, begin with the default pipeline as the control. Then vary **one
+pipeline dimension at a time**, using the same measured duration:
+
+1. **Baseline:** auto present mode / depth 2 / no wait / newest / early acquire.
+2. **Wait before acquire:** same except wait policy 1.
+3. **Wait after submit:** same except wait policy 2.
+4. **Depth 1 and then 3:** baseline wait policy, newest queue.
+5. **MAILBOX then FIFO_RELAXED then FIFO:** baseline depth and wait policy.
+   Skip an explicitly unsupported mode; failure is informative, not a crash.
+6. **FIFO queued frames:** baseline presentation settings, queue policy 1.
+7. Repeat the most promising settings with **variable 80-110 FPS** and,
+   separately, Steam performance OSD ON.
+
+Once a promising setting appears, test it with late acquisition as a
+separate variable. The local diagnostic uses the same Pacer and
+libplacebo/Vulkan renderer as the stream but deliberately exercises
+experimental options **only in this benchmark**. It does not change
+production Moonlight streaming behavior, nor does it attribute cause to
+Gamescope, Mesa or AMDGPU until the test results support that conclusion.
 Compare visually at steady panning and examine the CSV's producer intervals,
 submit intervals, acquire spikes and presentation intervals. A smooth local
 test but unsmooth streaming result points to upstream decode/transport/host
