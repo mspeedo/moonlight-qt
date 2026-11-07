@@ -6,31 +6,16 @@ permissions:
 
 on:
   workflow_dispatch:
-  # Push-triggered CI validation after common-c upstream sync (2026-11-02).
-  # Validate the remote settings connection-lifecycle fix on this feature branch.
+  # Build all new commits; publish only the remote-sunshine-settings
+  # branch when R2 secrets and variables are configured.
   push:
     branches:
       - vrr-image-adjustments
       - feature/remote-sunshine-settings
-    paths:
-      - '.github/workflows/build-vrr-flatpak.yml'
-      - 'app/backend/remote_sunshine_config.*'
-      - 'app/gui/RemoteSunshineView.qml'
-      - 'app/gui/RemoteSunshineNvencView.qml'
-      - 'app/gui/SunshineProfileSwitcher.qml'
-      - 'app/gui/AppView.qml'
-      - 'app/gui/main.qml'
-      - 'app/gui/PcView.qml'
-      - 'app/gui/computermodel.*'
-      - 'app/app.pro'
-      - 'app/main.cpp'
-      - 'app/qml.qrc'
-      - 'com.moonlight_stream.Moonlight.yaml'
-      - 'libplacebo-disable-internally-synchronized-queues.patch'
 
 concurrency:
   group: moonlight-flatpak-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   build:
@@ -65,7 +50,7 @@ jobs:
           sudo rm -f /etc/apt/sources.list.d/google-chrome.list \
                      /etc/apt/sources.list.d/google-chrome.sources
           sudo apt-get update
-          sudo apt-get install -y flatpak flatpak-builder
+          sudo apt-get install -y flatpak flatpak-builder rclone gnupg
           flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
 
       - name: Pin selected Moonlight source revision
@@ -115,11 +100,39 @@ jobs:
           print(f"Pinned Moonlight Qt to {os.environ['SOURCE_SHA']}")
           PY
 
+      - name: Restore and configure signed Flatpak R2 repository
+        id: r2
+        if: github.ref == 'refs/heads/feature/remote-sunshine-settings'
+        shell: bash
+        env:
+          R2_BUCKET: ${{ vars.R2_BUCKET }}
+          R2_ENDPOINT: ${{ vars.R2_ENDPOINT }}
+          R2_PUBLIC_URL: ${{ vars.R2_PUBLIC_URL }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          FLATPAK_GPG_PRIVATE_KEY: ${{ secrets.FLATPAK_GPG_PRIVATE_KEY }}
+          RCLONE_CONFIG_R2_TYPE: s3
+          RCLONE_CONFIG_R2_PROVIDER: Cloudflare
+          RCLONE_CONFIG_R2_ENV_AUTH: 'false'
+          RCLONE_CONFIG_R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          RCLONE_CONFIG_R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          RCLONE_CONFIG_R2_ENDPOINT: ${{ vars.R2_ENDPOINT }}
+          RCLONE_CONFIG_R2_REGION: auto
+        run: bash .github/scripts/publish-flatpak-r2.sh prepare
+
       - name: Build Flatpak
         shell: bash
+        env:
+          FLATPAK_GPG_KEY_ID: ${{ steps.r2.outputs.key_id }}
         run: |
+          # The normal CI artifact still builds when R2 is not configured.
+          sign_args=()
+          if [[ -n "$FLATPAK_GPG_KEY_ID" ]]; then
+            sign_args+=("--gpg-sign=$FLATPAK_GPG_KEY_ID")
+          fi
           flatpak-builder \
             --repo=repo \
+            "${sign_args[@]}" \
             build-dir \
             com.moonlight_stream.Moonlight.yaml \
             --force-clean \
@@ -143,3 +156,19 @@ jobs:
           path: Moonlight-${{ steps.source.outputs.safe_branch }}-${{ steps.source.outputs.short_sha }}.flatpak
           compression-level: 0
           if-no-files-found: error
+
+      - name: Publish signed OSTree Flatpak repository to R2
+        if: steps.r2.outputs.enabled == 'true'
+        shell: bash
+        env:
+          R2_BUCKET: ${{ vars.R2_BUCKET }}
+          R2_PUBLIC_URL: ${{ vars.R2_PUBLIC_URL }}
+          FLATPAK_GPG_KEY_ID: ${{ steps.r2.outputs.key_id }}
+          RCLONE_CONFIG_R2_TYPE: s3
+          RCLONE_CONFIG_R2_PROVIDER: Cloudflare
+          RCLONE_CONFIG_R2_ENV_AUTH: 'false'
+          RCLONE_CONFIG_R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          RCLONE_CONFIG_R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          RCLONE_CONFIG_R2_ENDPOINT: ${{ vars.R2_ENDPOINT }}
+          RCLONE_CONFIG_R2_REGION: auto
+        run: bash .github/scripts/publish-flatpak-r2.sh publish
