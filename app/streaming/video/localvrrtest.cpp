@@ -21,6 +21,7 @@
 #endif
 
 #include <SDL.h>
+#include <SDL_syswm.h>
 #include <atomic>
 #include <algorithm>
 #include <array>
@@ -54,6 +55,8 @@ QString g_CompositionRequest;
 QString g_CompositionControl;
 QString g_ScanoutPath;
 QString g_ScanoutEvidence;
+QString g_SdlWindowBackend;
+QString g_VulkanPresentMode;
 constexpr int kWidth = 960, kHeight = 540;
 
 // Fixed, repeatable 80-110 FPS intervals in microseconds, not host cadence playback.
@@ -335,10 +338,53 @@ int producerThread(void* context)
     return 0;
 }
 
+
+QString actualWindowBackend(SDL_Window* window)
+{
+    SDL_SysWMinfo wm = {};
+    SDL_VERSION(&wm.version);
+    if (SDL_GetWindowWMInfo(window, &wm)) {
+        switch (wm.subsystem) {
+            case SDL_SYSWM_WAYLAND:
+                return QStringLiteral("Native Wayland (SDL window)");
+            case SDL_SYSWM_X11:
+                return QStringLiteral("X11 (typically XWayland in SteamOS Game Mode)");
+            case SDL_SYSWM_KMSDRM:
+                return QStringLiteral("KMS/DRM (SDL window)");
+            default:
+                break;
+        }
+    }
+
+    // A global SDL driver name is not proof of a given window's WSI.
+    const char* videoDriver = SDL_GetCurrentVideoDriver();
+    return QStringLiteral("Unverified SDL window backend (driver: %1)")
+        .arg(videoDriver ? QString::fromUtf8(videoDriver) : QStringLiteral("unknown"));
+}
+
+QString swapchainPresentMode(VkPresentModeKHR mode)
+{
+    switch (mode) {
+        case VK_PRESENT_MODE_IMMEDIATE_KHR:
+            return QStringLiteral("IMMEDIATE_KHR");
+        case VK_PRESENT_MODE_MAILBOX_KHR:
+            return QStringLiteral("MAILBOX_KHR");
+        case VK_PRESENT_MODE_FIFO_KHR:
+            return QStringLiteral("FIFO_KHR");
+        case VK_PRESENT_MODE_FIFO_RELAXED_KHR:
+            return QStringLiteral("FIFO_RELAXED_KHR");
+        case VK_PRESENT_MODE_MAX_ENUM_KHR:
+            return QStringLiteral("No Vulkan swapchain");
+        default:
+            return QStringLiteral("Unknown Vulkan present mode (%1)")
+                .arg(static_cast<int>(mode));
+    }
+}
+
 SDL_Surface* createHud(const Snapshot& s, bool late)
 {
     // Rendering the HUD at 2 Hz keeps its upload overhead out of most frames.
-    QImage image(930, 390, QImage::Format_ARGB32);
+    QImage image(1160, 455, QImage::Format_ARGB32);
     image.fill(Qt::transparent);
     QPainter painter(&image);
     painter.setRenderHint(QPainter::TextAntialiasing, true);
@@ -368,6 +414,8 @@ SDL_Surface* createHud(const Snapshot& s, bool late)
                     .arg(s.presented)
                 : QString("unavailable on this window/backend")),
         QString("Compositor discarded %1 | CPU submit != display time").arg(s.discarded),
+        QString("SDL window: %1").arg(s.sdlWindowBackend),
+        QString("Vulkan swapchain: %1").arg(s.vulkanPresentMode),
         QString("Composition: %1").arg(s.compositionRequest),
         QString("Scanout path: %1").arg(s.scanoutPath),
         QString("X: 90/variable | Y: early/late | B: exit | A/H: HUD")
@@ -451,6 +499,8 @@ Snapshot snapshot()
     s.compositionControl = g_CompositionControl;
     s.scanoutPath = g_ScanoutPath;
     s.scanoutEvidence = g_ScanoutEvidence;
+    s.sdlWindowBackend = g_SdlWindowBackend;
+    s.vulkanPresentMode = g_VulkanPresentMode;
     return s;
 }
 
@@ -474,6 +524,8 @@ int run(const QStringList& args)
     g_CompositionControl.clear();
     g_ScanoutPath = QStringLiteral("Not measured");
     g_ScanoutEvidence.clear();
+    g_SdlWindowBackend = QStringLiteral("Not initialized");
+    g_VulkanPresentMode = QStringLiteral("Not initialized");
     GamescopeCompositionControl compositor(forceComposition);
     g_CompositionControl = compositor.status();
     compositor.sampleScanoutPath();
@@ -509,6 +561,9 @@ int run(const QStringList& args)
         SDL_QuitSubSystem(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER);
         return 1;
     }
+    g_SdlWindowBackend = actualWindowBackend(window);
+    qInfo() << "Local VRR actual SDL window backend:" << g_SdlWindowBackend
+            << "SDL driver:" << SDL_GetCurrentVideoDriver();
     const int previousCursor = SDL_ShowCursor(SDL_QUERY);
     SDL_ShowCursor(SDL_DISABLE);
     g_PresentationSupported = initPresentationFeedback(window);
@@ -536,6 +591,8 @@ int run(const QStringList& args)
             qWarning() << "VRR diagnostic Vulkan renderer initialization failed";
             result = 2;
         } else {
+            g_VulkanPresentMode = swapchainPresentMode(renderer.diagnosticSwapchainPresentMode());
+            qInfo() << "Local VRR Vulkan swapchain present mode:" << g_VulkanPresentMode;
             VIDEO_STATS stats = {};
             Pacer pacer(&renderer, &stats, true);
             pacer.setDiagnosticAcquireLate(late);
