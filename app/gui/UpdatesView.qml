@@ -33,6 +33,9 @@ FocusScope {
             spacing: 18
 
             GroupBox {
+                // Qt Quick Controls propagates this minimum to child labels,
+                // buttons and radio buttons unless explicitly overridden.
+                font.pixelSize: 14
                 title: qsTr("Installed version")
                 Layout.fillWidth: true
                 padding: 15
@@ -65,6 +68,9 @@ FocusScope {
             }
 
             GroupBox {
+                // Qt Quick Controls propagates this minimum to child labels,
+                // buttons and radio buttons unless explicitly overridden.
+                font.pixelSize: 14
                 title: qsTr("Available updates")
                 Layout.fillWidth: true
                 padding: 15
@@ -133,7 +139,7 @@ FocusScope {
 
                     Label {
                         text: qsTr("MVP: only the newest build from your Flatpak remote is supported. Previous builds and rollback are not available.")
-                        font.pixelSize: 12
+                        font.pixelSize: 14
                         color: "#B0BEC5"
                         wrapMode: Text.Wrap
                         Layout.fillWidth: true
@@ -151,6 +157,9 @@ FocusScope {
             }
 
             GroupBox {
+                // Qt Quick Controls propagates this minimum to child labels,
+                // buttons and radio buttons unless explicitly overridden.
+                font.pixelSize: 14
                 title: qsTr("Installation status")
                 Layout.fillWidth: true
                 padding: 15
