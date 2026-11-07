@@ -24,7 +24,8 @@ public:
 
     Q_INVOKABLE void clearHistory();
     Q_INVOKABLE void start(QObject* guiWindow, bool variableFps, bool acquireLate,
-                           int durationSeconds, bool showHud);
+                           int durationSeconds, bool showHud,
+                           bool forceComposition);
 
 signals:
     void runningChanged();
