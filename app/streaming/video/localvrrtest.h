@@ -20,6 +20,8 @@ struct Snapshot {
     QString sdlWindowBackend, vulkanPresentMode;
 };
 bool active();
+// True only after the one-second unmeasured startup warm-up.
+bool measuring();
 std::uint64_t nowUs();
 void record(Metric metric, std::uint64_t value = 0);
 Snapshot snapshot();
