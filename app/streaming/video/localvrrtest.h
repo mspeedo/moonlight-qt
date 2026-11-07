@@ -16,6 +16,7 @@ struct Snapshot {
     double produceAvgMs = 0, acquireAvgMs = 0, renderAvgMs = 0,
            submitAvgMs = 0, presentAvgMs = 0;
     double producePeakMs = 0, acquirePeakMs = 0, renderPeakMs = 0, submitPeakMs = 0, presentPeakMs = 0;
+    QString compositionRequest, compositionControl, scanoutPath, scanoutEvidence;
 };
 bool active();
 std::uint64_t nowUs();
