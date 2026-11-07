@@ -33,7 +33,7 @@ extern "C" {
 namespace LocalVrrTest {
 namespace {
 using Clock = std::chrono::steady_clock;
-struct Row { std::uint64_t timeUs, value; Metric metric; };
+struct Row { std::uint64_t timeUs, value, actualPresentUs; Metric metric; };
 struct Stat { std::uint64_t count = 0, last = 0, peak = 0; long double sum = 0; };
 std::atomic<bool> g_Enabled {false};
 std::mutex g_Lock;
@@ -97,7 +97,9 @@ void exportCsv()
     std::lock_guard<std::mutex> lock(g_Lock);
     for (const Row& row : g_Rows) {
         stream << row.timeUs << ',' << metricName(row.metric) << ','
-               << row.value << ",\n";
+               << row.value << ',';
+        if (row.actualPresentUs != 0) stream << row.actualPresentUs;
+        stream << '\n';
     }
     qInfo() << "VRR diagnostic CSV:" << filename
             << "(actual presentation unavailable through libplacebo swapchain)";
@@ -226,6 +228,7 @@ void record(Metric metric, std::uint64_t value)
     if (!active()) return;
     const auto now = nowUs();
     std::lock_guard<std::mutex> lock(g_Lock);
+    const auto actualPresentUs = metric == Metric::Present ? value : 0;
     if (metric == Metric::Produce) {
         value = g_LastProduced ? now - g_LastProduced : 0;
         g_LastProduced = now;
@@ -247,7 +250,7 @@ void record(Metric metric, std::uint64_t value)
         stat.sum += value;
     }
     if (g_Rows.size() < 500000)
-        g_Rows.push_back({now, value, metric});
+        g_Rows.push_back({now, value, actualPresentUs, metric});
 }
 Snapshot snapshot()
 {
