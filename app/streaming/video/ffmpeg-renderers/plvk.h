@@ -52,6 +52,14 @@ public:
 #if defined(HAVE_LIBPLACEBO_VULKAN) && defined(Q_OS_LINUX)
     bool supportsDebugGraph() const override { return true; }
     bool updateDebugOverlay(SDL_Surface* text, SDL_Surface* graph) override;
+
+    // Diagnostic only: reports the mode used to successfully create the
+    // current libplacebo Vulkan swapchain, rather than assuming IMMEDIATE.
+    // The renderer keeps this mode on swapchain recreations.
+    VkPresentModeKHR diagnosticSwapchainPresentMode() const
+    {
+        return m_Swapchain ? m_VkPresentMode : VK_PRESENT_MODE_MAX_ENUM_KHR;
+    }
 #endif
     virtual bool notifyWindowChanged(PWINDOW_STATE_CHANGE_INFO) override;
     virtual int getRendererAttributes() override;
