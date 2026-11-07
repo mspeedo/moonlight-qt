@@ -160,7 +160,7 @@ jobs:
           if-no-files-found: error
 
       - name: Publish signed OSTree Flatpak repository to R2
-        if: steps.r2.outputs.enabled == 'true'
+        if: steps.r2.outputs.publish_ready == 'true'
         shell: bash
         env:
           R2_BUCKET: ${{ vars.R2_BUCKET }}
