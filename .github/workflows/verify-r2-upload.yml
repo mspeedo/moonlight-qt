@@ -1,0 +1,81 @@
+---
+name: Verify Cloudflare R2 upload
+
+permissions:
+  contents: read
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feature/flatpak-update-page
+    paths:
+      - '.github/workflows/verify-r2-upload.yml'
+
+jobs:
+  verify:
+    name: Verify bucket-scoped R2 token via S3
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - name: Install Rclone
+        shell: bash
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq rclone
+          rclone version | head -n 1
+
+      - name: Validate R2 S3 write, read, list and delete
+        shell: bash
+        env:
+          R2_BUCKET: ${{ vars.R2_BUCKET }}
+          R2_ENDPOINT: ${{ vars.R2_ENDPOINT }}
+          RCLONE_CONFIG_R2_TYPE: s3
+          RCLONE_CONFIG_R2_PROVIDER: Cloudflare
+          RCLONE_CONFIG_R2_ENV_AUTH: 'false'
+          RCLONE_CONFIG_R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          RCLONE_CONFIG_R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          RCLONE_CONFIG_R2_REGION: auto
+          RCLONE_CONFIG_R2_NO_CHECK_BUCKET: 'true'
+        run: |
+          set -euo pipefail
+          [[ -n "$R2_BUCKET" && -n "$R2_ENDPOINT" &&
+             -n "$RCLONE_CONFIG_R2_ACCESS_KEY_ID" &&
+             -n "$RCLONE_CONFIG_R2_SECRET_ACCESS_KEY" ]] || {
+            echo "::error::Missing required R2 variables or S3 credentials"
+            exit 1
+          }
+          endpoint="${R2_ENDPOINT%/}"
+          endpoint="${endpoint%/${R2_BUCKET}}"
+          [[ "$endpoint" =~ ^https://[^/]+$ ]] || {
+            echo "::error::Invalid account-level R2 endpoint"
+            exit 1
+          }
+          export RCLONE_CONFIG_R2_ENDPOINT="$endpoint"
+          obj="r2:${R2_BUCKET}/ci-probe-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.txt"
+          tmp="$(mktemp)"
+          trap 'rm -f "$tmp"' EXIT
+          printf 'Moonlight Flatpak R2 S3 verification\n' > "$tmp"
+          r2() {
+            timeout 45s rclone --retries 1 --low-level-retries 1 \
+              --contimeout 10s --timeout 20s "$@"
+          }
+          echo "Probing R2 S3 object upload..."
+          r2 copyto "$tmp" "$obj" ||
+            { echo "::error::R2 PUT denied. Verify token Object Read & Write bucket scope and endpoint jurisdiction."; exit 1; }
+          echo "Verifying downloaded object..."
+          r2 cat "$obj" | cmp - "$tmp" ||
+            { echo "::error::R2 GET denied or content mismatch"; exit 1; }
+          echo "Verifying bucket listing..."
+          r2 lsf "r2:${R2_BUCKET}/" --max-depth 1 >/dev/null ||
+            { echo "::error::R2 ListBucket denied"; exit 1; }
+          echo "Verifying delete permission..."
+          r2 deletefile "$obj" ||
+            { echo "::error::R2 delete denied"; exit 1; }
+          echo "R2 write/read/list/delete all passed"
+          {
+            echo '## Cloudflare R2 preflight succeeded'
+            echo 'Bucket: `'${R2_BUCKET}'`'
+            echo 'Verified authenticated PutObject, GetObject, ListBucket and DeleteObject.'
+            echo 'The uploader can now build and publish a signed Flatpak.'
+          } >> "$GITHUB_STEP_SUMMARY"
