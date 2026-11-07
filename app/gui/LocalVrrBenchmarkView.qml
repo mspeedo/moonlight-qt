@@ -188,6 +188,10 @@ Flickable {
                     columns: 2
                     columnSpacing: 25
                     rowSpacing: 5
+                    Label { text: qsTr("Actual SDL window backend"); font.pointSize: 13 }
+                    Label { font.pointSize: 13; wrapMode: Text.WordWrap; text: benchmark.results.sdlWindowBackend || qsTr("Not detected") }
+                    Label { text: qsTr("Vulkan swapchain present mode"); font.pointSize: 13 }
+                    Label { font.pointSize: 13; wrapMode: Text.WordWrap; text: benchmark.results.vulkanPresentMode || qsTr("Not detected") }
                     Label { text: qsTr("Requested composition mode"); font.pointSize: 13 }
                     Label { font.pointSize: 13; wrapMode: Text.WordWrap; text: benchmark.results.compositionRequest || "—" }
                     Label { text: qsTr("Gamescope control status"); font.pointSize: 13 }
@@ -246,6 +250,8 @@ Flickable {
                         font.pointSize: 12
                         wrapMode: Text.WordWrap
                         text: (index + 1) + ". " + modelData.mode + " | " + modelData.ordering +
+                              " | " + modelData.sdlWindowBackend +
+                              " | " + modelData.vulkanPresentMode +
                               " | " + modelData.compositionRequest +
                               " | " + modelData.scanoutPath +
                               " | " + (modelData.duration === 0 ? qsTr("manual") : modelData.duration + " s") +
