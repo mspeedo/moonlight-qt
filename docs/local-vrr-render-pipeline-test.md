@@ -15,7 +15,8 @@ a dedicated gamepad-navigable page where you can configure:
 
 * **Producer cadence:** repeatable variable 80–110 FPS or fixed 90 FPS.
 * **Swapchain acquisition:** existing early ordering or experimental late ordering.
-* **Duration:** 30, 60, 120 seconds or manual stop.
+* **Duration:** 30, 60, 120 **measured** seconds or manual stop; a separate
+  one-second unmeasured warm-up precedes every run.
 * **Gamescope composition:** automatic selection or request forced full GPU composition
   through the existing `GAMESCOPE_COMPOSITE_FORCE` XWayland root property.
 * **Diagnostic HUD:** on or off. The HUD and completed-results page both
@@ -35,7 +36,14 @@ present mode, and the saved CSV path.
 During the fullscreen test, **X** toggles the producer cadence, **Y** toggles
 swapchain acquisition, **A** toggles HUD, and **B** returns to Moonlight.
 The UI selections are the starting configuration. Use separate timed runs
-without mid-run toggles for clean A/B comparisons. Menu navigation uses
+without mid-run toggles for clean A/B comparisons. The benchmark renders
+normally during its initial one-second warm-up, but **all timing samples,
+frame/drop counts, Wayland presentation requests and CSV event rows start
+after that second**. Interval baselines are first established after warm-up,
+so the first measured interval never includes startup. Timed runs retain
+their configured **full measured duration** (for example, 60 measured
+seconds plus one second of warm-up). If a manual run ends during warm-up,
+the results contain no measurement events. Menu navigation uses
 Moonlight's existing SteamOS gamepad-to-Tab focus behavior.
 
 No terminal command, manually added launch argument or second Steam shortcut
