@@ -8,7 +8,7 @@ die() { echo "::error::$*" >&2; exit 1; }
 
 # Avoid infinite retries on authentication, API or S3 endpoint errors.
 rclone_checked() {
-  timeout --signal=TERM 480s rclone --retries 1 --low-level-retries 1 \
+  timeout --signal=TERM 480s rclone --s3-no-head --retries 1 --low-level-retries 1 \
     --contimeout 12s --timeout 35s "$@"
 }
 
