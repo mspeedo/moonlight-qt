@@ -38,8 +38,9 @@ struct Stat { std::uint64_t count = 0, last = 0, peak = 0; long double sum = 0; 
 std::atomic<bool> g_Enabled {false};
 std::mutex g_Lock;
 std::vector<Row> g_Rows;
-std::array<Stat, 6> g_Stats;
-std::uint64_t g_LastProduced = 0, g_LastSubmit = 0;
+std::array<Stat, 8> g_Stats;
+std::uint64_t g_LastProduced = 0, g_LastSubmit = 0, g_LastPresented = 0;
+bool g_PresentationSupported = false;
 std::atomic<bool> g_Stop {false};
 std::atomic<bool> g_Variable {true};
 constexpr int kWidth = 960, kHeight = 540;
@@ -60,6 +61,8 @@ const char* metricName(Metric metric)
     case Metric::Submit: return "submission_interval";
     case Metric::Drop: return "pacer_drop";
     case Metric::AcquireFailure: return "swapchain_acquire_failed";
+    case Metric::Present: return "compositor_presentation_interval";
+    case Metric::CompositorDiscard: return "compositor_discard";
     }
     return "unknown";
 }
@@ -169,7 +172,7 @@ int producerThread(void* context)
 SDL_Surface* createHud(const Snapshot& s, bool late)
 {
     // Rendering the HUD at 2 Hz keeps its upload overhead out of most frames.
-    QImage image(930, 252, QImage::Format_ARGB32);
+    QImage image(930, 315, QImage::Format_ARGB32);
     image.fill(Qt::transparent);
     QPainter painter(&image);
     painter.setRenderHint(QPainter::TextAntialiasing, true);
@@ -192,8 +195,14 @@ SDL_Surface* createHud(const Snapshot& s, bool late)
             .arg(s.renderMs, 0, 'f', 2).arg(s.renderPeakMs, 0, 'f', 2),
         QString("Submit interval: %1 ms | max %2")
             .arg(s.submitMs, 0, 'f', 2).arg(s.submitPeakMs, 0, 'f', 2),
-        QString("Display presentation feedback: N/A (libplacebo does not expose it)"),
-        QString("X: 90/variable | Y: early/late | B: exit | H: HUD")
+        QString("Gamescope actual presentation: %1")
+            .arg(g_PresentationSupported
+                ? QString("%1 ms | max %2 | count %3")
+                    .arg(s.presentMs, 0, 'f', 2).arg(s.presentPeakMs, 0, 'f', 2)
+                    .arg(s.presented)
+                : QString("unavailable on this window/backend")),
+        QString("Compositor discarded %1 | CPU submit != display time").arg(s.discarded),
+        QString("X: 90/variable | Y: early/late | B: exit | A/H: HUD")
     };
     for (int i = 0; i < lines.size(); ++i)
         painter.drawText(12, 29 + i * 29, lines[i]);
@@ -223,7 +232,11 @@ void record(Metric metric, std::uint64_t value)
     } else if (metric == Metric::Submit) {
         value = g_LastSubmit ? now - g_LastSubmit : 0;
         g_LastSubmit = now;
-    } else if (metric == Metric::Drop) {
+    } else if (metric == Metric::Present) {
+        const std::uint64_t presentedUs = value;
+        value = g_LastPresented ? presentedUs - g_LastPresented : 0;
+        g_LastPresented = presentedUs;
+    } else if (metric == Metric::Drop || metric == Metric::CompositorDiscard) {
         value = 1;
     }
     Stat& stat = g_Stats[static_cast<int>(metric)];
@@ -243,14 +256,18 @@ Snapshot snapshot()
     s.produced = g_Stats[static_cast<int>(Metric::Produce)].count;
     s.submitted = g_Stats[static_cast<int>(Metric::Submit)].count;
     s.dropped = g_Stats[static_cast<int>(Metric::Drop)].count;
+    s.presented = g_Stats[static_cast<int>(Metric::Present)].count;
+    s.discarded = g_Stats[static_cast<int>(Metric::CompositorDiscard)].count;
     s.produceMs = lastMs(Metric::Produce);
     s.acquireMs = lastMs(Metric::Acquire);
     s.renderMs = lastMs(Metric::Render);
     s.submitMs = lastMs(Metric::Submit);
+    s.presentMs = lastMs(Metric::Present);
     s.producePeakMs = peakMs(Metric::Produce);
     s.acquirePeakMs = peakMs(Metric::Acquire);
     s.renderPeakMs = peakMs(Metric::Render);
     s.submitPeakMs = peakMs(Metric::Submit);
+    s.presentPeakMs = peakMs(Metric::Present);
     return s;
 }
 
@@ -272,6 +289,8 @@ int run(const QStringList& args)
         return 1;
     }
     SDL_ShowCursor(SDL_DISABLE);
+    g_PresentationSupported = initPresentationFeedback(window);
+    qInfo() << "Wayland compositor presentation feedback:" << g_PresentationSupported;
     SDL_GameController* controller = nullptr;
     for (int i = 0; i < SDL_NumJoysticks(); ++i) {
         if (SDL_IsGameController(i)) {
@@ -359,6 +378,7 @@ int run(const QStringList& args)
             }
         }
     }
+    shutdownPresentationFeedback();
     if (controller) SDL_GameControllerClose(controller);
     SDL_ShowCursor(SDL_ENABLE);
     SDL_DestroyWindow(window);
