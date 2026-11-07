@@ -1385,7 +1385,9 @@ void PlVkRenderer::renderFrame(AVFrame *frame)
     // Submit the frame for display and swap buffers
     m_HasPendingSwapchainFrame = false;
 #if defined(Q_OS_LINUX) && defined(HAVE_LIBPLACEBO_VULKAN)
-    if (LocalVrrTest::active()) LocalVrrTest::requestPresentationFeedback();
+    // Do not enqueue Wayland presentation callbacks for startup frames:
+// callbacks may arrive after warm-up and contaminate measured intervals.
+    if (LocalVrrTest::measuring()) LocalVrrTest::requestPresentationFeedback();
 #endif
     if (!pl_swapchain_submit_frame(m_Swapchain)) {
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
