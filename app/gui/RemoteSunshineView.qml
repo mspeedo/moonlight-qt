@@ -29,6 +29,8 @@ Item {
         if (remote.connected) {
             if (pages.currentIndex === 1)
                 presetsTab.forceActiveFocus(Qt.TabFocusReason)
+            else if (pages.currentIndex === 2)
+                nvencTab.forceActiveFocus(Qt.TabFocusReason)
             else
                 settingsTab.forceActiveFocus(Qt.TabFocusReason)
             initialFocusPending = false
@@ -124,6 +126,13 @@ Item {
                 text: qsTr("Presets & Restart")
                 activeFocusOnTab: true
                 onClicked: pages.currentIndex = 1
+            }
+            TabButton {
+                id: nvencTab
+                font.pointSize: root.settingsFontPointSize
+                text: qsTr("NVENC")
+                activeFocusOnTab: true
+                onClicked: pages.currentIndex = 2
             }
         }
 
@@ -365,6 +374,12 @@ Item {
                     }
                     Item { Layout.fillHeight: true }
                 }
+            }
+
+            RemoteSunshineNvencView {
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                remoteConfig: remote
             }
         }
     }
