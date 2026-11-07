@@ -27,7 +27,7 @@ constexpr auto kPortalInterface = "org.freedesktop.portal.Flatpak";
 constexpr auto kMonitorInterface = "org.freedesktop.portal.Flatpak.UpdateMonitor";
 // Public metadata only. The signed Flatpak repository remains the authority
 // for actual installation, not this JSON document.
-constexpr auto kLatestIndex = "https://pub-3a75f66f021b46f3a095b41d1a3c553b.r2.dev/moonlight-latest.json";
+constexpr auto kLatestIndex = "https://pub-3a75f66f021b46f3a095b41d1a3c553b.r2.dev/flatpak/moonlight-latest.json";
 #endif
 }
 
