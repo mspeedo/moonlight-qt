@@ -1,6 +1,7 @@
 import QtQuick 2.9
 import QtQuick.Controls 2.2
 import QtQuick.Layouts 1.3
+import SdlGamepadKeyNavigation 1.0
 
 import RemoteSunshineConfig 1.0
 
@@ -14,9 +15,47 @@ Item {
     focus: true
     activeFocusOnTab: true
 
-    RemoteSunshineConfig { id: remote }
+    // Match native SettingsView: SDL D-pad and left-stick vertical movement
+    // must become Tab/Shift+Tab while editing a settings page.
+    property bool navigationActive: false
+    property bool initialFocusPending: false
+
+    function focusInitialControl() {
+        if (!navigationActive || !initialFocusPending)
+            return
+
+        // Authentication loads asynchronously. Until it succeeds, don't focus
+        // a hidden tab or place controller focus on an inaccessible control.
+        if (remote.connected) {
+            if (pages.currentIndex === 1)
+                presetsTab.forceActiveFocus(Qt.TabFocusReason)
+            else
+                settingsTab.forceActiveFocus(Qt.TabFocusReason)
+            initialFocusPending = false
+        } else if (!remote.busy) {
+            retryButton.forceActiveFocus(Qt.TabFocusReason)
+            initialFocusPending = false
+        }
+    }
+
+    RemoteSunshineConfig {
+        id: remote
+        onStateChanged: root.focusInitialControl()
+    }
     Component.onCompleted: remote.connectPaired(root.hostInfo)
-    StackView.onDeactivating: remote.close()
+
+    StackView.onActivated: {
+        navigationActive = true
+        initialFocusPending = true
+        SdlGamepadKeyNavigation.setUiNavMode(true)
+        focusInitialControl()
+    }
+    StackView.onDeactivating: {
+        navigationActive = false
+        initialFocusPending = false
+        SdlGamepadKeyNavigation.setUiNavMode(false)
+        remote.close()
+    }
     Component.onDestruction: remote.close()
 
     ColumnLayout {
@@ -56,6 +95,7 @@ Item {
                 wrapMode: Text.WordWrap
             }
             Button {
+                id: retryButton
                 font.pointSize: root.settingsFontPointSize
                 text: qsTr("Retry")
                 visible: !remote.connected && !remote.busy
@@ -67,8 +107,20 @@ Item {
             id: pages
             Layout.fillWidth: true
             visible: remote.connected
-            TabButton { font.pointSize: root.settingsFontPointSize; text: qsTr("Settings") }
-            TabButton { font.pointSize: root.settingsFontPointSize; text: qsTr("Presets & Restart") }
+            TabButton {
+                id: settingsTab
+                font.pointSize: root.settingsFontPointSize
+                text: qsTr("Settings")
+                activeFocusOnTab: true
+                onClicked: pages.currentIndex = 0
+            }
+            TabButton {
+                id: presetsTab
+                font.pointSize: root.settingsFontPointSize
+                text: qsTr("Presets & Restart")
+                activeFocusOnTab: true
+                onClicked: pages.currentIndex = 1
+            }
         }
 
         StackLayout {
@@ -140,12 +192,20 @@ Item {
                                 font.pointSize: root.settingsFontPointSize
                                 Layout.fillWidth: true
                                 text: modelData.value
+                                onActiveFocusChanged: {
+                                    if (activeFocus)
+                                        optionList.positionViewAtIndex(index, ListView.Contain)
+                                }
                                 selectByMouse: true
                                 onEditingFinished: remote.setOption(modelData.key, text)
                             }
                             Button {
                                 font.pointSize: root.settingsFontPointSize
                                 text: qsTr("Reset")
+                                onActiveFocusChanged: {
+                                    if (activeFocus)
+                                        optionList.positionViewAtIndex(index, ListView.Contain)
+                                }
                                 onClicked: remote.removeOption(modelData.key)
                             }
                         }
