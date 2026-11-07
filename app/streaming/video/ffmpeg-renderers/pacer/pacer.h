@@ -37,6 +37,8 @@ public:
 
     // Used only by the isolated local renderer test; never set for streaming.
     void setDiagnosticAcquireLate(bool enabled) { m_DiagnosticAcquireLate.store(enabled, std::memory_order_relaxed); }
+    // Set before initialize(), on the standalone diagnostic instance only.
+    void setDiagnosticQueueLatest(bool latest) { m_DiagnosticQueueLatest = latest; }
 
     ~Pacer();
 
