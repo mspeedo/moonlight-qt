@@ -48,6 +48,13 @@ void LocalVrrBenchmarkController::start(QObject* guiWindow, bool variableFps,
         return;
     }
 
+    if (presentMode < 0 || presentMode > 4 || swapchainDepth < 1 ||
+        swapchainDepth > 3 || presentWait < 0 || presentWait > 2 ||
+        queuePolicy < 0 || queuePolicy > 1) {
+        setStatus(QStringLiteral("Invalid experimental Vulkan pipeline configuration"));
+        return;
+    }
+
     m_GuiWindow = window;
     m_Running = true;
     emit runningChanged();
@@ -61,6 +68,10 @@ void LocalVrrBenchmarkController::start(QObject* guiWindow, bool variableFps,
     if (acquireLate) options << QStringLiteral("--vrr-acquire-late");
     if (!showHud) options << QStringLiteral("--vrr-hud-off");
     if (forceComposition) options << QStringLiteral("--vrr-force-composition");
+    options << QStringLiteral("--vrr-present-mode=%1").arg(presentMode)
+            << QStringLiteral("--vrr-swapchain-depth=%1").arg(swapchainDepth)
+            << QStringLiteral("--vrr-present-wait=%1").arg(presentWait)
+            << QStringLiteral("--vrr-queue-policy=%1").arg(queuePolicy);
     if (durationSeconds > 0)
         options << QStringLiteral("--vrr-duration=%1").arg(durationSeconds);
 
@@ -100,6 +111,10 @@ void LocalVrrBenchmarkController::start(QObject* guiWindow, bool variableFps,
         report.insert(QStringLiteral("scanoutEvidence"), stats.scanoutEvidence);
         report.insert(QStringLiteral("sdlWindowBackend"), stats.sdlWindowBackend);
         report.insert(QStringLiteral("vulkanPresentMode"), stats.vulkanPresentMode);
+        report.insert(QStringLiteral("pipelinePresentRequest"), stats.pipelinePresentRequest);
+        report.insert(QStringLiteral("pipelineDepth"), stats.pipelineDepth);
+        report.insert(QStringLiteral("pipelineWait"), stats.pipelineWait);
+        report.insert(QStringLiteral("pipelineQueue"), stats.pipelineQueue);
         report.insert(QStringLiteral("csv"), LocalVrrTest::lastCsvPath());
         report.insert(QStringLiteral("exitCode"), exitCode);
         report.insert(QStringLiteral("mode"), variableFps
@@ -138,6 +153,10 @@ void LocalVrrBenchmarkController::start(QObject* guiWindow, bool variableFps,
     Q_UNUSED(durationSeconds)
     Q_UNUSED(showHud)
     Q_UNUSED(forceComposition)
+    Q_UNUSED(presentMode)
+    Q_UNUSED(swapchainDepth)
+    Q_UNUSED(presentWait)
+    Q_UNUSED(queuePolicy)
     setStatus(QStringLiteral("Vulkan local VRR diagnostic is only available on Linux Flatpak"));
 #endif
 }
