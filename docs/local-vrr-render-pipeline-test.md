@@ -16,6 +16,8 @@ a dedicated gamepad-navigable page where you can configure:
 * **Producer cadence:** repeatable variable 80–110 FPS or fixed 90 FPS.
 * **Swapchain acquisition:** existing early ordering or experimental late ordering.
 * **Duration:** 30, 60, 120 seconds or manual stop.
+* **Gamescope composition:** automatic selection or request forced full GPU composition
+  through the existing `GAMESCOPE_COMPOSITE_FORCE` XWayland root property.
 * **Diagnostic HUD:** on or off.
 
 Select **Start VRR benchmark**. The Moonlight Qt interface is hidden, and a
@@ -23,7 +25,8 @@ fullscreen Vulkan diagnostic window opens in the **same Moonlight process**.
 This preserves the Steam launcher and Gamescope context. When the benchmark
 finishes or you press **B**, Moonlight's normal UI returns to the same page
 and displays the summary including average/max intervals, drops, reported
-compositor presentation intervals (when available), and the saved CSV path.
+compositor presentation intervals (when available), Gamescope composition
+request/status, scanout-path evidence, and the saved CSV path.
 
 During the fullscreen test, **X** toggles the producer cadence, **Y** toggles
 swapchain acquisition, **A** toggles HUD, and **B** returns to Moonlight.
@@ -32,7 +35,10 @@ without mid-run toggles for clean A/B comparisons. Menu navigation uses
 Moonlight's existing SteamOS gamepad-to-Tab focus behavior.
 
 No terminal command, manually added launch argument or second Steam shortcut
-is required. The test is reachable without connecting to a Sunshine host.
+is required. The experimental Flatpak grants both Wayland and X11 sockets
+instead of fallback-X11, because Gamescope's composition control lives on
+its XWayland root window; this is an intentional test-branch sandbox
+permission expansion, not a production streaming change. The test is reachable without connecting to a Sunshine host.
 
 ## Optional command-line launching
 
@@ -51,6 +57,20 @@ For immediate 90-FPS baseline:
 ```sh
 flatpak run com.moonlight_stream.Moonlight --local-vrr-test --vrr-constant
 ```
+
+To request forced GPU composition (and automatically restore the prior
+XWayland property when the benchmark finishes):
+
+```sh
+flatpak run com.moonlight_stream.Moonlight --local-vrr-test --vrr-constant --vrr-force-composition
+```
+
+If the Gamescope XWayland root cannot be verified or the control cannot be
+set, a forced-composition benchmark exits with code 8 rather than silently
+running as an automatic-mode comparison. The setting is restored on ordinary
+benchmark exit and handled errors, but an externally killed/crashed process
+cannot run its restoration logic. The control property does not encode a
+separately supplied Gamescope `-c` startup flag.
 
 To launch with the experimental ordering:
 
@@ -111,8 +131,25 @@ interval**, and number of Pacer-dropped frames. It also counts compositor-
 discarded presentations and shows observed Gamescope **presentation
 intervals** when the Wayland `wp_presentation` protocol is present. These
 are Wayland compositor presentation timestamps, **not direct scanout/photodiode
-measurements**. If unsupported, the HUD clearly reports unavailable; it
-never substitutes CPU submit time as a measured display time.
+measurements**. Gamescope currently sends the Wayland `ZERO_COPY` presentation
+flag unconditionally, including in cases that may have required GPU composition,
+so that flag is **never used to infer hardware direct scanout**.
+
+The benchmark reports the Gamescope composition request and X11 control
+read-back separately from the actual scanout-path status. **Stock Gamescope
+does not publish its actual scanout-versus-GPU-composition choice through
+a property readable by Moonlight.** Consequently automatic-mode results say
+"Not observable with stock Gamescope", even when forced composition controls
+work. This is intentional: a requested change is not an observed display path.
+A future instrumented Gamescope build can publish a CARDINAL property
+`GAMESCOPE_MOONLIGHT_SCANOUT_PATH` on its XWayland root window, with 1 for
+direct hardware-plane scanout and 2 for full GPU composition. The benchmark
+samples this property while running, when present, and marks the source.
+Without such compositor-side instrumentation it does not invent an actual
+scanout result.
+
+If the Wayland presentation protocol is unsupported, the HUD clearly reports
+unavailable; it never substitutes CPU submit time as a measured display time.
 
 On exit, an event-by-event CSV is written under the Flatpak application's
 per-user application data directory, with columns:
@@ -134,8 +171,11 @@ renderer durations include rendering submission work, not GPU execution time.
 Frames dropped by the bounded Pacer queue are counted as drops; internal
 compositor discards are recorded separately.
 
-**Suggested comparison:** run 90 FPS early/late and variable 80–110 FPS
-early/late for at least 30–60 seconds each on the same SteamOS VRR settings.
+**Suggested comparison:** with SteamOS VRR ON and the performance OSD OFF,
+run fixed 90 FPS for 60 seconds using automatic composition, then repeat with
+forced GPU composition; retain the same acquisition order, screen refresh and
+other settings. Only after that repeat with the Steam performance OSD ON.
+Also compare 90 FPS early/late and variable 80–110 FPS early/late if required.
 Compare visually at steady panning and examine the CSV's producer intervals,
 submit intervals, acquire spikes and presentation intervals. A smooth local
 test but unsmooth streaming result points to upstream decode/transport/host
