@@ -62,6 +62,7 @@ QString g_ScanoutPath;
 QString g_ScanoutEvidence;
 QString g_SdlWindowBackend;
 QString g_VulkanPresentMode;
+QString g_PipelinePresentRequest, g_PipelineDepth, g_PipelineWait, g_PipelineQueue;
 constexpr int kWidth = 960, kHeight = 540;
 
 // Fixed, repeatable 80-110 FPS intervals in microseconds, not host cadence playback.
@@ -389,7 +390,7 @@ QString swapchainPresentMode(VkPresentModeKHR mode)
 SDL_Surface* createHud(const Snapshot& s, bool late)
 {
     // Rendering the HUD at 2 Hz keeps its upload overhead out of most frames.
-    QImage image(1160, 485, QImage::Format_ARGB32);
+    QImage image(1160, 515, QImage::Format_ARGB32);
     image.fill(Qt::transparent);
     QPainter painter(&image);
     painter.setRenderHint(QPainter::TextAntialiasing, true);
@@ -425,6 +426,9 @@ SDL_Surface* createHud(const Snapshot& s, bool late)
         QString("Compositor discarded %1 | CPU submit != display time").arg(s.discarded),
         QString("SDL window: %1").arg(s.sdlWindowBackend),
         QString("Vulkan swapchain: %1").arg(s.vulkanPresentMode),
+        QString("Pipeline: %1 | depth %2 | %3 | queue %4")
+            .arg(s.pipelinePresentRequest).arg(s.pipelineDepth)
+            .arg(s.pipelineWait).arg(s.pipelineQueue),
         QString("Composition: %1").arg(s.compositionRequest),
         QString("Scanout path: %1").arg(s.scanoutPath),
         QString("X: 90/variable | Y: early/late | B: exit | A/H: HUD")
@@ -524,6 +528,10 @@ Snapshot snapshot()
     s.scanoutEvidence = g_ScanoutEvidence;
     s.sdlWindowBackend = g_SdlWindowBackend;
     s.vulkanPresentMode = g_VulkanPresentMode;
+    s.pipelinePresentRequest = g_PipelinePresentRequest;
+    s.pipelineDepth = g_PipelineDepth;
+    s.pipelineWait = g_PipelineWait;
+    s.pipelineQueue = g_PipelineQueue;
     return s;
 }
 
@@ -551,6 +559,10 @@ int run(const QStringList& args)
     g_ScanoutEvidence.clear();
     g_SdlWindowBackend = QStringLiteral("Not initialized");
     g_VulkanPresentMode = QStringLiteral("Not initialized");
+    g_PipelinePresentRequest.clear();
+    g_PipelineDepth.clear();
+    g_PipelineWait.clear();
+    g_PipelineQueue.clear();
     GamescopeCompositionControl compositor(forceComposition);
     g_CompositionControl = compositor.status();
     compositor.sampleScanoutPath();
@@ -563,7 +575,26 @@ int run(const QStringList& args)
     bool late = args.contains("--vrr-acquire-late");
     bool showHud = !args.contains("--vrr-hud-off");
     int durationSeconds = 0;
+    int presentChoice = 0;  // 0=existing default/auto
+    int depthChoice = 2;    // Existing unpaced depth
+    int waitChoice = 0;     // Existing nonblocking present behavior
+    int queueChoice = 0;    // Existing newest-frame selection
     for (const QString& arg : args) {
+        auto parseRange = [&](const QString& prefix, int minimum, int maximum, int* output) {
+            if (!arg.startsWith(prefix)) return true;
+            bool ok = false;
+            const int parsed = arg.mid(prefix.size()).toInt(&ok);
+            if (!ok || parsed < minimum || parsed > maximum) return false;
+            *output = parsed;
+            return true;
+        };
+        if (!parseRange(QStringLiteral("--vrr-present-mode="), 0, 4, &presentChoice) ||
+            !parseRange(QStringLiteral("--vrr-swapchain-depth="), 1, 3, &depthChoice) ||
+            !parseRange(QStringLiteral("--vrr-present-wait="), 0, 2, &waitChoice) ||
+            !parseRange(QStringLiteral("--vrr-queue-policy="), 0, 1, &queueChoice)) {
+            qWarning() << "Invalid local VRR pipeline experiment option:" << arg;
+            return 9;
+        }
         if (arg.startsWith("--vrr-duration=")) {
             bool ok = false;
             const int seconds = arg.mid(QString("--vrr-duration=").length()).toInt(&ok);
@@ -574,6 +605,18 @@ int run(const QStringList& args)
             durationSeconds = seconds;
         }
     }
+    static const char* presentChoices[] = {
+        "Automatic", "IMMEDIATE", "MAILBOX", "FIFO_RELAXED", "FIFO"
+    };
+    static const char* waitChoices[] = {
+        "No explicit wait", "Wait before acquire", "Wait after submit"
+    };
+    g_PipelinePresentRequest = QString::fromLatin1(presentChoices[presentChoice]);
+    g_PipelineDepth = QString::number(depthChoice);
+    g_PipelineWait = QString::fromLatin1(waitChoices[waitChoice]);
+    g_PipelineQueue = queueChoice == 0 ? QStringLiteral("Newest") : QStringLiteral("FIFO");
+    qInfo() << "Local VRR pipeline:" << g_PipelinePresentRequest << g_PipelineDepth
+            << g_PipelineWait << g_PipelineQueue;
     if (SDL_InitSubSystem(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER) != 0) {
         qWarning() << "VRR diagnostic SDL initialization failed:" << SDL_GetError();
         return 1;
@@ -604,6 +647,7 @@ int run(const QStringList& args)
     int result = 0;
     {
         PlVkRenderer renderer;
+        renderer.configureDiagnosticPipeline(presentChoice, depthChoice, waitChoice);
         DECODER_PARAMETERS params = {};
         params.window = window;
         params.videoFormat = VIDEO_FORMAT_H264;
@@ -613,8 +657,14 @@ int run(const QStringList& args)
         params.enableVsync = false; // preserve IMMEDIATE and unpaced VRR behavior
         params.enableFramePacing = false;
         if (!renderer.initialize(&params)) {
-            qWarning() << "VRR diagnostic Vulkan renderer initialization failed";
-            result = 2;
+            if (renderer.diagnosticPresentModeUnsupported()) {
+                g_VulkanPresentMode = QStringLiteral("Requested present mode unavailable");
+                qWarning() << "VRR experiment: unsupported present mode" << g_PipelinePresentRequest;
+                result = 10;
+            } else {
+                qWarning() << "VRR diagnostic Vulkan renderer initialization failed";
+                result = 2;
+            }
         } else {
             g_VulkanPresentMode = swapchainPresentMode(renderer.diagnosticSwapchainPresentMode());
             // Mesa may override the VkSwapchainCreateInfoKHR present mode at
@@ -629,6 +679,7 @@ int run(const QStringList& args)
             VIDEO_STATS stats = {};
             Pacer pacer(&renderer, &stats, true);
             pacer.setDiagnosticAcquireLate(late);
+            pacer.setDiagnosticQueueLatest(queueChoice == 0);
             if (!pacer.initialize(window, 110, false, false)) {
                 qWarning() << "VRR diagnostic Pacer initialization failed";
                 result = 3;
