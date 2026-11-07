@@ -227,8 +227,8 @@ void record(Metric metric, std::uint64_t value)
         value = 1;
     }
     Stat& stat = g_Stats[static_cast<int>(metric)];
+    ++stat.count;
     if (value > 0) {
-        ++stat.count;
         stat.last = value;
         stat.peak = std::max(stat.peak, value);
         stat.sum += value;
