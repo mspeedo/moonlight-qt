@@ -7,11 +7,12 @@ permissions:
 on:
   workflow_dispatch:
   # Push-triggered CI validation after common-c upstream sync (2026-11-02).
-  # Validate the remote settings connection-lifecycle fix on this feature branch.
+  # Validate local VRR diagnostic and remote Sunshine settings on feature branches.
   push:
     branches:
       - vrr-image-adjustments
       - feature/remote-sunshine-settings
+      - feature/local-vrr-render-pipeline-test
     paths:
       - '.github/workflows/build-vrr-flatpak.yml'
       - 'app/backend/remote_sunshine_config.*'
@@ -21,6 +22,9 @@ on:
       - 'app/gui/main.qml'
       - 'app/gui/PcView.qml'
       - 'app/gui/computermodel.*'
+      - 'app/streaming/video/localvrrtest.*'
+      - 'app/streaming/video/ffmpeg-renderers/pacer/pacer.*'
+      - 'app/streaming/video/ffmpeg-renderers/plvk.cpp'
       - 'app/app.pro'
       - 'app/main.cpp'
       - 'app/qml.qrc'
