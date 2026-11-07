@@ -18,7 +18,10 @@ a dedicated gamepad-navigable page where you can configure:
 * **Duration:** 30, 60, 120 seconds or manual stop.
 * **Gamescope composition:** automatic selection or request forced full GPU composition
   through the existing `GAMESCOPE_COMPOSITE_FORCE` XWayland root property.
-* **Diagnostic HUD:** on or off.
+* **Diagnostic HUD:** on or off. The HUD and completed-results page both
+  show the actual SDL window-system backend identified by
+  `SDL_GetWindowWMInfo()` and the Vulkan swapchain's selected present mode
+  read from the successfully initialized `PlVkRenderer`.
 
 Select **Start VRR benchmark**. The Moonlight Qt interface is hidden, and a
 fullscreen Vulkan diagnostic window opens in the **same Moonlight process**.
@@ -26,7 +29,8 @@ This preserves the Steam launcher and Gamescope context. When the benchmark
 finishes or you press **B**, Moonlight's normal UI returns to the same page
 and displays the summary including average/max intervals, drops, reported
 compositor presentation intervals (when available), Gamescope composition
-request/status, scanout-path evidence, and the saved CSV path.
+request/status, scanout-path evidence, SDL window subsystem and Vulkan
+present mode, and the saved CSV path.
 
 During the fullscreen test, **X** toggles the producer cadence, **Y** toggles
 swapchain acquisition, **A** toggles HUD, and **B** returns to Moonlight.
@@ -136,7 +140,17 @@ flag unconditionally, including in cases that may have required GPU composition,
 so that flag is **never used to infer hardware direct scanout**.
 
 The benchmark reports the Gamescope composition request and X11 control
-read-back separately from the actual scanout-path status. **Stock Gamescope
+read-back separately from the actual scanout-path status.
+
+The SDL backend label is measured from the **actual fullscreen SDL window**
+rather than inferred from `QT_QPA_PLATFORM`. It reports native Wayland, X11
+(typically XWayland under SteamOS Game Mode), or a clearly marked unverified
+SDL driver name when the native subsystem is not identified. The Vulkan mode
+is the mode passed to libplacebo to create the **successfully initialized**
+Vulkan swapchain: `IMMEDIATE_KHR`, `FIFO_RELAXED_KHR`, `MAILBOX_KHR`, or
+`FIFO_KHR`. This confirms the application's swapchain creation mode, not
+the compositor's physical display presentation mode. Both fields appear in
+the HUD, completed-results page and session comparison history. **Stock Gamescope
 does not publish its actual scanout-versus-GPU-composition choice through
 a property readable by Moonlight.** Consequently automatic-mode results say
 "Not observable with stock Gamescope", even when forced composition controls
