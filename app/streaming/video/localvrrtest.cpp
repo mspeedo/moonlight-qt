@@ -28,6 +28,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <limits>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -42,6 +43,10 @@ using Clock = std::chrono::steady_clock;
 struct Row { std::uint64_t timeUs, value, actualPresentUs; Metric metric; };
 struct Stat { std::uint64_t count = 0, last = 0, peak = 0; long double sum = 0; };
 std::atomic<bool> g_Enabled {false};
+// Startup frames exercise the full pipeline but are excluded from all measured
+// stats and CSV events. Arm only after the producer thread is launched.
+constexpr std::uint64_t kWarmupUs = 1'000'000;
+std::atomic<std::uint64_t> g_MeasurementStartUs {std::numeric_limits<std::uint64_t>::max()};
 std::mutex g_Lock;
 std::vector<Row> g_Rows;
 std::array<Stat, 8> g_Stats;
@@ -384,7 +389,7 @@ QString swapchainPresentMode(VkPresentModeKHR mode)
 SDL_Surface* createHud(const Snapshot& s, bool late)
 {
     // Rendering the HUD at 2 Hz keeps its upload overhead out of most frames.
-    QImage image(1160, 455, QImage::Format_ARGB32);
+    QImage image(1160, 485, QImage::Format_ARGB32);
     image.fill(Qt::transparent);
     QPainter painter(&image);
     painter.setRenderHint(QPainter::TextAntialiasing, true);
@@ -397,6 +402,10 @@ SDL_Surface* createHud(const Snapshot& s, bool late)
         QString("LOCAL VRR PIPELINE | %1 | %2")
             .arg(g_Variable.load() ? "repeatable 80-110 FPS" : "fixed 90 FPS")
             .arg(late ? "ACQUIRE LATE" : "ACQUIRE EARLY (baseline)"),
+        QString("Measurements: %1")
+            .arg(nowUs() < g_MeasurementStartUs.load(std::memory_order_acquire)
+                ? QStringLiteral("1-second warm-up (excluded)")
+                : QStringLiteral("ACTIVE (startup excluded)")),
         QString("Frames produced %1 | submitted %2 | dropped %3")
             .arg(s.produced).arg(s.submitted).arg(s.dropped),
         QString("Producer interval: %1 ms | max %2")
@@ -437,10 +446,24 @@ SDL_Surface* createHud(const Snapshot& s, bool late)
 
 bool active() { return g_Enabled.load(std::memory_order_relaxed); }
 std::uint64_t nowUs() { return static_cast<std::uint64_t>(LiGetMicroseconds()); }
+bool measuring()
+{
+    return active() && nowUs() >= g_MeasurementStartUs.load(std::memory_order_acquire);
+}
 void record(Metric metric, std::uint64_t value)
 {
     if (!active()) return;
     const auto now = nowUs();
+    const auto measurementStart = g_MeasurementStartUs.load(std::memory_order_acquire);
+    if (now < measurementStart) return;
+
+    // For durations, reject work started during warm-up even if it finishes
+    // after the one-second cutoff. Interval metrics are primed from their
+    // first post-warm-up event, never from a warm-up frame.
+    if ((metric == Metric::Acquire || metric == Metric::AcquireFailure ||
+         metric == Metric::Render) && value > now - measurementStart) {
+        return;
+    }
     std::lock_guard<std::mutex> lock(g_Lock);
     const auto actualPresentUs = metric == Metric::Present ? value : 0;
     if (metric == Metric::Produce) {
@@ -507,6 +530,8 @@ Snapshot snapshot()
 int run(const QStringList& args)
 {
     g_Enabled.store(false, std::memory_order_release);
+    g_MeasurementStartUs.store(std::numeric_limits<std::uint64_t>::max(),
+                               std::memory_order_release);
     {
         std::lock_guard<std::mutex> lock(g_Lock);
         g_Rows.clear();
@@ -618,10 +643,14 @@ int run(const QStringList& args)
                     Uint32 nextHudUpdate = 0;
                     bool running = true;
                     const auto benchmarkStart = Clock::now();
+                    g_MeasurementStartUs.store(nowUs() + kWarmupUs, std::memory_order_release);
+                    qInfo() << "VRR diagnostic: first 1 second is unmeasured warm-up;"
+                            << "configured duration measures full seconds after warm-up";
                     while (running && !g_Stop.load()) {
                         if (durationSeconds > 0 &&
                             Clock::now() - benchmarkStart >=
-                                std::chrono::seconds(durationSeconds)) {
+                                std::chrono::seconds(durationSeconds) +
+                                std::chrono::microseconds(kWarmupUs)) {
                             running = false;
                             break;
                         }
