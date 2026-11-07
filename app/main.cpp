@@ -29,6 +29,7 @@
 #include "streaming/video/ffmpeg.h"
 #if defined(Q_OS_LINUX) && defined(HAVE_LIBPLACEBO_VULKAN)
 #include "streaming/video/localvrrtest.h"
+#include "gui/localvrrbenchmarkcontroller.h"
 #endif
 #endif
 
@@ -959,6 +960,10 @@ int main(int argc, char *argv[])
     // Register our C++ types for QML
     qmlRegisterType<ComputerModel>("ComputerModel", 1, 0, "ComputerModel");
     qmlRegisterType<RemoteSunshineConfig>("RemoteSunshineConfig", 1, 0, "RemoteSunshineConfig");
+#if defined(Q_OS_LINUX) && defined(HAVE_LIBPLACEBO_VULKAN)
+    qmlRegisterType<LocalVrrBenchmarkController>(
+        "LocalVrrBenchmarkController", 1, 0, "LocalVrrBenchmarkController");
+#endif
     qmlRegisterType<AppModel>("AppModel", 1, 0, "AppModel");
     qmlRegisterUncreatableType<Session>("Session", 1, 0, "Session", "Session cannot be created from QML");
     qmlRegisterSingletonType<ComputerManager>("ComputerManager", 1, 0,
