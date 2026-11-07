@@ -21,6 +21,9 @@ concurrency:
 
 jobs:
   build:
+    # Preflight-only commits exercise the small R2 probe workflow, not the
+    # costly full Flatpak compilation.
+    if: "!contains(github.event.head_commit.message, '[r2-preflight]')"
     name: Build x86_64 Flatpak
     runs-on: ubuntu-24.04
     timeout-minutes: 120
@@ -120,6 +123,8 @@ jobs:
           RCLONE_CONFIG_R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           RCLONE_CONFIG_R2_ENDPOINT: ${{ vars.R2_ENDPOINT }}
           RCLONE_CONFIG_R2_REGION: auto
+          # Required for bucket-scoped Object Read & Write R2 API tokens.
+          RCLONE_CONFIG_R2_NO_CHECK_BUCKET: 'true'
         run: bash .github/scripts/publish-flatpak-r2.sh prepare
 
       - name: Build Flatpak
@@ -174,4 +179,6 @@ jobs:
           RCLONE_CONFIG_R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           RCLONE_CONFIG_R2_ENDPOINT: ${{ vars.R2_ENDPOINT }}
           RCLONE_CONFIG_R2_REGION: auto
+          # Required for bucket-scoped Object Read & Write R2 API tokens.
+          RCLONE_CONFIG_R2_NO_CHECK_BUCKET: 'true'
         run: bash .github/scripts/publish-flatpak-r2.sh publish
