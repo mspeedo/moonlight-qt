@@ -592,7 +592,15 @@ int run(const QStringList& args)
             result = 2;
         } else {
             g_VulkanPresentMode = swapchainPresentMode(renderer.diagnosticSwapchainPresentMode());
-            qInfo() << "Local VRR Vulkan swapchain present mode:" << g_VulkanPresentMode;
+            // Mesa may override the VkSwapchainCreateInfoKHR present mode at
+            // WSI level, in which case the app cannot query the effective mode
+            // back from Vulkan. Explicitly surface the override instead.
+            const QByteArray mesaPresentOverride = qgetenv("MESA_VK_WSI_PRESENT_MODE");
+            if (!mesaPresentOverride.isEmpty()) {
+                g_VulkanPresentMode += QStringLiteral(" [Mesa WSI override=%1; effective mode unknown]")
+                    .arg(QString::fromUtf8(mesaPresentOverride));
+            }
+            qInfo() << "Local VRR Vulkan swapchain requested present mode:" << g_VulkanPresentMode;
             VIDEO_STATS stats = {};
             Pacer pacer(&renderer, &stats, true);
             pacer.setDiagnosticAcquireLate(late);
