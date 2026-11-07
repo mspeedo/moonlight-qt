@@ -4,6 +4,10 @@ runtime-version: '6.11'
 sdk: org.kde.Sdk
 command: moonlight
 rename-icon: moonlight
+# Production SteamOS package: strip ELF symbols instead of exporting a
+# separate ~100 MB .Debug extension that adds thousands of R2 objects.
+build-options:
+  strip: true
 finish-args:
   - --share=network
   - --socket=fallback-x11
