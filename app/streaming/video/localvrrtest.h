@@ -1,4 +1,5 @@
 #pragma once
+#include <QtGlobal>
 
 // Isolated local Vulkan / Gamescope diagnostic. Never enabled for normal sessions.
 #if defined(Q_OS_LINUX) && defined(HAVE_LIBPLACEBO_VULKAN)
