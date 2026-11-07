@@ -1,5 +1,5 @@
 QT += core quick network quickcontrols2 svg
-unix:!macx: QT += dbus
+unix:!macx:!config_SL: QT += dbus
 CONFIG += c++17
 
 unix:!macx {
