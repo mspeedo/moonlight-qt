@@ -20,6 +20,7 @@ class RemoteSunshineConfig : public QObject
     Q_PROPERTY(bool connected READ connected NOTIFY stateChanged)
     Q_PROPERTY(bool dirty READ dirty NOTIFY stateChanged)
     Q_PROPERTY(QString status READ status NOTIFY stateChanged)
+    Q_PROPERTY(QString platform READ platform NOTIFY stateChanged)
     Q_PROPERTY(QVariantList settings READ settings NOTIFY stateChanged)
     Q_PROPERTY(QStringList presets READ presets NOTIFY stateChanged)
 
@@ -29,6 +30,7 @@ public:
     bool connected() const { return m_Connected; }
     bool dirty() const { return m_Dirty; }
     QString status() const { return m_Status; }
+    QString platform() const { return m_Platform; }
     QVariantList settings() const { return m_Settings; }
     QStringList presets() const { return m_Presets; }
 
@@ -64,6 +66,7 @@ private:
     QVariantList m_Settings;
     QStringList m_Presets;
     QString m_Status;
+    QString m_Platform;
     bool m_Busy = false;
     bool m_Closing = false;
     bool m_Connected = false;
