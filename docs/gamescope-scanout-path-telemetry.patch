@@ -1,0 +1,81 @@
+diff --git a/src/steamcompmgr.hpp b/src/steamcompmgr.hpp
+--- a/src/steamcompmgr.hpp
++++ b/src/steamcompmgr.hpp
+@@ -143,7 +143,9 @@
+ 
+ void nudge_steamcompmgr( void );
+ void MakeFocusDirty();
+-void force_repaint( void );
++void force_repaint( void );
++// Optional Moonlight VRR benchmark instrumentation: 1=hardware scanout, 2=GPU composition.
++void steamcompmgr_report_scanout_path(uint32_t path);
+ 
+ // Per-connector stat snapshot for typed mangoapp streams.
+ struct MangoappSnapshot_t
+diff --git a/src/steamcompmgr.cpp b/src/steamcompmgr.cpp
+--- a/src/steamcompmgr.cpp
++++ b/src/steamcompmgr.cpp
+@@ -8484,11 +8484,33 @@
+ 	g_SteamCompMgrWaiter.Nudge();
+ }
+ 
+-void force_repaint( void )
+-{
+-	g_bForceRepaint = true;
+-	nudge_steamcompmgr();
+-}
++void force_repaint( void )
++{
++	g_bForceRepaint = true;
++	nudge_steamcompmgr();
++}
++
++// Optional diagnostics: export the *actual DRM Present path*, not a Wayland
++// ZERO_COPY hint. Only publishes when the path changes to avoid per-frame X11
++// activity and to avoid disturbing the rendering timing being measured.
++void steamcompmgr_report_scanout_path(uint32_t path)
++{
++	static uint32_t lastPath = 0;
++	if (path == lastPath)
++		return;
++
++	gamescope_xwayland_server_t *server = wlserver_get_xwayland_server(0);
++	if (!server || !server->ctx || !server->ctx->dpy)
++		return;
++	xwayland_ctx_t *ctx = server->ctx.get();
++
++	Atom atom = XInternAtom(ctx->dpy, "GAMESCOPE_MOONLIGHT_SCANOUT_PATH", False);
++	unsigned long value = path; // Xlib expects long storage for format=32.
++	XChangeProperty(ctx->dpy, ctx->root, atom, XA_CARDINAL, 32, PropModeReplace,
++	                reinterpret_cast<const unsigned char*>(&value), 1);
++	XFlush(ctx->dpy);
++	lastPath = path;
++}
+ 
+ static void ClearUpscaleImages( global_focus_t *pFocus )
+ {
+diff --git a/src/Backends/DRMBackend.cpp b/src/Backends/DRMBackend.cpp
+--- a/src/Backends/DRMBackend.cpp
++++ b/src/Backends/DRMBackend.cpp
+@@ -3991,7 +3991,9 @@
+ 				if ( pFrameInfo->layers.count() == 2 )
+ 					m_nLastSingleOverlayZPos = pFrameInfo->layers.get( 1 ).zpos;
+ 
+-				return Commit( pFrameInfo );
++				const int rc = Commit( pFrameInfo );
++				if (rc == 0) steamcompmgr_report_scanout_path(1); // hardware planes
++				return rc;
+ 			}
+ 
+ 			// Composition Path
+@@ -4201,7 +4203,9 @@
+ 				}
+ 			}
+ 
+-			return Commit( &compositeFrameInfo );
++			const int rc = Commit( &compositeFrameInfo );
++			if (rc == 0) steamcompmgr_report_scanout_path(2); // GPU-composited
++			return rc;
+ 		}
+ 
+ 		virtual void DirtyState( bool bForce, bool bForceModeset ) override
