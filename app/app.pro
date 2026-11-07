@@ -1,4 +1,5 @@
 QT += core quick network quickcontrols2 svg
+unix:!macx: QT += dbus
 CONFIG += c++17
 
 unix:!macx {
@@ -200,6 +201,7 @@ SOURCES += \
     streaming/bandwidth.cpp \
     streaming/streamutils.cpp \
     backend/autoupdatechecker.cpp \
+    backend/flatpakupdatemanager.cpp \
     path.cpp \
     settings/mappingmanager.cpp \
     gui/sdlgamepadkeynavigation.cpp \
@@ -239,6 +241,7 @@ HEADERS += \
     streaming/bandwidth.h \
     streaming/streamutils.h \
     backend/autoupdatechecker.h \
+    backend/flatpakupdatemanager.h \
     path.h \
     settings/mappingmanager.h \
     gui/sdlgamepadkeynavigation.h \
