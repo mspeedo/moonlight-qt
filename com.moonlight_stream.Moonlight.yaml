@@ -11,7 +11,9 @@ build-options:
   no-debuginfo: true
 finish-args:
   - --share=network
-  - --socket=fallback-x11
+  # Explicit X11 access is needed for Qt's xcb backend under XWayland.
+  # fallback-x11 denies X11 when a Wayland socket is available.
+  - --socket=x11
   - --socket=wayland
   - --share=ipc
   - --socket=pulseaudio
