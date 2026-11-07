@@ -40,7 +40,7 @@ Item {
 
     RemoteSunshineConfig {
         id: remote
-        onStateChanged: root.focusInitialControl()
+        onStateChanged: Qt.callLater(root.focusInitialControl)
     }
     Component.onCompleted: remote.connectPaired(root.hostInfo)
 
@@ -99,7 +99,11 @@ Item {
                 font.pointSize: root.settingsFontPointSize
                 text: qsTr("Retry")
                 visible: !remote.connected && !remote.busy
-                onClicked: remote.connectPaired(root.hostInfo)
+                onClicked: {
+                    remote.connectPaired(root.hostInfo)
+                    // On a successful retry, move focus off the now-hidden button.
+                    root.initialFocusPending = true
+                }
             }
         }
 
