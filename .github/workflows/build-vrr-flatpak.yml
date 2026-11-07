@@ -162,6 +162,7 @@ jobs:
         shell: bash
         env:
           R2_BUCKET: ${{ vars.R2_BUCKET }}
+          R2_ENDPOINT: ${{ vars.R2_ENDPOINT }}
           R2_PUBLIC_URL: ${{ vars.R2_PUBLIC_URL }}
           FLATPAK_GPG_KEY_ID: ${{ steps.r2.outputs.key_id }}
           RCLONE_CONFIG_R2_TYPE: s3
