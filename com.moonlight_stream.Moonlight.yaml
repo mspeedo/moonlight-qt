@@ -1,6 +1,6 @@
 app-id: com.moonlight_stream.Moonlight
 runtime: org.kde.Platform
-runtime-version: '6.12'
+runtime-version: '6.11'
 sdk: org.kde.Sdk
 command: moonlight
 rename-icon: moonlight
