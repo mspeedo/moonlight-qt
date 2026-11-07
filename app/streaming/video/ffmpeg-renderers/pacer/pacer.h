@@ -77,6 +77,7 @@ private:
     bool m_Stopping;
     bool m_RenderLatestFrame;
     bool m_DiagnosticMode;
+    bool m_DiagnosticQueueLatest = true;
     std::atomic<bool> m_DiagnosticAcquireLate { false };
 
     IVsyncSource* m_VsyncSource;
