@@ -149,8 +149,12 @@ SDL driver name when the native subsystem is not identified. The Vulkan mode
 is the mode passed to libplacebo to create the **successfully initialized**
 Vulkan swapchain: `IMMEDIATE_KHR`, `FIFO_RELAXED_KHR`, `MAILBOX_KHR`, or
 `FIFO_KHR`. This confirms the application's swapchain creation mode, not
-the compositor's physical display presentation mode. Both fields appear in
-the HUD, completed-results page and session comparison history. **Stock Gamescope
+the compositor's physical display presentation mode. If the environment
+specifies `MESA_VK_WSI_PRESENT_MODE`, the benchmark displays its value and
+marks the effective driver-selected mode as unknown: Mesa can override
+`VkSwapchainCreateInfoKHR::presentMode` without a Vulkan readback API.
+Both fields appear in the HUD, completed-results page and session
+comparison history. **Stock Gamescope
 does not publish its actual scanout-versus-GPU-composition choice through
 a property readable by Moonlight.** Consequently automatic-mode results say
 "Not observable with stock Gamescope", even when forced composition controls
