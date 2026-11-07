@@ -16,8 +16,9 @@ on:
 
 concurrency:
   group: moonlight-flatpak-${{ github.ref }}
-  # Never interrupt an in-progress signed publication.
-  cancel-in-progress: false
+  # When a replacement updater build is pushed, cancel the superseded run.
+  # Other branches retain their normal non-canceling behavior.
+  cancel-in-progress: ${{ github.ref == 'refs/heads/feature/flatpak-update-page' }}
 
 jobs:
   build:
@@ -148,17 +149,38 @@ jobs:
             --disable-rofiles-fuse \
             --user
 
-      - name: Create installable Flatpak bundle (non-R2 branches only)
-        if: github.ref != 'refs/heads/feature/flatpak-update-page'
+      - name: Create OTA-enabled Flatpak bundle
         shell: bash
+        env:
+          FLATPAK_GPG_KEY_ID: ${{ steps.r2.outputs.key_id }}
+          R2_PUBLIC_URL: ${{ vars.R2_PUBLIC_URL }}
         run: |
-          flatpak build-bundle \
-            repo \
-            "Moonlight-${{ steps.source.outputs.safe_branch }}-${{ steps.source.outputs.short_sha }}.flatpak" \
-            com.moonlight_stream.Moonlight
+          set -euo pipefail
+          bundle="Moonlight-${{ steps.source.outputs.safe_branch }}-${{ steps.source.outputs.short_sha }}.flatpak"
+          if [[ "$GITHUB_REF" == "refs/heads/feature/flatpak-update-page" ]]; then
+            [[ -n "$FLATPAK_GPG_KEY_ID" && -n "$R2_PUBLIC_URL" ]] || {
+              echo "::error::OTA bundle requires the configured R2 URL and signing key"
+              exit 1
+            }
+            # Embed only the PUBLIC signing key and remote URL. Flatpak
+            # automatically configures this remote when installing the bundle.
+            gpg --batch --export "$FLATPAK_GPG_KEY_ID" > moonlight-flatpak-public.gpg
+            test -s moonlight-flatpak-public.gpg || {
+              echo "::error::Failed to export Flatpak public signing key"
+              exit 1
+            }
+            flatpak build-bundle \
+              --repo-url="${R2_PUBLIC_URL%/}/flatpak" \
+              --gpg-keys=moonlight-flatpak-public.gpg \
+              --runtime-repo=https://dl.flathub.org/repo/flathub.flatpakrepo \
+              repo "$bundle" com.moonlight_stream.Moonlight
+            echo "OTA-enabled Flatpak bundle created with signed Cloudflare R2 remote"
+          else
+            flatpak build-bundle repo "$bundle" com.moonlight_stream.Moonlight
+          fi
+          ls -lh "$bundle"
 
-      - name: Upload Flatpak artifact (non-R2 branches only)
-        if: github.ref != 'refs/heads/feature/flatpak-update-page'
+      - name: Upload Flatpak artifact
         uses: actions/upload-artifact@v7
         with:
           name: Moonlight-${{ steps.source.outputs.safe_branch }}-${{ steps.source.outputs.short_sha }}
