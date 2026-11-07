@@ -319,6 +319,10 @@ bool Pacer::initialize(SDL_Window* window, int maxVideoFps, bool enablePacing, b
     m_RenderLatestFrame = !enableVsync && !enablePacing &&
             m_VsyncRenderer->getRendererType() == IFFmpegRenderer::RendererType::Vulkan &&
             m_VsyncRenderer->isRenderThreadSupported();
+    // Allow local benchmark to test FIFO frame selection vs newest-only.
+    // Production streaming always uses the normal computed policy.
+    if (m_DiagnosticMode)
+        m_RenderLatestFrame = m_DiagnosticQueueLatest;
 
     if (enablePacing) {
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
