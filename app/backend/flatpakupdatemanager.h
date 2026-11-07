@@ -68,6 +68,7 @@ private:
     QString m_monitorPath;
     QString m_runningVersion;
     QString m_runningCommit;
+    QString m_localCommit;
     QString m_latestCommit;
     QString m_latestGitCommit;
     QNetworkAccessManager* m_network = nullptr;
