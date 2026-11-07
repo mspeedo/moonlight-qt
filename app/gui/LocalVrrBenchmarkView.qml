@@ -117,7 +117,7 @@ Flickable {
                 }
                 ColumnLayout {
                     Layout.fillWidth: true
-                    Label { text: qsTr("Benchmark length"); font.pointSize: 14 }
+                    Label { text: qsTr("Measured duration (+ 1 s warm-up)"); font.pointSize: 14 }
                     ComboBox {
                         id: durationChoice
                         Layout.fillWidth: true
@@ -163,7 +163,7 @@ Flickable {
         }
         Label {
             Layout.fillWidth: true
-            text: qsTr("During the test: X switches frame rates • Y switches acquisition order • A toggles HUD • B returns to Moonlight. Keyboard: X/Y/H/Esc. Composition mode is fixed for each run. The selected duration also ends automatically.")
+            text: qsTr("The first second is an unmeasured warm-up. Frames render normally, but stats and CSV begin afterward; timed runs include the full selected measured duration. During the test: X switches frame rates • Y switches acquisition order • A toggles HUD • B returns to Moonlight. Keyboard: X/Y/H/Esc. Composition mode is fixed for each run.")
             wrapMode: Text.WordWrap
             font.pointSize: 13
         }
@@ -178,7 +178,7 @@ Flickable {
                 Label {
                     text: Object.keys(benchmark.results).length === 0
                           ? qsTr("Run a benchmark to display the results here.")
-                          : qsTr("Scanout path requires Gamescope-side telemetry. The forced-composition request alone is not a measurement. CPU intervals are not display timestamps.")
+                          : qsTr("First 1 second excluded from all statistics and CSV rows. Scanout path requires Gamescope-side telemetry. The forced-composition request alone is not a measurement. CPU intervals are not display timestamps.")
                     wrapMode: Text.WordWrap
                     Layout.fillWidth: true
                     font.pointSize: 13
