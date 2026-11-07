@@ -3,6 +3,9 @@
 #include "streaming/session.h"
 #include "streaming/streamutils.h"
 #include "streaming/video/imageadjustments.h"
+#if defined(Q_OS_LINUX) && defined(HAVE_LIBPLACEBO_VULKAN)
+#include "streaming/video/localvrrtest.h"
+#endif
 
 // Implementation in plvk_c.c
 #define PL_LIBAV_IMPLEMENTATION 0
@@ -1113,7 +1116,21 @@ void PlVkRenderer::waitToRender()
     // NB: After calling this successfully, we *MUST* call pl_swapchain_submit_frame(),
     // hence the implementation of cleanupRenderContext() which does just this in case
     // renderFrame() wasn't called after waitToRender().
-    if (pl_swapchain_start_frame(m_Swapchain, &m_SwapchainFrame)) {
+    const uint64_t acquireBeginUs =
+#if defined(Q_OS_LINUX) && defined(HAVE_LIBPLACEBO_VULKAN)
+            LocalVrrTest::active() ? LocalVrrTest::nowUs() : 0;
+#else
+            0;
+#endif
+    const bool acquired = pl_swapchain_start_frame(m_Swapchain, &m_SwapchainFrame);
+#if defined(Q_OS_LINUX) && defined(HAVE_LIBPLACEBO_VULKAN)
+    if (acquireBeginUs != 0) {
+        LocalVrrTest::record(acquired ? LocalVrrTest::Metric::Acquire :
+                             LocalVrrTest::Metric::AcquireFailure,
+                             LocalVrrTest::nowUs() - acquireBeginUs);
+    }
+#endif
+    if (acquired) {
         m_HasPendingSwapchainFrame = true;
 
 #ifdef PLVK_USE_EARLY_RENDER_TO_WAIT
@@ -1231,7 +1248,10 @@ void PlVkRenderer::renderFrame(AVFrame *frame)
             else
 #endif
             {
-                enabled = Session::get()->getOverlayManager().isOverlayEnabled((Overlay::OverlayType)i);
+                // Local diagnostic has no active Session. Normal streaming still
+                // uses exactly the existing OverlayManager state.
+                enabled = Session::get() &&
+                        Session::get()->getOverlayManager().isOverlayEnabled((Overlay::OverlayType)i);
             }
             if (m_Overlays[i].hasOverlay && !enabled) {
                 texturesToDestroy[textureCount++] = m_Overlays[i].overlay.tex;
@@ -1374,6 +1394,10 @@ void PlVkRenderer::renderFrame(AVFrame *frame)
         SDL_PushEvent(&event);
         goto UnmapExit;
     }
+
+#if defined(Q_OS_LINUX) && defined(HAVE_LIBPLACEBO_VULKAN)
+    if (LocalVrrTest::active()) LocalVrrTest::record(LocalVrrTest::Metric::Submit);
+#endif
 
 #ifndef PLVK_USE_EARLY_RENDER_TO_WAIT
     endRenderTiming();
