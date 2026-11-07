@@ -15,6 +15,11 @@
 #include <QDateTime>
 #include <QDebug>
 
+#ifdef HAS_X11
+#include <X11/Xlib.h>
+#include <X11/Xatom.h>
+#endif
+
 #include <SDL.h>
 #include <atomic>
 #include <algorithm>
@@ -45,6 +50,10 @@ QString g_LastCsvPath;
 std::atomic<bool> g_Stop {false};
 std::atomic<bool> g_ProducerFailed {false};
 std::atomic<bool> g_Variable {true};
+QString g_CompositionRequest;
+QString g_CompositionControl;
+QString g_ScanoutPath;
+QString g_ScanoutEvidence;
 constexpr int kWidth = 960, kHeight = 540;
 
 // Fixed, repeatable 80-110 FPS intervals in microseconds, not host cadence playback.
@@ -53,6 +62,145 @@ constexpr std::array<int, 20> kPeriods = {{
     9091, 11111, 12500, 9615, 11905, 10000, 11364, 9259, 12195, 10417,
     11628, 9434, 10870, 12346, 9804, 11236, 9174, 12048, 10204, 10638
 }};
+
+
+// The compositor owns the DRM plane allocation decision; it is not observable
+// from Vulkan submit times or wp_presentation's ZERO_COPY bit (which Gamescope
+// currently sets even for GPU-composited frames). Never present those as proof
+// of physical direct scanout.
+#ifdef HAS_X11
+bool x11Cardinal(Display* display, Window root, Atom atom, unsigned long* value)
+{
+    if (!display || atom == None) return false;
+    Atom type = None;
+    int format = 0;
+    unsigned long count = 0, remaining = 0;
+    unsigned char* data = nullptr;
+    const int rc = XGetWindowProperty(display, root, atom, 0, 1, False,
+                                       XA_CARDINAL, &type, &format, &count,
+                                       &remaining, &data);
+    const bool valid = rc == Success && type == XA_CARDINAL &&
+                       format == 32 && count == 1 && data;
+    if (valid) *value = *reinterpret_cast<unsigned long*>(data);
+    if (data) XFree(data);
+    return valid;
+}
+#endif
+
+// The X root property is the supported Gamescope force-composition switch.
+// Its read-back confirms the property change, NOT that Gamescope processed
+// the event or which DRM planes were ultimately selected.
+// Stock Gamescope does not export actual scanout-path telemetry. A locally
+// instrumented Gamescope may publish GAMESCOPE_MOONLIGHT_SCANOUT_PATH:
+// 1=hardware scanout, 2=full GPU composition. Unknown is always explicit.
+class GamescopeCompositionControl
+{
+public:
+    explicit GamescopeCompositionControl(bool force) : m_Force(force)
+    {
+#ifdef HAS_X11
+        m_Display = XOpenDisplay(nullptr);
+        if (!m_Display) {
+            m_Status = QStringLiteral("XWayland unavailable: cannot control Gamescope");
+            return;
+        }
+        m_Root = DefaultRootWindow(m_Display);
+        const Atom signature = XInternAtom(m_Display, "GAMESCOPE_VRR_CAPABLE", True);
+        unsigned long capable = 0;
+        if (!x11Cardinal(m_Display, m_Root, signature, &capable)) {
+            m_Status = QStringLiteral("X11 root is not a verified Gamescope root");
+            return;
+        }
+        m_ForceAtom = XInternAtom(m_Display, "GAMESCOPE_COMPOSITE_FORCE", False);
+        m_HadOriginal = x11Cardinal(m_Display, m_Root, m_ForceAtom, &m_Original);
+        const unsigned long requested = force ? 1 : 0;
+        XChangeProperty(m_Display, m_Root, m_ForceAtom, XA_CARDINAL, 32,
+                        PropModeReplace, reinterpret_cast<const unsigned char*>(&requested), 1);
+        XSync(m_Display, False);
+        unsigned long current = ~0UL;
+        if (!x11Cardinal(m_Display, m_Root, m_ForceAtom, &current) ||
+            current != requested) {
+            m_Status = QStringLiteral("Gamescope control property read-back failed");
+            return;
+        }
+        m_Changed = true;
+        m_Ready = true;
+        m_Status = QStringLiteral("Gamescope X11 control set; no compositor acknowledgement");
+        m_ScanoutAtom = XInternAtom(m_Display,
+                                   "GAMESCOPE_MOONLIGHT_SCANOUT_PATH", True);
+#else
+        m_Status = QStringLiteral("Built without X11 Gamescope control support");
+#endif
+    }
+
+    ~GamescopeCompositionControl()
+    {
+#ifdef HAS_X11
+        if (m_Display) {
+            if (m_Changed) {
+                if (m_HadOriginal) {
+                    XChangeProperty(m_Display, m_Root, m_ForceAtom, XA_CARDINAL,
+                                    32, PropModeReplace,
+                                    reinterpret_cast<const unsigned char*>(&m_Original), 1);
+                } else {
+                    // Deletion triggers a Gamescope property change back to its
+                    // normal default (0). A compositor launched with -c is a
+                    // special case: the root property doesn't encode that flag.
+                    XDeleteProperty(m_Display, m_Root, m_ForceAtom);
+                }
+                XSync(m_Display, False);
+            }
+            XCloseDisplay(m_Display);
+        }
+#endif
+    }
+
+    bool ready() const { return m_Ready; }
+    QString status() const { return m_Status; }
+    QString path() const { return m_Path; }
+    QString evidence() const { return m_Evidence; }
+
+    void sampleScanoutPath()
+    {
+#ifdef HAS_X11
+        if (m_Ready && m_ScanoutAtom != None) {
+            unsigned long raw = 0;
+            if (x11Cardinal(m_Display, m_Root, m_ScanoutAtom, &raw)) {
+                if (raw == 1) {
+                    m_Path = QStringLiteral("Hardware scanout (Gamescope telemetry)");
+                    m_Evidence = QStringLiteral("Instrumented Gamescope DRM path property");
+                    return;
+                }
+                if (raw == 2) {
+                    m_Path = QStringLiteral("GPU composition (Gamescope telemetry)");
+                    m_Evidence = QStringLiteral("Instrumented Gamescope DRM path property");
+                    return;
+                }
+            }
+        }
+#endif
+        // A requested mode is not a measurement of the active DRM plane path.
+        m_Path = QStringLiteral("Not observable with stock Gamescope");
+        m_Evidence = m_Force
+            ? QStringLiteral("GPU composition requested; hardware path unverified")
+            : QStringLiteral("Automatic: Gamescope exposes no hardware path status");
+    }
+
+private:
+    bool m_Force;
+    bool m_Ready = false;
+    QString m_Status;
+    QString m_Path = QStringLiteral("Not observable with stock Gamescope");
+    QString m_Evidence = QStringLiteral("No compositor-side scanout evidence");
+#ifdef HAS_X11
+    Display* m_Display = nullptr;
+    Window m_Root = 0;
+    Atom m_ForceAtom = None;
+    Atom m_ScanoutAtom = None;
+    bool m_HadOriginal = false, m_Changed = false;
+    unsigned long m_Original = 0;
+#endif
+};
 
 const char* metricName(Metric metric)
 {
@@ -294,6 +442,10 @@ Snapshot snapshot()
     s.renderPeakMs = peakMs(Metric::Render);
     s.submitPeakMs = peakMs(Metric::Submit);
     s.presentPeakMs = peakMs(Metric::Present);
+    s.compositionRequest = g_CompositionRequest;
+    s.compositionControl = g_CompositionControl;
+    s.scanoutPath = g_ScanoutPath;
+    s.scanoutEvidence = g_ScanoutEvidence;
     return s;
 }
 
@@ -310,6 +462,22 @@ int run(const QStringList& args)
     g_Stop.store(false);
     g_ProducerFailed.store(false);
     g_Variable.store(!args.contains("--vrr-constant"));
+    const bool forceComposition = args.contains("--vrr-force-composition");
+    g_CompositionRequest = forceComposition
+        ? QStringLiteral("Forced GPU composition")
+        : QStringLiteral("Automatic (Gamescope decision)");
+    g_CompositionControl.clear();
+    g_ScanoutPath = QStringLiteral("Not measured");
+    g_ScanoutEvidence.clear();
+    GamescopeCompositionControl compositor(forceComposition);
+    g_CompositionControl = compositor.status();
+    compositor.sampleScanoutPath();
+    g_ScanoutPath = compositor.path();
+    g_ScanoutEvidence = compositor.evidence();
+    if (forceComposition && !compositor.ready()) {
+        qWarning() << "Cannot run forced-composition comparison:" << g_CompositionControl;
+        return 8;
+    }
     bool late = args.contains("--vrr-acquire-late");
     bool showHud = !args.contains("--vrr-hud-off");
     int durationSeconds = 0;
@@ -415,6 +583,9 @@ int run(const QStringList& args)
                             }
                         }
                         if (SDL_GetTicks() >= nextHudUpdate) {
+                            compositor.sampleScanoutPath();
+                            g_ScanoutPath = compositor.path();
+                            g_ScanoutEvidence = compositor.evidence();
                             nextHudUpdate = SDL_GetTicks() + 500;
                             if (showHud) {
                                 SDL_Surface* hud = createHud(snapshot(), late);
@@ -440,6 +611,9 @@ int run(const QStringList& args)
     SDL_ShowCursor(previousCursor);
     SDL_DestroyWindow(window);
     SDL_QuitSubSystem(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER);
+    compositor.sampleScanoutPath();
+    g_ScanoutPath = compositor.path();
+    g_ScanoutEvidence = compositor.evidence();
     exportCsv();
     return result;
 }
