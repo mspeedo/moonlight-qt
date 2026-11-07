@@ -20,6 +20,15 @@ void LocalVrrBenchmarkController::setStatus(const QString& status)
     emit statusChanged();
 }
 
+void LocalVrrBenchmarkController::clearHistory()
+{
+    if (m_Running) return;
+    m_History.clear();
+    m_Results.clear();
+    emit historyChanged();
+    emit resultsChanged();
+}
+
 void LocalVrrBenchmarkController::start(QObject* guiWindow, bool variableFps,
                                          bool acquireLate, int durationSeconds,
                                          bool showHud)
@@ -56,7 +65,7 @@ void LocalVrrBenchmarkController::start(QObject* guiWindow, bool variableFps,
     // external launch, this retains Steam's app identity, gamepad mapping and
     // Gamescope environment. The Qt window is hidden (not destroyed), so SDL's
     // fullscreen Vulkan window receives focus. Restore it on return.
-    QTimer::singleShot(0, this, [this, options]() {
+    QTimer::singleShot(0, this, [this, options, variableFps, acquireLate, durationSeconds]() {
         QWindow::Visibility visibility = QWindow::Windowed;
         if (m_GuiWindow) {
             visibility = m_GuiWindow->visibility();
@@ -84,8 +93,18 @@ void LocalVrrBenchmarkController::start(QObject* guiWindow, bool variableFps,
         report.insert(QStringLiteral("presentMax"), stats.presentPeakMs);
         report.insert(QStringLiteral("csv"), LocalVrrTest::lastCsvPath());
         report.insert(QStringLiteral("exitCode"), exitCode);
+        report.insert(QStringLiteral("mode"), variableFps
+                      ? QStringLiteral("Variable 80-110 FPS")
+                      : QStringLiteral("Constant 90 FPS"));
+        report.insert(QStringLiteral("ordering"), acquireLate
+                      ? QStringLiteral("Late acquire")
+                      : QStringLiteral("Early acquire"));
+        report.insert(QStringLiteral("duration"), durationSeconds);
         m_Results = report;
         emit resultsChanged();
+        m_History.append(report);
+        while (m_History.size() > 12) m_History.removeFirst();
+        emit historyChanged();
 
         if (m_GuiWindow) {
             if (visibility == QWindow::FullScreen)
