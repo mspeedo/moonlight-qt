@@ -26,6 +26,11 @@ Item {
         return fallback
     }
 
+    function presetIndex() {
+        var preset = Number(optionValue("nvenc_preset", "1"))
+        return isFinite(preset) && preset >= 1 && preset <= 7 ? preset - 1 : 0
+    }
+
     function optionIndex(key, values, fallback) {
         var index = values.indexOf(optionValue(key, fallback))
         return index >= 0 ? index : values.indexOf(fallback)
@@ -87,6 +92,7 @@ Item {
 
             ColumnLayout {
                 id: form
+                enabled: remoteConfig && !remoteConfig.busy
                 width: scroller.width - 12
                 spacing: 16
 
@@ -101,7 +107,7 @@ Item {
                         Layout.fillWidth: true
                         font.pointSize: root.fieldFontSize
                         model: ["P1 (fastest, default)", "P2", "P3", "P4", "P5", "P6", "P7 (slowest)"]
-                        currentIndex: Math.max(0, Number(root.optionValue("nvenc_preset", "1")) - 1)
+                        currentIndex: root.presetIndex()
                         onActivated: remoteConfig.setOption("nvenc_preset", String(index + 1))
                         onActiveFocusChanged: if (activeFocus) scroller.ensureVisible(this)
                     }
@@ -110,8 +116,7 @@ Item {
                         wrapMode: Text.WordWrap
                         font.pointSize: root.descriptionFontSize
                         opacity: 0.78
-                        text: qsTr("Higher numbers improve compression (quality at a given bitrate) at the cost of increased encoding latency. " +
-                                   "Change only if limited by network or decoder; increasing bitrate can have a similar effect.")
+                        text: qsTr("Higher numbers improve compression (quality at given bitrate) at the cost of increased encoding latency. Recommended to change only when limited by network or decoder, otherwise similar effect can be accomplished by increasing bitrate.")
                     }
                 }
 
@@ -136,9 +141,7 @@ Item {
                         wrapMode: Text.WordWrap
                         font.pointSize: root.descriptionFontSize
                         opacity: 0.78
-                        text: qsTr("Split frames across multiple NVENC hardware units to reduce encoding latency with a small compression penalty. " +
-                                   "The driver default enables it for 2+ NVENC units, 4K or higher and presets P1-P4. " +
-                                   "Enabled can also use split encoding at lower resolutions or higher presets.")
+                        text: qsTr("Split the encoding of each video frame over multiple NVENC hardware units. Significantly reduces host processing latency with a marginal compression efficiency penalty. The default option enables SFE if the following conditions are met: there are 2+ NVENC units, the stream is 4K resolution or higher, and the preset is P1-P4. Set this to Enabled to use SFE at lower resolutions or higher presets.")
                     }
                 }
 
@@ -164,8 +167,7 @@ Item {
                         wrapMode: Text.WordWrap
                         font.pointSize: root.descriptionFontSize
                         opacity: 0.78
-                        text: qsTr("Adds a preliminary encoding pass to detect more motion vectors, distribute bitrate and enforce bitrate limits. " +
-                                   "Disabling can cause bitrate overshoot and packet loss.")
+                        text: qsTr("Adds preliminary encoding pass. This allows to detect more motion vectors, better distribute bitrate across the frame and more strictly adhere to bitrate limits. Disabling it is not recommended since this can lead to occasional bitrate overshoot and subsequent packet loss.")
                     }
                 }
 
@@ -184,14 +186,14 @@ Item {
                         Layout.fillWidth: true
                         font.pointSize: root.descriptionFontSize
                         opacity: 0.78
-                        text: qsTr("Disabled by default")
+                        text: qsTr("Default: unchecked")
                     }
                     Label {
                         Layout.fillWidth: true
                         font.pointSize: root.descriptionFontSize
                         wrapMode: Text.WordWrap
                         opacity: 0.78
-                        text: qsTr("Assigns higher QP values to flat image regions. Recommended at lower bitrates; may reduce performance.")
+                        text: qsTr("Assign higher QP values to flat regions of the video. Recommended to enable when streaming at lower bitrates.")
                     }
                 }
 
@@ -218,9 +220,7 @@ Item {
                         font.pointSize: root.descriptionFontSize
                         wrapMode: Text.WordWrap
                         opacity: 0.78
-                        text: qsTr("Default: 0. Allows a frame to exceed the usual single-frame bitrate limit. " +
-                                   "This can improve variable-bitrate quality but may cause packet loss when the network lacks headroom. " +
-                                   "Maximum 400 corresponds to five times the normal frame-size limit.")
+                        text: qsTr("By default sunshine uses single-frame VBV/HRD, which means any encoded video frame size is not expected to exceed requested bitrate divided by requested frame rate. Relaxing this restriction can be beneficial and act as low-latency variable bitrate, but may also lead to packet loss if the network doesn't have buffer headroom to handle bitrate spikes. Maximum accepted value is 400, which corresponds to 5x increased encoded video frame upper size limit.")
                     }
                     Label {
                         font.pointSize: root.descriptionFontSize
@@ -250,7 +250,7 @@ Item {
                         CheckBox {
                             Layout.fillWidth: true
                             font.pointSize: root.fieldFontSize
-                            text: qsTr("Use realtime priority in hardware accelerated GPU scheduling")
+                            text: qsTr("Use realtime priority in hardware accelerated gpu scheduling")
                             checked: root.optionEnabled("nvenc_realtime_hags", true)
                             onClicked: remoteConfig.setOption("nvenc_realtime_hags", checked ? "enabled" : "disabled")
                             onActiveFocusChanged: if (activeFocus) scroller.ensureVisible(this)
@@ -258,15 +258,14 @@ Item {
                         Label {
                             font.pointSize: root.descriptionFontSize
                             opacity: 0.78
-                            text: qsTr("Enabled by default")
+                            text: qsTr("Default: checked")
                         }
                         Label {
                             Layout.fillWidth: true
                             font.pointSize: root.descriptionFontSize
                             wrapMode: Text.WordWrap
                             opacity: 0.78
-                            text: qsTr("With HAGS and nearly full VRAM, NVIDIA drivers may freeze when NVENC uses realtime priority. " +
-                                       "Disabling reduces priority to high, avoiding the freeze but potentially reducing capture performance under heavy GPU load.")
+                            text: qsTr("Currently NVIDIA drivers may freeze in encoder when HAGS is enabled, realtime priority is used and VRAM utilization is close to maximum. Disabling this option lowers the priority to high, sidestepping the freeze at the cost of reduced capture performance when the GPU is heavily loaded.")
                         }
                         Label {
                             font.pointSize: root.descriptionFontSize
@@ -291,14 +290,14 @@ Item {
                         Label {
                             font.pointSize: root.descriptionFontSize
                             opacity: 0.78
-                            text: qsTr("Enabled by default")
+                            text: qsTr("Default: checked")
                         }
                         Label {
                             Layout.fillWidth: true
                             font.pointSize: root.descriptionFontSize
                             wrapMode: Text.WordWrap
                             opacity: 0.78
-                            text: qsTr("Sunshine requests maximum GPU clocks to reduce encoding latency. Disabling may significantly increase encoding latency.")
+                            text: qsTr("Sunshine requests maximum GPU clock speed while streaming to reduce encoding latency. Disabling it is not recommended since this can lead to significantly increased encoding latency.")
                         }
                     }
 
@@ -317,15 +316,14 @@ Item {
                         Label {
                             font.pointSize: root.descriptionFontSize
                             opacity: 0.78
-                            text: qsTr("Enabled by default")
+                            text: qsTr("Default: checked")
                         }
                         Label {
                             Layout.fillWidth: true
                             font.pointSize: root.descriptionFontSize
                             wrapMode: Text.WordWrap
                             opacity: 0.78
-                            text: qsTr("Allows full-rate capture of fullscreen OpenGL/Vulkan by preferring layered DXGI presentation. " +
-                                       "This system-wide setting is reverted when Sunshine exits.")
+                            text: qsTr("Sunshine can't capture fullscreen OpenGL and Vulkan programs at full frame rate unless they present on top of DXGI. This is system-wide setting that is reverted on sunshine program exit.")
                         }
                     }
 
@@ -343,14 +341,14 @@ Item {
                         Label {
                             font.pointSize: root.descriptionFontSize
                             opacity: 0.78
-                            text: qsTr("Disabled by default")
+                            text: qsTr("Default: unchecked")
                         }
                         Label {
                             Layout.fillWidth: true
                             font.pointSize: root.descriptionFontSize
                             wrapMode: Text.WordWrap
                             opacity: 0.78
-                            text: qsTr("Simpler entropy coding, requiring about 10% more bitrate for equal quality. Relevant mainly to older software decoders.")
+                            text: qsTr("Simpler form of entropy coding. CAVLC needs around 10% more bitrate for same quality. Only relevant for really old decoding devices.")
                         }
                     }
                 }
