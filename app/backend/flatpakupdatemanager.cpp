@@ -282,7 +282,27 @@ void FlatpakUpdateManager::installLatest()
         QDBusPendingReply<> result = *call;
         call->deleteLater();
         if (result.isError()) {
-            setError(tr("Cannot install the Flatpak update: %1").arg(result.error().message()));
+            const QString message = result.error().message();
+            // SteamOS may expose Flatpak's UpdateMonitor but have no Access
+            // portal backend to show its one-time confirmation dialog.
+            // Do not bypass consent: guide users to explicitly authorize
+            // self-updates from the host permission store instead.
+            if (message.contains(QStringLiteral("No portal support found"), Qt::CaseInsensitive)) {
+                setError(tr("SteamOS cannot display Flatpak's update permission dialog. "
+                            "In Desktop Mode, open Konsole and run: "
+                            "flatpak permission-set flatpak updates com.moonlight_stream.Moonlight yes. "
+                            "Then check for updates again."));
+            } else if (message.contains(QStringLiteral("new permissions"), Qt::CaseInsensitive)) {
+                // The Flatpak self-update portal refuses permission-increasing
+                // upgrades even when the user has already granted updates.
+                setError(tr("This release requests new Flatpak permissions, which the "
+                            "self-update portal cannot approve. In Desktop Mode, "
+                            "run: flatpak update --user com.moonlight_stream.Moonlight "
+                            "(or --system for a system installation). "
+                            "Future updates with unchanged permissions can use this page."));
+            } else {
+                setError(tr("Cannot install the Flatpak update: %1").arg(message));
+            }
         }
     });
 #endif
