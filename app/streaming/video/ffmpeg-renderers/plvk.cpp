@@ -2,6 +2,7 @@
 
 #include "streaming/session.h"
 #include "streaming/streamutils.h"
+#include "utils.h"
 #include "streaming/video/imageadjustments.h"
 
 // Implementation in plvk_c.c
@@ -551,6 +552,35 @@ bool PlVkRenderer::tryInitializeDevice(VkPhysicalDevice device, VkPhysicalDevice
 #endif
         vkParams.extra_queues = VK_QUEUE_FLAG_BITS_MAX_ENUM;
     }
+
+#if LIBAVUTIL_VERSION_INT >= AV_VERSION_INT(60, 31, 101) && defined(VK_KHR_internally_synchronized_queues)
+    // FFmpeg 9+ can use the KHR internally synchronized queue feature.
+    // Unlike upstream's default opt-in on non-Gamescope backends, our
+    // pinned libplacebo patch deliberately forces external queue locking
+    // for compatibility with Gamescope WSI's legacy vkGetDeviceQueue().
+    // Keep the feature disabled while that patch is in the Flatpak build.
+    if (isExtensionSupportedByPhysicalDevice(device, "VK_KHR_internally_synchronized_queues")) {
+#if LIBAVUTIL_VERSION_MAJOR < 62
+        constexpr VkBool32 internallySynchronizedQueues = VK_FALSE;
+#else
+        // Future FFmpeg no longer has external queue locking callbacks.
+        // Review/remove the libplacebo compatibility patch when upgrading.
+        constexpr VkBool32 internallySynchronizedQueues = VK_TRUE;
+#endif
+        static VkPhysicalDeviceInternallySynchronizedQueuesFeaturesKHR featInternalSyncQueues = {
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_INTERNALLY_SYNCHRONIZED_QUEUES_FEATURES_KHR,
+            nullptr,
+            internallySynchronizedQueues,
+        };
+
+        static const VkPhysicalDeviceFeatures2 features = {
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+            (void*)&featInternalSyncQueues,
+        };
+
+        vkParams.features = &features;
+    }
+#endif
 
     {
         // Don't let Qt take DRM master from us during pl_vulkan_create()

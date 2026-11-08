@@ -187,7 +187,7 @@ modules:
         disable-submodules: true
       - type: git
         url: https://github.com/mspeedo/moonlight-common-c.git
-        commit: a9ddc7b6ed53c8948b27f74d591ba5bef8419e8b
+        commit: a776dda97097664774389f2238f3c2c9c54fa3d6
         dest: moonlight-common-c/moonlight-common-c
       - type: git
         url: https://github.com/cgutman/qmdnsengine.git
