@@ -6,8 +6,8 @@ permissions:
 
 on:
   workflow_dispatch:
-  # Build all new commits; publish only the remote-sunshine-settings
-  # branch when R2 secrets and variables are configured.
+  # Artifact-only legacy feature branch. Production R2 OTA is published
+  # exclusively by the separate development branch.
   push:
     branches:
       - vrr-image-adjustments
@@ -19,6 +19,8 @@ concurrency:
 
 jobs:
   build:
+    # Skip one-time administrative changes that only retire R2 publishing.
+    if: "!contains(github.event.head_commit.message, '[r2-preflight]')"
     name: Build x86_64 Flatpak
     runs-on: ubuntu-24.04
     timeout-minutes: 120
@@ -102,7 +104,7 @@ jobs:
 
       - name: Restore and configure signed Flatpak R2 repository
         id: r2
-        if: github.ref == 'refs/heads/feature/remote-sunshine-settings'
+        if: github.ref == 'refs/heads/development'
         shell: bash
         env:
           R2_BUCKET: ${{ vars.R2_BUCKET }}
