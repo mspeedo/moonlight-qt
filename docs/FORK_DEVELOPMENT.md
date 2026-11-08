@@ -34,6 +34,15 @@
    bundle artifact before considering a promotion deployed. OTA availability
    does not prove an install succeeded on a SteamOS device.
 
+## Review and release policy
+
+Keep PR merges into `development` manual and review the full diff first.
+GitHub branch protection or rulesets can be enabled to require reviews and
+successful test builds before promotion, but do not protect the `master`
+upstream reference branch instead. The integration branch itself may receive
+reviewed upstream merges from scheduled weekly maintenance, which automatically
+create the next signed OTA update when publishing succeeds.
+
 ## Scheduled upstream maintenance
 
 The weekly "Weekly Moonlight fork maintenance" task targets `development`
