@@ -1,45 +1,67 @@
 ---
-name: Build - VRR Flatpak
+name: Build - Official Moonlight Flatpak
 
 permissions:
   contents: read
 
 on:
   workflow_dispatch:
+    inputs:
+      publish_r2:
+        description: 'Explicitly replace the shared Moonlight OTA channel with this official master build'
+        type: boolean
+        required: true
+        default: false
+  # Always build an official master test artifact on push, but never publish OTA.
+  push:
+    branches:
+      - master
 
 concurrency:
-  group: moonlight-vrr-flatpak
-  cancel-in-progress: true
+  group: moonlight-flatpak-${{ github.ref }}
+  # Supersede push-only artifact builds; don't cancel an explicit OTA publication.
+  cancel-in-progress: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
 
 jobs:
   build:
+    # Preflight-only commits exercise the small R2 probe workflow, not the
+    # costly full Flatpak compilation.
+    if: "!contains(github.event.head_commit.message, '[r2-preflight]')"
     name: Build x86_64 Flatpak
     runs-on: ubuntu-24.04
     timeout-minutes: 120
 
     steps:
-      - name: Checkout vrr branch
-        uses: actions/checkout@v5
+      - name: Checkout selected Moonlight branch
+        uses: actions/checkout@v7
         with:
-          ref: vrr
-          submodules: recursive
+          submodules: false
           fetch-depth: 1
 
-      - name: Record source revision
+      - name: Resolve selected Moonlight revision
         id: source
         shell: bash
         run: |
-          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-          echo "short_sha=$(git rev-parse --short=12 HEAD)" >> "$GITHUB_OUTPUT"
+          SOURCE_SHA="${GITHUB_SHA}"
+          SOURCE_BRANCH="${GITHUB_REF_NAME}"
+          SAFE_BRANCH="${SOURCE_BRANCH//\//-}"
+          echo "sha=${SOURCE_SHA}" >> "$GITHUB_OUTPUT"
+          echo "short_sha=${SOURCE_SHA:0:12}" >> "$GITHUB_OUTPUT"
+          echo "safe_branch=${SAFE_BRANCH}" >> "$GITHUB_OUTPUT"
 
       - name: Install Flatpak build tools
         shell: bash
         run: |
+          # Chrome is preconfigured on GitHub-hosted runners but is unrelated to
+          # this build. Disable its apt source so transient repository metadata
+          # mismatches cannot prevent us from installing Flatpak tooling.
+          sudo rm -f /etc/apt/sources.list.d/google-chrome.list \
+                     /etc/apt/sources.list.d/google-chrome.sources
           sudo apt-get update
-          sudo apt-get install -y flatpak flatpak-builder
+          sudo apt-get install -y flatpak flatpak-builder rclone gnupg ostree
           flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
 
-      - name: Pin Moonlight source to this vrr revision
+      - name: Pin selected Moonlight source revision
         shell: bash
         env:
           SOURCE_SHA: ${{ steps.source.outputs.sha }}
@@ -49,19 +71,79 @@ jobs:
           from pathlib import Path
 
           manifest = Path("com.moonlight_stream.Moonlight.yaml")
-          text = manifest.read_text()
-          old = "        branch: vrr\n        disable-shallow-clone: true\n"
-          new = f"        commit: {os.environ['SOURCE_SHA']}\n        disable-shallow-clone: true\n"
-          if old not in text:
-              raise SystemExit("Unable to locate the Moonlight vrr git source in the Flatpak manifest")
-          manifest.write_text(text.replace(old, new, 1))
+          lines = manifest.read_text().splitlines(keepends=True)
+
+          def pin_git_source(lines, url, commit):
+              source_url = f"        url: {url}\n"
+              try:
+                  url_index = lines.index(source_url)
+              except ValueError:
+                  raise SystemExit(f"Unable to locate git source in Flatpak manifest: {url}")
+
+              source_end = len(lines)
+              for i in range(url_index + 1, len(lines)):
+                  if lines[i].startswith("      - type: "):
+                      source_end = i
+                      break
+
+              source_options = [
+                  line for line in lines[url_index + 1:source_end]
+                  if not line.startswith("        branch: ")
+                  and not line.startswith("        commit: ")
+              ]
+
+              return (
+                  lines[:url_index + 1]
+                  + [f"        commit: {commit}\n"]
+                  + source_options
+                  + lines[source_end:]
+              )
+
+          lines = pin_git_source(
+              lines,
+              "https://github.com/mspeedo/moonlight-qt.git",
+              os.environ["SOURCE_SHA"],
+          )
+          manifest.write_text("".join(lines))
+          print(f"Pinned Moonlight Qt to {os.environ['SOURCE_SHA']}")
           PY
+
+      - name: Validate and configure signed Flatpak R2 publication
+        id: r2
+        if: github.ref == 'refs/heads/master' && github.event_name == 'workflow_dispatch' && inputs.publish_r2 == true
+        shell: bash
+        env:
+          R2_PUBLISH_APPROVED: 'true'
+          R2_BUCKET: ${{ vars.R2_BUCKET }}
+          R2_ENDPOINT: ${{ vars.R2_ENDPOINT }}
+          R2_PUBLIC_URL: ${{ vars.R2_PUBLIC_URL }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          FLATPAK_GPG_PRIVATE_KEY: ${{ secrets.FLATPAK_GPG_PRIVATE_KEY }}
+          RCLONE_CONFIG_R2_TYPE: s3
+          RCLONE_CONFIG_R2_PROVIDER: Cloudflare
+          RCLONE_CONFIG_R2_ENV_AUTH: 'false'
+          RCLONE_CONFIG_R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          RCLONE_CONFIG_R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          RCLONE_CONFIG_R2_ENDPOINT: ${{ vars.R2_ENDPOINT }}
+          RCLONE_CONFIG_R2_REGION: auto
+          # Required for bucket-scoped Object Read & Write R2 API tokens.
+          RCLONE_CONFIG_R2_NO_CHECK_BUCKET: 'true'
+        run: bash .github/scripts/publish-flatpak-r2.sh prepare
 
       - name: Build Flatpak
         shell: bash
+        env:
+          FLATPAK_GPG_KEY_ID: ${{ steps.r2.outputs.key_id }}
         run: |
+          # The normal CI artifact still builds when R2 is not configured.
+          sign_args=()
+          if [[ -n "$FLATPAK_GPG_KEY_ID" ]]; then
+            sign_args+=("--gpg-sign=$FLATPAK_GPG_KEY_ID")
+          fi
           flatpak-builder \
             --repo=repo \
+            "${sign_args[@]}" \
             build-dir \
             com.moonlight_stream.Moonlight.yaml \
             --force-clean \
@@ -70,18 +152,62 @@ jobs:
             --disable-rofiles-fuse \
             --user
 
-      - name: Create installable Flatpak bundle
+      - name: Create OTA-enabled Flatpak bundle
         shell: bash
+        env:
+          FLATPAK_GPG_KEY_ID: ${{ steps.r2.outputs.key_id }}
+          R2_PUBLIC_URL: ${{ vars.R2_PUBLIC_URL }}
+          PUBLISH_R2: ${{ inputs.publish_r2 }}
         run: |
-          flatpak build-bundle \
-            repo \
-            "Moonlight-VRR-${{ steps.source.outputs.short_sha }}.flatpak" \
-            com.moonlight_stream.Moonlight
+          set -euo pipefail
+          bundle="Moonlight-${{ steps.source.outputs.safe_branch }}-${{ steps.source.outputs.short_sha }}.flatpak"
+          if [[ "$GITHUB_REF" == "refs/heads/master" && "$GITHUB_EVENT_NAME" == "workflow_dispatch" && "${PUBLISH_R2:-false}" == "true" ]]; then
+            [[ -n "$FLATPAK_GPG_KEY_ID" && -n "$R2_PUBLIC_URL" ]] || {
+              echo "::error::OTA bundle requires the configured R2 URL and signing key"
+              exit 1
+            }
+            # Embed only the PUBLIC signing key and remote URL. Flatpak
+            # automatically configures this remote when installing the bundle.
+            gpg --batch --export "$FLATPAK_GPG_KEY_ID" > moonlight-flatpak-public.gpg
+            test -s moonlight-flatpak-public.gpg || {
+              echo "::error::Failed to export Flatpak public signing key"
+              exit 1
+            }
+            flatpak build-bundle \
+              --repo-url="${R2_PUBLIC_URL%/}/flatpak" \
+              --gpg-keys=moonlight-flatpak-public.gpg \
+              --runtime-repo=https://dl.flathub.org/repo/flathub.flatpakrepo \
+              repo "$bundle" com.moonlight_stream.Moonlight
+            echo "OTA-enabled Flatpak bundle created with signed Cloudflare R2 remote"
+          else
+            flatpak build-bundle repo "$bundle" com.moonlight_stream.Moonlight
+          fi
+          ls -lh "$bundle"
 
       - name: Upload Flatpak artifact
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
-          name: Moonlight-VRR-${{ steps.source.outputs.short_sha }}
-          path: Moonlight-VRR-${{ steps.source.outputs.short_sha }}.flatpak
+          name: Moonlight-${{ steps.source.outputs.safe_branch }}-${{ steps.source.outputs.short_sha }}
+          path: Moonlight-${{ steps.source.outputs.safe_branch }}-${{ steps.source.outputs.short_sha }}.flatpak
           compression-level: 0
           if-no-files-found: error
+
+      - name: Publish signed OSTree Flatpak repository to R2
+        if: steps.r2.outputs.publish_ready == 'true' && github.ref == 'refs/heads/master' && github.event_name == 'workflow_dispatch' && inputs.publish_r2 == true
+        shell: bash
+        env:
+          R2_PUBLISH_APPROVED: 'true'
+          R2_BUCKET: ${{ vars.R2_BUCKET }}
+          R2_ENDPOINT: ${{ vars.R2_ENDPOINT }}
+          R2_PUBLIC_URL: ${{ vars.R2_PUBLIC_URL }}
+          FLATPAK_GPG_KEY_ID: ${{ steps.r2.outputs.key_id }}
+          RCLONE_CONFIG_R2_TYPE: s3
+          RCLONE_CONFIG_R2_PROVIDER: Cloudflare
+          RCLONE_CONFIG_R2_ENV_AUTH: 'false'
+          RCLONE_CONFIG_R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          RCLONE_CONFIG_R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          RCLONE_CONFIG_R2_ENDPOINT: ${{ vars.R2_ENDPOINT }}
+          RCLONE_CONFIG_R2_REGION: auto
+          # Required for bucket-scoped Object Read & Write R2 API tokens.
+          RCLONE_CONFIG_R2_NO_CHECK_BUCKET: 'true'
+        run: bash .github/scripts/publish-flatpak-r2.sh publish

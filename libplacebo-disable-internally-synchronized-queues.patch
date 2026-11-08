@@ -1,0 +1,18 @@
+diff --git a/src/vulkan/context.c b/src/vulkan/context.c
+--- a/src/vulkan/context.c
++++ b/src/vulkan/context.c
+@@ -1124,9 +1124,11 @@ static bool has_synchronized_queues(const VkPhysicalDeviceFeatures2 *features)
+ {
+ #ifdef VK_KHR_internally_synchronized_queues
+-    const VkPhysicalDeviceInternallySynchronizedQueuesFeaturesKHR *isq = vk_find_struct(features,
+-            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_INTERNALLY_SYNCHRONIZED_QUEUES_FEATURES_KHR);
+-    return isq && isq->internallySynchronizedQueues;
++    // Keep zero queue-create flags for Gamescope's WSI layer. It uses the
++    // legacy vkGetDeviceQueue, which cannot retrieve internally synchronized
++    // queues. Keep libplacebo's external per-queue locks instead.
++    (void) features;
++    return false;
+ #else
+     return false;
+ #endif
+ }
