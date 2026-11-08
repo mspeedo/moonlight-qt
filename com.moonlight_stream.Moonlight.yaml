@@ -51,8 +51,6 @@ modules:
         url: https://github.com/haasn/libplacebo.git
         tag: v7.387.0
         commit: 275f7dea27924cdd34ab2e6c20e448b6bc4fab65
-      - type: patch
-        path: libplacebo-disable-internally-synchronized-queues.patch
 
   - name: libdecor
     buildsystem: meson

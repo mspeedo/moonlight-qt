@@ -555,16 +555,16 @@ bool PlVkRenderer::tryInitializeDevice(VkPhysicalDevice device, VkPhysicalDevice
 
 #if LIBAVUTIL_VERSION_INT >= AV_VERSION_INT(60, 31, 101) && defined(VK_KHR_internally_synchronized_queues)
     // FFmpeg 9+ can use the KHR internally synchronized queue feature.
-    // Unlike upstream's default opt-in on non-Gamescope backends, our
-    // pinned libplacebo patch deliberately forces external queue locking
-    // for compatibility with Gamescope WSI's legacy vkGetDeviceQueue().
-    // Keep the feature disabled while that patch is in the Flatpak build.
+    // Keep it disabled for our current FFmpeg version: unmodified libplacebo
+    // then uses external queue locks and creates queues without the KHR
+    // internally-synchronized flag, preserving Gamescope WSI compatibility
+    // with its legacy vkGetDeviceQueue() path. No libplacebo patch is needed.
     if (isExtensionSupportedByPhysicalDevice(device, "VK_KHR_internally_synchronized_queues")) {
 #if LIBAVUTIL_VERSION_MAJOR < 62
         constexpr VkBool32 internallySynchronizedQueues = VK_FALSE;
 #else
-        // Future FFmpeg no longer has external queue locking callbacks.
-        // Review/remove the libplacebo compatibility patch when upgrading.
+        // FFmpeg 62+ removes the external queue-locking callbacks.
+        // Re-evaluate Gamescope WSI compatibility before upgrading.
         constexpr VkBool32 internallySynchronizedQueues = VK_TRUE;
 #endif
         static VkPhysicalDeviceInternallySynchronizedQueuesFeaturesKHR featInternalSyncQueues = {
