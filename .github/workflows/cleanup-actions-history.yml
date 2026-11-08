@@ -1,0 +1,105 @@
+name: Cleanup old GitHub Actions runs
+
+# Manual-only destructive maintenance. Never run this on push or schedule.
+on:
+  workflow_dispatch:
+    inputs:
+      confirm_deletion:
+        description: 'Delete old Actions runs and artifacts; retain latest development build?'
+        type: boolean
+        required: true
+        default: false
+
+permissions:
+  actions: write
+  contents: read
+
+concurrency:
+  group: moonlight-manual-actions-run-cleanup
+  cancel-in-progress: false
+
+jobs:
+  cleanup:
+    name: Preserve latest development build and delete older runs
+    if: inputs.confirm_deletion == true
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Delete historical runs, preserving development and this cleanup
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          repo="$GITHUB_REPOSITORY"
+          self_id="$GITHUB_RUN_ID"
+          [[ "$repo" == "mspeedo/moonlight-qt" ]] || {
+            echo "::error::Unexpected repository: $repo"
+            exit 1
+          }
+          [[ "$GITHUB_REF" == "refs/heads/master" ]] || {
+            echo "::error::Run this workflow on the master branch."
+            exit 1
+          }
+
+          # Determine the latest development *build* at execution time. Abort
+          # rather than guessing if there is no recognizable build to protect.
+          gh api -X GET "repos/$repo/actions/runs?branch=development&per_page=100" \
+            > "$RUNNER_TEMP/development-runs.json"
+          keep_id="$(jq -r '[.workflow_runs[] |
+            select(.head_branch == "development" and .name == "Build - Moonlight Flatpak")
+          ][0].id // empty' "$RUNNER_TEMP/development-runs.json")"
+
+          [[ "$keep_id" =~ ^[0-9]+$ ]] || {
+            echo "::error::No development build found. Nothing deleted."
+            exit 1
+          }
+          echo "Preserving latest development build run #$keep_id."
+          echo "Also preserving current cleanup run #$self_id (cannot delete an active run)."
+
+          # List the complete run history *before* deleting. Pagination during
+          # deletion could otherwise skip entries as pages shift.
+          gh api --paginate -X GET "repos/$repo/actions/runs?per_page=100" \
+            --jq '.workflow_runs[] | [.id, .status] | @tsv' \
+            > "$RUNNER_TEMP/all-runs.tsv"
+          grep -q -E "^$keep_id[[:space:]]" "$RUNNER_TEMP/all-runs.tsv" || {
+            echo "::error::Preserved development run missing from listing. Nothing deleted."
+            exit 1
+          }
+
+          deleted=0
+          failed=0
+          skipped_active=0
+          while IFS=$'\t' read -r run_id run_status; do
+            [[ "$run_id" =~ ^[0-9]+$ ]] || continue
+            if [[ "$run_id" == "$keep_id" || "$run_id" == "$self_id" ]]; then
+              continue
+            fi
+            if [[ "$run_status" != "completed" ]]; then
+              echo "::warning::Skipping active run #$run_id ($run_status)."
+              skipped_active=$((skipped_active + 1))
+              continue
+            fi
+            if gh api -X DELETE "repos/$repo/actions/runs/$run_id" >/dev/null; then
+              deleted=$((deleted + 1))
+              echo "Deleted Actions run #$run_id."
+            else
+              echo "::warning::Unable to delete run #$run_id."
+              failed=$((failed + 1))
+            fi
+          done < "$RUNNER_TEMP/all-runs.tsv"
+
+          {
+            echo "## Actions history cleanup"
+            echo "- Preserved development build: [#$keep_id](https://github.com/$repo/actions/runs/$keep_id)"
+            echo "- Preserved this running cleanup: #$self_id"
+            echo "- Historical runs deleted: $deleted"
+            echo "- Other active runs skipped: $skipped_active"
+            echo "- Deletions failed: $failed"
+            echo ""
+            echo "Deletion also removes logs and artifacts belonging to deleted runs."
+            echo "After this run finishes, you can delete the cleanup run itself from GitHub if you want only the development build visible."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          [[ "$failed" -eq 0 && "$skipped_active" -eq 0 ]] || exit 1
