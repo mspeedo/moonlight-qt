@@ -18,8 +18,9 @@ on:
       - master
 
 concurrency:
-  group: moonlight-flatpak-${{ github.ref }}
-  # Supersede push-only artifact builds; don't cancel an explicit OTA publication.
+  # Keep automatic artifact builds isolated from manually approved R2 publishes.
+  # A push must never cancel a release while its signed repository is uploading.
+  group: moonlight-flatpak-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
 
 jobs:
