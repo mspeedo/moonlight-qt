@@ -97,7 +97,7 @@ case "${1:-}" in
     cat > moonlight-fork.flatpakrepo <<EOF
 [Flatpak Repo]
 Title=Moonlight (mspeedo fork)
-Comment=Moonlight Flatpak builds from feature/flatpak-update-page
+Comment=Moonlight Flatpak builds from the development branch
 Url=$public_url
 Homepage=https://github.com/mspeedo/moonlight-qt
 DefaultBranch=master

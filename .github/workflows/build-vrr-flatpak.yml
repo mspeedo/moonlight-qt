@@ -6,19 +6,19 @@ permissions:
 
 on:
   workflow_dispatch:
-  # Build updater branch and publish it as the signed R2 Moonlight build.
-  # Only the updater branch publishes from this workflow version.
+  # Development is the only signed OTA publication branch.
+  # Feature branches build downloadable artifacts for testing, not R2 releases.
   push:
     branches:
+      - development
       - vrr-image-adjustments
-      - feature/remote-sunshine-settings
-      - feature/flatpak-update-page
+      - 'feature/**'
 
 concurrency:
   group: moonlight-flatpak-${{ github.ref }}
   # When a replacement updater build is pushed, cancel the superseded run.
   # Other branches retain their normal non-canceling behavior.
-  cancel-in-progress: ${{ github.ref == 'refs/heads/feature/flatpak-update-page' }}
+  cancel-in-progress: ${{ github.ref == 'refs/heads/development' }}
 
 jobs:
   build:
@@ -108,7 +108,7 @@ jobs:
 
       - name: Validate and configure signed Flatpak R2 publication
         id: r2
-        if: github.ref == 'refs/heads/feature/flatpak-update-page'
+        if: github.ref == 'refs/heads/development'
         shell: bash
         env:
           R2_BUCKET: ${{ vars.R2_BUCKET }}
@@ -157,7 +157,7 @@ jobs:
         run: |
           set -euo pipefail
           bundle="Moonlight-${{ steps.source.outputs.safe_branch }}-${{ steps.source.outputs.short_sha }}.flatpak"
-          if [[ "$GITHUB_REF" == "refs/heads/feature/flatpak-update-page" ]]; then
+          if [[ "$GITHUB_REF" == "refs/heads/development" ]]; then
             [[ -n "$FLATPAK_GPG_KEY_ID" && -n "$R2_PUBLIC_URL" ]] || {
               echo "::error::OTA bundle requires the configured R2 URL and signing key"
               exit 1
