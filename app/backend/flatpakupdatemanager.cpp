@@ -1,6 +1,9 @@
 #include "flatpakupdatemanager.h"
 
 #include <QFile>
+#include <QProcess>
+#include <QJsonArray>
+#include <QSet>
 #include <QTimer>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
@@ -28,7 +31,9 @@ constexpr auto kMonitorInterface = "org.freedesktop.portal.Flatpak.UpdateMonitor
 // Public metadata only. The signed Flatpak repository remains the authority
 // for actual installation, not this JSON document.
 constexpr auto kLatestIndex = "https://pub-3a75f66f021b46f3a095b41d1a3c553b.r2.dev/flatpak/moonlight-latest.json";
+constexpr auto kHistoryIndex = "https://pub-3a75f66f021b46f3a095b41d1a3c553b.r2.dev/flatpak/moonlight-versions.json";
 #endif
+const QRegularExpression kCommitPattern(QStringLiteral("^[a-f0-9]{64}$"));
 }
 
 FlatpakUpdateManager::FlatpakUpdateManager(QObject* parent)
@@ -58,6 +63,7 @@ void FlatpakUpdateManager::setError(const QString& message)
 {
     m_checking = false;
     m_installing = false;
+    m_installingHistorical = false;
     m_errorText = message;
     m_statusText = tr("Update operation failed.");
     emit changed();
@@ -87,6 +93,64 @@ void FlatpakUpdateManager::disconnectMonitor()
 #endif
 }
 
+
+void FlatpakUpdateManager::updateVersionLabels()
+{
+    // The latest pointer and version catalog can arrive in either order.
+    if (!m_latestCommit.isEmpty()) {
+        bool exists = false;
+        for (const QVariant& entry : m_versions) {
+            if (entry.toMap().value(QStringLiteral("ostree_commit")).toString() == m_latestCommit) {
+                exists = true;
+                break;
+            }
+        }
+        if (!exists) {
+            QVariantMap newest;
+            newest.insert(QStringLiteral("ostree_commit"), m_latestCommit);
+            newest.insert(QStringLiteral("git_commit"), m_latestGitCommit);
+            newest.insert(QStringLiteral("published_at"), m_latestPublishedAt);
+            m_versions.prepend(newest);
+        }
+    }
+    for (int i = 0; i < m_versions.size(); ++i) {
+        QVariantMap entry = m_versions[i].toMap();
+        const QString commit = entry.value(QStringLiteral("ostree_commit")).toString();
+        QString label = tr("%1 · %2").arg(
+            entry.value(QStringLiteral("published_at")).toString().left(10),
+            entry.value(QStringLiteral("git_commit")).toString().left(12));
+        if (commit == m_latestCommit) {
+            label += tr(" (latest)");
+        }
+        if (commit == m_localCommit) {
+            label += tr(" (installed)");
+        }
+        entry.insert(QStringLiteral("label"), label);
+        m_versions[i] = entry;
+    }
+    emit changed();
+}
+
+bool FlatpakUpdateManager::canInstallVersion(const QString& commit) const
+{
+    if (!m_supported || m_installing || m_checking || m_restartRequired ||
+        !kCommitPattern.match(commit).hasMatch() || commit == m_localCommit) {
+        return false;
+    }
+    bool known = false;
+    for (const QVariant& entry : m_versions) {
+        if (entry.toMap().value(QStringLiteral("ostree_commit")).toString() == commit) {
+            known = true;
+            break;
+        }
+    }
+    if (!known) {
+        return false;
+    }
+    // Only the most recent commit can be installed via UpdateMonitor.
+    return commit != m_latestCommit || (m_portalReady && m_updateAvailable);
+}
+
 void FlatpakUpdateManager::checkForUpdates()
 {
 #if !defined(Q_OS_LINUX) || defined(STEAM_LINK)
@@ -107,6 +171,10 @@ void FlatpakUpdateManager::checkForUpdates()
     m_updateAvailable = false;
     m_latestCommit.clear();
     m_latestGitCommit.clear();
+    m_latestPublishedAt.clear();
+    m_versions.clear();
+    m_historyLoading = true;
+    m_historyError.clear();
     m_portalReady = false;
     m_checking = true;
     m_statusText = tr("Checking for available Flatpak updates...");
@@ -200,7 +268,9 @@ void FlatpakUpdateManager::checkForUpdates()
         }
         m_latestCommit = commit;
         m_latestGitCommit = json.value(QStringLiteral("git_commit")).toString();
+        m_latestPublishedAt = json.value(QStringLiteral("published_at")).toString();
         m_checking = false;
+        updateVersionLabels();
         m_updateAvailable = !m_runningCommit.isEmpty() && m_latestCommit != m_runningCommit;
         if (m_runningCommit.isEmpty()) {
             m_statusText = tr("Cannot read the running Flatpak commit. Install from the Moonlight R2 remote.");
@@ -214,6 +284,65 @@ void FlatpakUpdateManager::checkForUpdates()
         emit changed();
     });
 
+
+    // Catalog is advisory; actual installations still verify signed commits.
+    QNetworkRequest historyRequest(QUrl(QString::fromLatin1(kHistoryIndex)));
+    historyRequest.setRawHeader("Cache-Control", "no-cache");
+    historyRequest.setAttribute(QNetworkRequest::CacheLoadControlAttribute,
+                                QNetworkRequest::AlwaysNetwork);
+    auto* historyReply = m_network->get(historyRequest);
+    connect(historyReply, &QNetworkReply::finished, this, [this, historyReply, generation] {
+        const QByteArray bytes = historyReply->readAll();
+        const auto networkError = historyReply->error();
+        const QString networkMessage = historyReply->errorString();
+        historyReply->deleteLater();
+        if (generation != m_generation) {
+            return;
+        }
+        m_historyLoading = false;
+        if (networkError != QNetworkReply::NoError) {
+            m_historyError = tr("Version history unavailable: %1").arg(networkMessage);
+            updateVersionLabels();
+            return;
+        }
+        const QJsonDocument doc = QJsonDocument::fromJson(bytes);
+        const QJsonObject json = doc.object();
+        if (!doc.isObject() || json.value(QStringLiteral("schema")).toInt() != 1 ||
+            json.value(QStringLiteral("app_id")).toString() != QStringLiteral("com.moonlight_stream.Moonlight") ||
+            json.value(QStringLiteral("arch")).toString() != QStringLiteral("x86_64") ||
+            json.value(QStringLiteral("branch")).toString() != QStringLiteral("master") ||
+            !json.value(QStringLiteral("versions")).isArray()) {
+            m_historyError = tr("R2 returned an invalid version history.");
+            updateVersionLabels();
+            return;
+        }
+        QVariantList versions;
+        QSet<QString> seen;
+        for (const QJsonValue& value : json.value(QStringLiteral("versions")).toArray()) {
+            const QJsonObject record = value.toObject();
+            const QString ostree = record.value(QStringLiteral("ostree_commit")).toString();
+            const QString git = record.value(QStringLiteral("git_commit")).toString();
+            const QString published = record.value(QStringLiteral("published_at")).toString();
+            if (!value.isObject() || !kCommitPattern.match(ostree).hasMatch() ||
+                !kCommitPattern.match(git).hasMatch() || published.isEmpty()) {
+                m_historyError = tr("R2 version history contains an invalid release.");
+                updateVersionLabels();
+                return;
+            }
+            if (!seen.contains(ostree)) {
+                seen.insert(ostree);
+                QVariantMap item;
+                item.insert(QStringLiteral("ostree_commit"), ostree);
+                item.insert(QStringLiteral("git_commit"), git);
+                item.insert(QStringLiteral("published_at"), published);
+                versions.append(item);
+            }
+        }
+        m_historyError.clear();
+        m_versions = versions;
+        updateVersionLabels();
+    });
+
     // A stalled metadata request must not lock the page permanently.
     QTimer::singleShot(12000, this, [this, generation] {
         if (generation != m_generation || !m_checking) {
@@ -221,6 +350,14 @@ void FlatpakUpdateManager::checkForUpdates()
         }
         m_checking = false;
         m_statusText = tr("The R2 update index hasn't responded yet. Check your connection and try again.");
+        emit changed();
+    });
+    QTimer::singleShot(12000, this, [this, generation] {
+        if (generation != m_generation || !m_historyLoading) {
+            return;
+        }
+        m_historyLoading = false;
+        m_historyError = tr("The R2 version catalog hasn't responded yet.");
         emit changed();
     });
 #endif
@@ -254,7 +391,7 @@ void FlatpakUpdateManager::onUpdateAvailable(QVariantMap info)
         m_updateAvailable = false;
         m_statusText = tr("An update is already installed; restart Moonlight when convenient.");
     }
-    emit changed();
+    updateVersionLabels();
 }
 
 void FlatpakUpdateManager::installLatest()
@@ -305,6 +442,82 @@ void FlatpakUpdateManager::installLatest()
             }
         }
     });
+#endif
+}
+
+
+void FlatpakUpdateManager::installVersion(const QString& commit)
+{
+#if !defined(Q_OS_LINUX) || defined(STEAM_LINK)
+    Q_UNUSED(commit);
+    setError(tr("Historical Flatpak installs require Linux."));
+#else
+    if (!canInstallVersion(commit)) {
+        return;
+    }
+    if (commit == m_latestCommit) {
+        installLatest();
+        return;
+    }
+    // UpdateMonitor cannot pin a revision. This Flatpak already grants the
+    // host-spawn D-Bus permission for its SteamOS priority helper.
+    const QSettings info(QStringLiteral("/.flatpak-info"), QSettings::IniFormat);
+    const QString appPath = info.value(QStringLiteral("Instance/app-path")).toString();
+    QString installation;
+    if (appPath.startsWith(QStringLiteral("/var/lib/flatpak/"))) {
+        installation = QStringLiteral("--system");
+    } else if (appPath.contains(QStringLiteral("/.local/share/flatpak/app/"))) {
+        installation = QStringLiteral("--user");
+    } else {
+        setError(tr("Cannot determine Flatpak installation scope from /.flatpak-info."));
+        return;
+    }
+
+    auto* process = new QProcess(this);
+    process->setProcessChannelMode(QProcess::MergedChannels);
+    process->setProgram(QStringLiteral("flatpak-spawn"));
+    process->setArguments({
+        QStringLiteral("--host"), QStringLiteral("flatpak"), QStringLiteral("update"),
+        installation, QStringLiteral("--app"), QStringLiteral("--noninteractive"),
+        QStringLiteral("--assumeyes"), QStringLiteral("--commit=") + commit,
+        QStringLiteral("com.moonlight_stream.Moonlight")
+    });
+    m_installing = true;
+    m_installingHistorical = true;
+    m_errorText.clear();
+    m_progress = 0;
+    m_statusText = tr("Installing selected historical version from R2...");
+    emit changed();
+
+    connect(process, &QProcess::errorOccurred, this, [this, process](QProcess::ProcessError error) {
+        if (error == QProcess::FailedToStart && m_installingHistorical) {
+            setError(tr("Cannot start host Flatpak: %1").arg(process->errorString()));
+            process->deleteLater();
+        }
+    });
+    connect(process, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
+            this, [this, process, commit](int exitCode, QProcess::ExitStatus status) {
+        const QString output = QString::fromUtf8(process->readAll()).trimmed();
+        process->deleteLater();
+        if (!m_installingHistorical) {
+            return;
+        }
+        if (status != QProcess::NormalExit || exitCode != 0) {
+            setError(tr("Could not install selected Flatpak commit: %1. System-wide downgrades "
+                        "may need administrator authorization in SteamOS Desktop Mode.")
+                         .arg(output.isEmpty() ? tr("Flatpak failed") : output.left(800)));
+            return;
+        }
+        m_localCommit = commit;
+        m_installing = false;
+        m_installingHistorical = false;
+        m_restartRequired = commit != m_runningCommit;
+        m_updateAvailable = false;
+        m_progress = 100;
+        m_statusText = tr("Selected version installed. Restart Moonlight from Steam to activate it.");
+        updateVersionLabels();
+    });
+    process->start();
 #endif
 }
 

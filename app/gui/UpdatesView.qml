@@ -123,26 +123,56 @@ FocusScope {
                         Layout.fillWidth: true
                     }
 
-                    RadioButton {
-                        id: latestBuild
-                        text: FlatpakUpdateManager.updateAvailable
-                              ? qsTr("Latest available build · %1").arg((FlatpakUpdateManager.latestGitCommit.length > 0
-                                   ? FlatpakUpdateManager.latestGitCommit.substring(0, 12)
-                                   : FlatpakUpdateManager.latestCommit.substring(0, 12)))
-                              : qsTr("Latest available build")
-                        checked: true
-                        enabled: FlatpakUpdateManager.updateAvailable &&
+                    Label {
+                        text: qsTr("Published versions (newest first)")
+                        wrapMode: Text.Wrap
+                        Layout.fillWidth: true
+                    }
+                    ComboBox {
+                        id: versionSelector
+                        Layout.fillWidth: true
+                        model: FlatpakUpdateManager.versions
+                        textRole: "label"
+                        enabled: FlatpakUpdateManager.supported &&
+                                 !FlatpakUpdateManager.checking &&
                                  !FlatpakUpdateManager.installing &&
-                                 !FlatpakUpdateManager.restartRequired
+                                 !FlatpakUpdateManager.restartRequired &&
+                                 FlatpakUpdateManager.versions.length > 0
                         focusPolicy: Qt.StrongFocus
+                    }
+                    Label {
+                        visible: FlatpakUpdateManager.historyLoading
+                        text: qsTr("Loading published version history...")
+                        color: "#B0BEC5"
+                        wrapMode: Text.Wrap
+                        Layout.fillWidth: true
+                    }
+                    Label {
+                        visible: FlatpakUpdateManager.historyError.length > 0
+                        text: FlatpakUpdateManager.historyError
+                        color: "#FFB74D"
+                        wrapMode: Text.Wrap
+                        Layout.fillWidth: true
+                    }
+                    Label {
+                        text: qsTr("Historical versions use a signed OSTree commit. System-wide downgrades may require administrator authorization in Desktop Mode.")
+                        color: "#B0BEC5"
+                        wrapMode: Text.Wrap
+                        Layout.fillWidth: true
                     }
 
                     Button {
                         id: installButton
                         text: FlatpakUpdateManager.installing ? qsTr("Installing...") : qsTr("Install selected update")
-                        enabled: FlatpakUpdateManager.supported &&
-                                 FlatpakUpdateManager.canInstall
-                        onClicked: FlatpakUpdateManager.installLatest()
+                        enabled: versionSelector.currentIndex >= 0 &&
+                                 !FlatpakUpdateManager.checking &&
+                                 !FlatpakUpdateManager.installing &&
+                                 !FlatpakUpdateManager.restartRequired &&
+                                 FlatpakUpdateManager.versions.length > versionSelector.currentIndex &&
+                                 FlatpakUpdateManager.canInstallVersion(
+                                     FlatpakUpdateManager.versions[versionSelector.currentIndex].ostree_commit)
+                        onClicked: FlatpakUpdateManager.installVersion(
+                                       FlatpakUpdateManager.versions[versionSelector.currentIndex].ostree_commit)
                         focusPolicy: Qt.StrongFocus
                     }
                 }
@@ -166,12 +196,13 @@ FocusScope {
                         from: 0
                         to: 100
                         value: FlatpakUpdateManager.progress
+                        indeterminate: FlatpakUpdateManager.installingHistorical
                         visible: FlatpakUpdateManager.installing ||
                                  FlatpakUpdateManager.restartRequired
                     }
 
                     Label {
-                        visible: installProgress.visible
+                        visible: installProgress.visible && !FlatpakUpdateManager.installingHistorical
                         text: qsTr("%1% complete").arg(FlatpakUpdateManager.progress)
                     }
 
