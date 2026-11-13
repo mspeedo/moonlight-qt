@@ -9,6 +9,25 @@ FocusScope {
     id: updatesPage
     objectName: qsTr("Updates")
 
+    // Map a running OSTree package to the Git source commit recorded by R2.
+    // Older deployments may predate the history catalog and have no match.
+    function gitForOstree(ostreeCommit) {
+        if (!ostreeCommit)
+            return ""
+        var versions = FlatpakUpdateManager.versions
+        for (var i = 0; i < versions.length; ++i) {
+            if (versions[i].ostree_commit === ostreeCommit)
+                return versions[i].git_commit || ""
+        }
+        return ""
+    }
+
+    readonly property string runningGitCommit: gitForOstree(FlatpakUpdateManager.runningCommit)
+    readonly property var selectedRelease: versionSelector.currentIndex >= 0 &&
+                                           versionSelector.currentIndex < FlatpakUpdateManager.versions.length
+                                           ? FlatpakUpdateManager.versions[versionSelector.currentIndex]
+                                           : null
+
     StackView.onActivated: {
         SdlGamepadKeyNavigation.setUiNavMode(true)
         checkButton.forceActiveFocus(Qt.TabFocus)
@@ -50,7 +69,18 @@ FocusScope {
                         font.bold: true
                     }
                     Label {
-                        text: qsTr("Running Flatpak commit: %1")
+                        text: qsTr("Running Git commit: %1")
+                              .arg(updatesPage.runningGitCommit
+                                   ? updatesPage.runningGitCommit.substring(0, 12)
+                                   : (FlatpakUpdateManager.versions.length > 0
+                                      ? qsTr("Not recorded in R2 history")
+                                      : qsTr("Check for updates")))
+                        color: "#B0BEC5"
+                        wrapMode: Text.Wrap
+                        Layout.fillWidth: true
+                    }
+                    Label {
+                        text: qsTr("Running Flatpak (OSTree) commit: %1")
                               .arg(FlatpakUpdateManager.runningCommit
                                    ? FlatpakUpdateManager.runningCommit.substring(0, 12)
                                    : qsTr("Not reported yet"))
@@ -139,6 +169,26 @@ FocusScope {
                                  !FlatpakUpdateManager.restartRequired &&
                                  FlatpakUpdateManager.versions.length > 0
                         focusPolicy: Qt.StrongFocus
+                    }
+                    Label {
+                        visible: updatesPage.selectedRelease !== null
+                        text: updatesPage.selectedRelease
+                              ? qsTr("Selected Git commit: %1")
+                                  .arg(updatesPage.selectedRelease.git_commit.substring(0, 12))
+                              : ""
+                        color: "#B0BEC5"
+                        wrapMode: Text.Wrap
+                        Layout.fillWidth: true
+                    }
+                    Label {
+                        visible: updatesPage.selectedRelease !== null
+                        text: updatesPage.selectedRelease
+                              ? qsTr("Selected Flatpak (OSTree) commit: %1")
+                                  .arg(updatesPage.selectedRelease.ostree_commit.substring(0, 12))
+                              : ""
+                        color: "#B0BEC5"
+                        wrapMode: Text.Wrap
+                        Layout.fillWidth: true
                     }
                     Label {
                         visible: FlatpakUpdateManager.historyLoading

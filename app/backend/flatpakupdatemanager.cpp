@@ -117,9 +117,11 @@ void FlatpakUpdateManager::updateVersionLabels()
     for (int i = 0; i < m_versions.size(); ++i) {
         QVariantMap entry = m_versions[i].toMap();
         const QString commit = entry.value(QStringLiteral("ostree_commit")).toString();
-        QString label = tr("%1 · %2").arg(
+        // Identify both the source revision and the signed Flatpak build.
+        QString label = tr("%1 · Git %2 · OSTree %3").arg(
             entry.value(QStringLiteral("published_at")).toString().left(10),
-            entry.value(QStringLiteral("git_commit")).toString().left(12));
+            entry.value(QStringLiteral("git_commit")).toString().left(12),
+            commit.left(12));
         if (commit == m_latestCommit) {
             label += tr(" (latest)");
         }
