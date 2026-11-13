@@ -119,31 +119,8 @@ DefaultBranch=master
 GPGKey=$public_key
 EOF
 
-    # Only upload missing immutable OSTree objects. Existing objects use
-    # content-hash paths and are safely reusable across independent builds.
-    # --fast-list avoids per-directory S3 listing round trips.
-    rclone_checked copy repo/objects/ "${repo_remote}objects/" \
-      --ignore-existing --fast-list
-
-    # Upload repository metadata, without duplicating objects or exposing
-    # the new signed summary until all commit objects and refs are present.
-    rclone_checked copy repo/ "$repo_remote" \
-      --fast-list \
-      --exclude '/objects/**' \
-      --exclude '/summary' \
-      --exclude '/summary.sig' \
-      --exclude '/refs/**' \
-      --exclude '/tmp/**' \
-      --exclude '/state/**' \
-      --exclude '*.lock'
-    rclone_checked copy repo/refs/ "${repo_remote}refs/"
-    rclone_checked copyto repo/summary.sig "${repo_remote}summary.sig"
-    rclone_checked copyto repo/summary "${repo_remote}summary"
-    rclone_checked copyto moonlight-fork.flatpakrepo "${repo_remote}moonlight-fork.flatpakrepo"
-
-    # Publish this index LAST, after all signed OSTree data is available.
-    # Moonlight uses it for a real on-demand check rather than waiting for
-    # the portal's periodic (typically 30-minute) remote polling cycle.
+    # Generate and validate the release catalog BEFORE publishing repository
+    # objects, refs or signed summary. Bad metadata must not partially update R2.
     ostree_commit="$(ostree --repo=repo rev-parse app/com.moonlight_stream.Moonlight/x86_64/master)"
     [[ "$ostree_commit" =~ ^[a-f0-9]{64}$ ]] || die "Could not resolve the published Moonlight OSTree commit"
     published_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -159,7 +136,8 @@ import os
 import re
 from pathlib import Path
 
-hex_sha = re.compile(r"^[a-f0-9]{64}$")
+git_sha = re.compile(r"^[a-f0-9]{40}$")
+ostree_sha = re.compile(r"^[a-f0-9]{64}$")
 utc = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 identity = {"schema": 1, "app_id": "com.moonlight_stream.Moonlight",
             "arch": "x86_64", "branch": "master"}
@@ -175,8 +153,8 @@ def check_index(doc):
 def release(item):
     if not isinstance(item, dict):
         raise ValueError("Invalid release record")
-    for field in ("ostree_commit", "git_commit"):
-        if not isinstance(item.get(field), str) or not hex_sha.fullmatch(item[field]):
+    for field, pattern in (("ostree_commit", ostree_sha), ("git_commit", git_sha)):
+        if not isinstance(item.get(field), str) or not pattern.fullmatch(item[field]):
             raise ValueError("Invalid release " + field)
     if not isinstance(item.get("published_at"), str) or not utc.fullmatch(item["published_at"]):
         raise ValueError("Invalid release timestamp")
@@ -205,8 +183,33 @@ Path("moonlight-versions.json").write_text(
     json.dumps(result, indent=2) + "\n", encoding="utf-8")
 print("Preserved %d known Flatpak versions" % len(versions))
 PY
-    rclone_checked copyto moonlight-latest.json "${repo_remote}moonlight-latest.json"
+
+    # Only upload missing immutable OSTree objects. Existing objects use
+    # content-hash paths and are safely reusable across independent builds.
+    # --fast-list avoids per-directory S3 listing round trips.
+    rclone_checked copy repo/objects/ "${repo_remote}objects/" \
+      --ignore-existing --fast-list
+
+    # Upload repository metadata, without duplicating objects or exposing
+    # the new signed summary until all commit objects and refs are present.
+    rclone_checked copy repo/ "$repo_remote" \
+      --fast-list \
+      --exclude '/objects/**' \
+      --exclude '/summary' \
+      --exclude '/summary.sig' \
+      --exclude '/refs/**' \
+      --exclude '/tmp/**' \
+      --exclude '/state/**' \
+      --exclude '*.lock'
+    rclone_checked copy repo/refs/ "${repo_remote}refs/"
+    rclone_checked copyto repo/summary.sig "${repo_remote}summary.sig"
+    rclone_checked copyto repo/summary "${repo_remote}summary"
+    rclone_checked copyto moonlight-fork.flatpakrepo "${repo_remote}moonlight-fork.flatpakrepo"
+
+    # Publish public metadata only after all signed OSTree data is available.
+    # Update the historical catalog first, then switch the latest pointer last.
     rclone_checked copyto moonlight-versions.json "${repo_remote}moonlight-versions.json"
+    rclone_checked copyto moonlight-latest.json "${repo_remote}moonlight-latest.json"
 
     # Public access must be separately enabled on the R2 bucket.
     curl --fail --silent --show-error --location --retry 3 --retry-delay 2 \

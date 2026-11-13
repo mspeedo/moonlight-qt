@@ -33,7 +33,8 @@ constexpr auto kMonitorInterface = "org.freedesktop.portal.Flatpak.UpdateMonitor
 constexpr auto kLatestIndex = "https://pub-3a75f66f021b46f3a095b41d1a3c553b.r2.dev/flatpak/moonlight-latest.json";
 constexpr auto kHistoryIndex = "https://pub-3a75f66f021b46f3a095b41d1a3c553b.r2.dev/flatpak/moonlight-versions.json";
 #endif
-const QRegularExpression kCommitPattern(QStringLiteral("^[a-f0-9]{64}$"));
+const QRegularExpression kOstreeCommitPattern(QStringLiteral("^[a-f0-9]{64}$"));
+const QRegularExpression kGitCommitPattern(QStringLiteral("^[a-f0-9]{40}$"));
 }
 
 FlatpakUpdateManager::FlatpakUpdateManager(QObject* parent)
@@ -134,7 +135,7 @@ void FlatpakUpdateManager::updateVersionLabels()
 bool FlatpakUpdateManager::canInstallVersion(const QString& commit) const
 {
     if (!m_supported || m_installing || m_checking || m_restartRequired ||
-        !kCommitPattern.match(commit).hasMatch() || commit == m_localCommit) {
+        !kOstreeCommitPattern.match(commit).hasMatch() || commit == m_localCommit) {
         return false;
     }
     bool known = false;
@@ -266,8 +267,13 @@ void FlatpakUpdateManager::checkForUpdates()
             setError(tr("R2 returned an invalid Moonlight update index."));
             return;
         }
+        const QString latestGit = json.value(QStringLiteral("git_commit")).toString();
+        if (!kGitCommitPattern.match(latestGit).hasMatch()) {
+            setError(tr("R2 returned an invalid Git commit in the update index."));
+            return;
+        }
         m_latestCommit = commit;
-        m_latestGitCommit = json.value(QStringLiteral("git_commit")).toString();
+        m_latestGitCommit = latestGit;
         m_latestPublishedAt = json.value(QStringLiteral("published_at")).toString();
         m_checking = false;
         updateVersionLabels();
@@ -323,8 +329,8 @@ void FlatpakUpdateManager::checkForUpdates()
             const QString ostree = record.value(QStringLiteral("ostree_commit")).toString();
             const QString git = record.value(QStringLiteral("git_commit")).toString();
             const QString published = record.value(QStringLiteral("published_at")).toString();
-            if (!value.isObject() || !kCommitPattern.match(ostree).hasMatch() ||
-                !kCommitPattern.match(git).hasMatch() || published.isEmpty()) {
+            if (!value.isObject() || !kOstreeCommitPattern.match(ostree).hasMatch() ||
+                !kGitCommitPattern.match(git).hasMatch() || published.isEmpty()) {
                 m_historyError = tr("R2 version history contains an invalid release.");
                 updateVersionLabels();
                 return;
