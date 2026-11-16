@@ -243,7 +243,7 @@ void qtLogToDiskHandler(QtMsgType type, const QMessageLogContext&, const QString
 void ffmpegLogToDiskHandler(void* ptr, int level, const char* fmt, va_list vl)
 {
     char lineBuffer[1024];
-    static int printPrefix = 1;
+    thread_local int printPrefix = 1;
 
     if ((level & 0xFF) > av_log_get_level()) {
         return;
@@ -383,8 +383,12 @@ int SDLCALL signalHandlerThread(void* data)
                     _Exit(1);
                 }
 
-                // If we're not streaming, we'll close the whole app
-                QCoreApplication::instance()->quit();
+                // If we're not streaming, we'll close the whole app on the main thread
+                if (QCoreApplication* app = QCoreApplication::instance()) {
+                    QMetaObject::invokeMethod(app, []() {
+                        QCoreApplication::quit();
+                    }, Qt::QueuedConnection);
+                }
                 requestedQuit = true;
             }
             break;

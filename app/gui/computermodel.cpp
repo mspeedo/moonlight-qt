@@ -22,7 +22,7 @@ QVariant ComputerModel::data(const QModelIndex& index, int role) const
         return QVariant();
     }
 
-    Q_ASSERT(index.row() < m_Computers.count());
+    Q_ASSERT(index.row() >= 0 && index.row() < m_Computers.count());
 
     NvComputer* computer = m_Computers[index.row()];
     QReadLocker lock(&computer->lock);
@@ -142,7 +142,7 @@ QHash<int, QByteArray> ComputerModel::roleNames() const
 
 Session* ComputerModel::createSessionForCurrentGame(int computerIndex)
 {
-    Q_ASSERT(computerIndex < m_Computers.count());
+    Q_ASSERT(computerIndex >= 0 && computerIndex < m_Computers.count());
 
     NvComputer* computer = m_Computers[computerIndex];
 
@@ -162,7 +162,7 @@ Session* ComputerModel::createSessionForCurrentGame(int computerIndex)
 
 void ComputerModel::deleteComputer(int computerIndex)
 {
-    Q_ASSERT(computerIndex < m_Computers.count());
+    Q_ASSERT(computerIndex >= 0 && computerIndex < m_Computers.count());
 
     beginRemoveRows(QModelIndex(), computerIndex, computerIndex);
 
@@ -192,7 +192,7 @@ private:
 
 void ComputerModel::wakeComputer(int computerIndex)
 {
-    Q_ASSERT(computerIndex < m_Computers.count());
+    Q_ASSERT(computerIndex >= 0 && computerIndex < m_Computers.count());
 
     DeferredWakeHostTask* wakeTask = new DeferredWakeHostTask(m_Computers[computerIndex]);
     QThreadPool::globalInstance()->start(wakeTask);
@@ -200,7 +200,7 @@ void ComputerModel::wakeComputer(int computerIndex)
 
 void ComputerModel::renameComputer(int computerIndex, QString name)
 {
-    Q_ASSERT(computerIndex < m_Computers.count());
+    Q_ASSERT(computerIndex >= 0 && computerIndex < m_Computers.count());
 
     m_ComputerManager->renameHost(m_Computers[computerIndex], name);
 }
@@ -241,7 +241,7 @@ void ComputerModel::testConnectionForComputer(int)
 
 void ComputerModel::pairComputer(int computerIndex, QString pin)
 {
-    Q_ASSERT(computerIndex < m_Computers.count());
+    Q_ASSERT(computerIndex >= 0 && computerIndex < m_Computers.count());
 
     m_ComputerManager->pairHost(m_Computers[computerIndex], pin);
 }

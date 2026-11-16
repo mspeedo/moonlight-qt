@@ -36,6 +36,7 @@ Pacer::Pacer(IFFmpegRenderer* renderer, PVIDEO_STATS videoStats) :
     m_VsyncThread(nullptr),
     m_DeferredFreeFrame(nullptr),
     m_Stopping(false),
+    m_VsyncPending(false),
     m_RenderLatestFrame(false),
     m_VsyncSource(nullptr),
     m_VsyncRenderer(renderer),
@@ -48,12 +49,16 @@ Pacer::Pacer(IFFmpegRenderer* renderer, PVIDEO_STATS videoStats) :
 
 Pacer::~Pacer()
 {
-    m_Stopping = true;
+    {
+        QMutexLocker locker(&m_FrameQueueLock);
+        m_Stopping = true;
+        m_PacingQueueNotEmpty.wakeAll();
+        m_VsyncSignalled.wakeAll();
+        m_RenderQueueNotEmpty.wakeAll();
+    }
 
     // Stop the V-sync thread
     if (m_VsyncThread != nullptr) {
-        m_PacingQueueNotEmpty.wakeAll();
-        m_VsyncSignalled.wakeAll();
         SDL_WaitThread(m_VsyncThread, nullptr);
     }
 
@@ -63,7 +68,6 @@ Pacer::~Pacer()
 
     // Stop the render thread
     if (m_RenderThread != nullptr) {
-        m_RenderQueueNotEmpty.wakeAll();
         SDL_WaitThread(m_RenderThread, nullptr);
     }
     else {
@@ -118,11 +122,18 @@ int Pacer::vsyncThread(void *context)
 #endif
 
     bool async = me->m_VsyncSource->isAsync();
-    while (!me->m_Stopping) {
+    for (;;) {
+        bool stopping;
         if (async) {
             // Wait for the VSync source to invoke signalVsync() or 100ms to elapse
             QMutexLocker locker(&me->m_FrameQueueLock);
-            me->m_VsyncSignalled.wait(&me->m_FrameQueueLock, 100);
+            while (!me->m_Stopping && !me->m_VsyncPending) {
+                if (!me->m_VsyncSignalled.wait(&me->m_FrameQueueLock, 100)) {
+                    break;
+                }
+            }
+            me->m_VsyncPending = false;
+            stopping = me->m_Stopping;
         }
         else {
             // Let the VSync source wait in the context of our thread
@@ -133,11 +144,18 @@ int Pacer::vsyncThread(void *context)
                 // this is a synchronous VSync source, but we wait on m_VsyncSignalled
                 // anyway so that the destructor can immediately wake us on shutdown.
                 QMutexLocker locker(&me->m_FrameQueueLock);
-                me->m_VsyncSignalled.wait(&me->m_FrameQueueLock, 1000 / me->m_DisplayFps);
+                if (!me->m_Stopping) {
+                    me->m_VsyncSignalled.wait(&me->m_FrameQueueLock, 1000 / me->m_DisplayFps);
+                }
+                stopping = me->m_Stopping;
+            }
+            else {
+                QMutexLocker locker(&me->m_FrameQueueLock);
+                stopping = me->m_Stopping;
             }
         }
 
-        if (me->m_Stopping) {
+        if (stopping) {
             break;
         }
 
@@ -157,7 +175,7 @@ int Pacer::renderThread(void* context)
                     SDL_GetError());
     }
 
-    while (!me->m_Stopping) {
+    for (;;) {
         // Wait for the renderer to be ready for the next frame
         me->m_VsyncRenderer->waitToRender();
 
@@ -272,7 +290,10 @@ void Pacer::handleVsync(int timeUntilNextVsyncMillis)
 
     if (m_PacingQueue.isEmpty()) {
         // Wait for a frame to arrive or our V-sync timeout to expire
-        if (!m_PacingQueueNotEmpty.wait(&m_FrameQueueLock, SDL_max(timeUntilNextVsyncMillis, TIMER_SLACK_MS) - TIMER_SLACK_MS)) {
+        unsigned long waitTimeMs = timeUntilNextVsyncMillis > 0
+            ? SDL_max(timeUntilNextVsyncMillis - TIMER_SLACK_MS, 1)
+            : 0;
+        if (!m_PacingQueueNotEmpty.wait(&m_FrameQueueLock, waitTimeMs)) {
             // Wait timed out - unlock and bail
             m_FrameQueueLock.unlock();
             return;
@@ -364,6 +385,8 @@ bool Pacer::initialize(SDL_Window* window, int maxVideoFps, bool enablePacing, b
 
 void Pacer::signalVsync()
 {
+    QMutexLocker locker(&m_FrameQueueLock);
+    m_VsyncPending = true;
     m_VsyncSignalled.wakeOne();
 }
 
@@ -458,7 +481,13 @@ void Pacer::dropFrameForEnqueue(QQueue<AVFrame*>& queue)
     SDL_assert(queue.size() <= MAX_QUEUED_FRAMES);
     if (queue.size() == MAX_QUEUED_FRAMES) {
         AVFrame* frame = queue.dequeue();
+
+        // Drop the lock while we call av_frame_free()
+        m_FrameQueueLock.unlock();
+        m_VideoStats->pacerDroppedFrames++;
+        StreamPipelineTelemetry::pacerDrop();
         av_frame_free(&frame);
+        m_FrameQueueLock.lock();
     }
 }
 

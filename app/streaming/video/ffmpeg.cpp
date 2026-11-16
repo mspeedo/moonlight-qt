@@ -1062,10 +1062,11 @@ void FFmpegVideoDecoder::stringifyVideoStats(VIDEO_STATS& stats, char* output, i
 
             // m_BwTracker measures reassembled video payload and excludes FEC packets.
             // Estimate FEC bandwidth from the RTP packet ratio for the lifetime of the stream.
-            const RTP_VIDEO_STATS* rtpVideoStats = LiGetRTPVideoStats();
+            RTP_VIDEO_STATS rtpVideoStats = {};
+            LiGetRTPVideoStats(&rtpVideoStats);
             double fecToVideoRatio = 0.0;
-            if (rtpVideoStats != nullptr && rtpVideoStats->packetCountVideo != 0) {
-                fecToVideoRatio = (double)rtpVideoStats->packetCountFec / rtpVideoStats->packetCountVideo;
+            if (rtpVideoStats.packetCountVideo != 0) {
+                fecToVideoRatio = (double)rtpVideoStats.packetCountFec / rtpVideoStats.packetCountVideo;
             }
             double fecMbps = avgVideoMbps * fecToVideoRatio;
 #endif

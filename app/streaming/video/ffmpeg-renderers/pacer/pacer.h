@@ -69,6 +69,7 @@ private:
     SDL_Thread* m_VsyncThread;
     AVFrame* m_DeferredFreeFrame;
     bool m_Stopping;
+    bool m_VsyncPending;
     bool m_RenderLatestFrame;
 
     IVsyncSource* m_VsyncSource;
