@@ -70,10 +70,12 @@ SOURCES += \
     $$COMMON_C_DIR/src/RtspParser.c \
     $$COMMON_C_DIR/src/SdpGenerator.c \
     $$COMMON_C_DIR/src/SimpleStun.c \
-    $$COMMON_C_DIR/src/VideoDepacketizer.c \
-    $$COMMON_C_DIR/src/VideoStream.c
+    $COMMON_C_DIR/src/VideoDepacketizer.c \
+    $COMMON_C_DIR/src/VideoFormats.c \
+    $COMMON_C_DIR/src/VideoStream.c
 HEADERS += \
-    $$COMMON_C_DIR/src/Limelight.h
+    $COMMON_C_DIR/src/Limelight.h \
+    $COMMON_C_DIR/src/VideoFormats.h
 INCLUDEPATH += \
     $$ENET_DIR/include \
     $$COMMON_C_DIR/src \

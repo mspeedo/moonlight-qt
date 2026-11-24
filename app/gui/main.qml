@@ -51,27 +51,26 @@ ApplicationWindow {
             window.showFullScreen()
         }
 
-        // Display any modal dialogs for configuration warnings
         if (isGuiLaunch) {
-            if (SystemProperties.isWow64) {
-                wow64Dialog.open()
+            // Display any modal dialogs for configuration warnings
+            if (StreamingPreferences.configurationWarnings) {
+                if (SystemProperties.isWow64) {
+                    wow64Dialog.open()
+                }
+
+                // Hardware acceleration and unmapped gamepads are checked asynchronously
+                SystemProperties.hasHardwareAccelerationChanged.connect(hasHardwareAccelerationChanged)
+                SystemProperties.unmappedGamepadsChanged.connect(hasUnmappedGamepadsChanged)
             }
 
-            // Hardware acceleration and unmapped gamepads are checked asynchronously
-            SystemProperties.hasHardwareAccelerationChanged.connect(hasHardwareAccelerationChanged)
-            SystemProperties.unmappedGamepadsChanged.connect(hasUnmappedGamepadsChanged)
+            // Still load other async properties for the SettingsView.
             SystemProperties.startAsyncLoad()
         }
     }
 
     function hasHardwareAccelerationChanged() {
         if (!SystemProperties.hasHardwareAcceleration && StreamingPreferences.videoDecoderSelection !== StreamingPreferences.VDS_FORCE_SOFTWARE) {
-            if (SystemProperties.isRunningXWayland) {
-                xWaylandDialog.open()
-            }
-            else {
-                noHwDecoderDialog.open()
-            }
+            noHwDecoderDialog.open()
         }
     }
 
@@ -494,14 +493,6 @@ ApplicationWindow {
         text: qsTr("No functioning hardware accelerated video decoder was detected by Moonlight. " +
                    "Your streaming performance may be severely degraded in this configuration.")
         helpText: qsTr("Click the Help button for more information on solving this problem.")
-        helpUrl: "https://github.com/moonlight-stream/moonlight-docs/wiki/Fixing-Hardware-Decoding-Problems"
-    }
-
-    ErrorMessageDialog {
-        id: xWaylandDialog
-        text: qsTr("Hardware acceleration doesn't work on XWayland. Continuing on XWayland may result in poor streaming performance. " +
-                   "Try running with QT_QPA_PLATFORM=wayland or switch to X11.")
-        helpText: qsTr("Click the Help button for more information.")
         helpUrl: "https://github.com/moonlight-stream/moonlight-docs/wiki/Fixing-Hardware-Decoding-Problems"
     }
 
